@@ -96,6 +96,21 @@ pub enum EventKind {
         /// The private key, PKCS#8 PEM.
         key_pem: PrivateKeyPem,
     },
+    /// A `circuit_breaker` middleware opened its circuit: it answers without an
+    /// upstream until its fallback is over. Emitted again when a circuit re-opens during recovery.
+    CircuitOpened {
+        /// The app that declares the middleware.
+        app: Box<str>,
+        /// The middleware's name.
+        middleware: Box<str>,
+    },
+    /// A `circuit_breaker` middleware finished its recovery and passes all traffic again.
+    CircuitClosed {
+        /// The app that declares the middleware.
+        app: Box<str>,
+        /// The middleware's name.
+        middleware: Box<str>,
+    },
     /// A TLS handshake named an `on_demand` host without a certificate. Emitted once per host per
     /// pending period, by any node. Approve it by listing the host in `acme.requested_hosts`
     ///; the issuer orders nothing on demand until then.

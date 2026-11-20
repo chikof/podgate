@@ -28,11 +28,13 @@ use serde_json::Value;
 use crate::budget::TenantBudget;
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
+use crate::events::EventFeed;
 use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
+pub mod circuit_breaker;
 pub mod content_type;
 pub mod headers;
 mod path_rewrite;
@@ -78,6 +80,22 @@ pub struct RequestCx<'a> {
     /// Set when the hook answers with a refusal auto-revert must not count
     /// ([`crate::AppError::is_capacity_refusal`]).
     pub capacity_refusal: &'a mut bool,
+    /// The event feed, for a hook that tells the control plane something happened.
+    pub events: &'a EventFeed,
+}
+
+/// What a finished request looks like to [`Kind::finished`].
+#[derive(Debug)]
+pub struct FinishCx<'a> {
+    /// The event feed, for a hook that tells the control plane something happened.
+    pub events: &'a EventFeed,
+    /// The status the client got, when a response was written. `None` for a request the proxy
+    /// refused for capacity ([`crate::AppError::is_capacity_refusal`]): busy is not a verdict on
+    /// the downstream.
+    pub status: Option<u16>,
+    /// The request failed on the upstream side before an answer arrived (refused, reset, timed
+    /// out).
+    pub upstream_error: bool,
 }
 
 /// A middleware type. Every hook has a default that does nothing.
@@ -147,6 +165,11 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     ) -> pingora::Result<()> {
         Ok(())
     }
+
+    /// Runs once when the request is over, in chain order, for every stage of the chain,
+    /// including those a request never reached (an earlier stage answered it): a stage keeps
+    /// in its [`Self::State`] whether it ran.
+    fn finished(&self, _cx: &FinishCx<'_>, _state: &mut Self::State) {}
 
     /// The relaxations a plan must list when `new` replaces `self`, as stable `posture_changes`
     /// kinds; `None` means the stage is gone. Security kinds implement it; the default says
@@ -322,6 +345,21 @@ macro_rules! kinds {
                     _ => Ok(()),
                 }
             }
+
+            fn finished(
+                &self,
+                cx: &$crate::middleware::FinishCx<'_>,
+                state: &mut StageState,
+            ) {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::finished(kind, cx, state)
+                        }
+                    )*
+                    _ => {}
+                }
+            }
         }
     };
     ($($body:tt)*) => {
@@ -362,7 +400,7 @@ kinds! {
 
     "in_flight_req" => unbuilt,
 
-    "circuit_breaker" => unbuilt,
+    "circuit_breaker" => CircuitBreaker(circuit_breaker::CircuitBreaker),
 
     "retry" => unbuilt,
 
@@ -482,6 +520,15 @@ pub fn run_response_body(
         }
     }
     Ok(())
+}
+
+/// Runs the finish hooks of `chain` in order, once the request is over.
+pub fn run_finished(stages: &[Named], chain: &[usize], cx: &FinishCx<'_>, state: &mut State) {
+    for (position, index) in chain.iter().enumerate() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.finished(cx, slot);
+        }
+    }
 }
 
 #[cfg(test)]

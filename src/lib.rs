@@ -145,6 +145,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_wake(wake.clone())
         .with_outcomes(outcomes.clone())
         .with_upstream_policy(upstream_policy.clone())
+        .with_events(events.clone())
         .with_wasm(wasm::Executor::new(
             config.wasm_max_concurrent.get(),
             config.wasm_queue_timeout(),

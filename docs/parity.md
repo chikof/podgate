@@ -96,7 +96,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Rate limit | `rateLimit` | plugin | 0050 (bounded table, per node) |
 | Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | 0094 (Redis-compatible store, per-route `on_store_error: allow` with local fallback, or `deny`) |
 | In-flight request limit | `inFlightReq` | none | 0050 (per node), 0102 (cluster-wide with leases) |
-| Circuit breaker | `circuitBreaker` (expression) | none | 0051 (structured, no expression language) |
+| Circuit breaker | `circuitBreaker` (expression) | none | built: `src/middleware/circuit_breaker.rs`; structured `trip_when`, no expression language; `min_requests` floor |
 | Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | 0052 (memory only, charged) |
 | Compression | `compress` (gzip, brotli, zstd) | `encode` | built (gzip, 0009), 0053 (brotli; zstd only if boundable in pure Rust) |
 | Custom error pages | `errors` | `handle_errors` | 0054 |

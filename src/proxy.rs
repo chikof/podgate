@@ -24,7 +24,8 @@
 //! app woken, so unauthenticated or rate-limited traffic costs the tenant nothing. A request
 //! refused by admission is never recorded as a failure. `response_filter` and
 //! `response_body_filter` run the failure capture first, then compression, then the chain's
-//! response hooks in reverse order. `logging` records the failure first and then releases the
+//! response hooks in reverse order. `logging` records the failure first, then the outcome, then
+//! tells the chain's middlewares the request is over (`Kind::finished`), and then releases the
 //! tenant slot, so the recorder sees the final status the client got. The backend slot is
 //! released when the upstream response ends, before the client has read it all.
 
@@ -35,6 +36,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::Error;
+use pingora::ErrorSource;
 use pingora::ErrorType::{HTTPStatus, InternalError};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::Digest;
@@ -48,6 +50,7 @@ use crate::clientauth;
 use crate::compress::{self, Gzip};
 use crate::entry;
 use crate::error::AppError;
+use crate::events::EventFeed;
 use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
@@ -134,6 +137,7 @@ pub struct Gateway {
     wasm: wasm::Executor,
     upstream_policy: UpstreamPolicy,
     entry_point: Arc<str>,
+    events: EventFeed,
 }
 
 impl Gateway {
@@ -152,6 +156,7 @@ impl Gateway {
             outcomes: Outcomes::new(),
             wasm: wasm::Executor::default(),
             upstream_policy: UpstreamPolicy::builtin(),
+            events: EventFeed::new(),
             backends: Backends::new(),
             entry_point: Arc::from(entry::WEB),
         }
@@ -197,6 +202,14 @@ impl Gateway {
     #[must_use]
     pub fn with_wasm(mut self, wasm: wasm::Executor) -> Self {
         self.wasm = wasm;
+        self
+    }
+
+    /// Reports what middlewares observe (a circuit opening, say) into `events`, the feed the
+    /// admin API serves.
+    #[must_use]
+    pub fn with_events(mut self, events: EventFeed) -> Self {
+        self.events = events;
         self
     }
 
@@ -264,11 +277,36 @@ impl Gateway {
             tenant: tenant.as_ref(),
             executor: &self.wasm,
             capacity_refusal: &mut ctx.capacity_refusal,
+            events: &self.events,
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
         ctx.chain_answered = flow == Flow::Respond;
         Ok(ctx.chain_answered)
+    }
+
+    /// Tells the router's middleware chain the request is over.
+    fn finish_chain(&self, session: &Session, error: Option<&Error>, ctx: &mut Ctx) {
+        let table = Arc::clone(&ctx.table);
+        let Some((app, router)) = ctx.matched.and_then(|matched| table.router(matched)) else {
+            return;
+        };
+        if router.chain().is_empty() {
+            return;
+        }
+        let status = if ctx.capacity_refusal {
+            None
+        } else {
+            session
+                .response_written()
+                .map(|response| response.status.as_u16())
+        };
+        let cx = middleware::FinishCx {
+            events: &self.events,
+            status,
+            upstream_error: error.is_some_and(|err| err.esource == ErrorSource::Upstream),
+        };
+        middleware::run_finished(app.stages(), router.chain(), &cx, &mut ctx.chain);
     }
 }
 
@@ -479,9 +517,10 @@ impl ProxyHttp for Gateway {
         Ok(None)
     }
 
-    async fn logging(&self, session: &mut Session, _error: Option<&Error>, ctx: &mut Ctx) {
+    async fn logging(&self, session: &mut Session, error: Option<&Error>, ctx: &mut Ctx) {
         self.failures.log(session, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
+        self.finish_chain(session, error, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
         ctx.backend.release();

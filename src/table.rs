@@ -444,6 +444,12 @@ impl CompiledApp {
         &self.stages
     }
 
+    /// The compiled middlewares, for the registry that hands a swapped-in table the runtime
+    /// state of equal ones before the table is live.
+    pub(crate) fn stages_mut(&mut self) -> &mut [middleware::Named] {
+        &mut self.stages
+    }
+
     /// The app's own services, shared by every revision.
     #[must_use]
     pub fn services(&self) -> &[service::Named] {
@@ -811,6 +817,8 @@ pub struct TableHandle {
     canaries: Arc<canary::Registry>,
     // Server and balancer state that outlives swaps; touched only by `swap`.
     states: Arc<service::Registry>,
+    // Circuit breaker state that outlives swaps; touched only by `swap`.
+    breakers: Arc<crate::middleware::circuit_breaker::Registry>,
     // The entry points this process bound; fixed for the life of the handle.
     context: Arc<CompileContext>,
 }
@@ -940,6 +948,7 @@ impl TableHandle {
     fn swap(&self, mut table: RoutingTable) {
         self.canaries.settle(&mut table.apps);
         self.states.settle(&mut table.apps);
+        self.breakers.settle(&mut table.apps);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
