@@ -56,6 +56,7 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     }
     chain.push("route");
     chain.push("inflight_admit");
+    chain.push("tenant_admit");
     chain
 }
 
