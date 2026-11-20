@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,21 @@ const ISSUER: &str = "n1";
 /// Longest to wait for one step of the ACME round trip.
 const STEP: Duration = Duration::from_secs(45);
 
+/// Times to start `pebble` before giving up: its ports come from [`free_port`].
+const START_ATTEMPTS: u32 = 5;
+/// Longest one start attempt waits for pebble's ports to open.
+const START_WAIT: Duration = Duration::from_secs(30);
+
+/// Held while a test starts its processes, so the tests of one `cargo test` process (threads)
+/// do not race each other for ports. Starting is serialized; running is not.
+static STARTUP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A `podgate` node called `name`, started under [`STARTUP`].
+async fn node(name: &str) -> Podgate {
+    let _startup = STARTUP.lock().await;
+    Podgate::start_with_env(&[("NODE_NAME", name)]).await
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .expect("bind a free port")
@@ -38,6 +54,7 @@ fn free_port() -> u16 {
 }
 
 /// A private CA that signs the certificate of pebble's own HTTPS listener.
+#[derive(Clone)]
 struct Pki {
     dir: PathBuf,
     ca_pem: PathBuf,
@@ -80,6 +97,11 @@ impl Pki {
             server_key: write("pebble.key", server_key.serialize_pem()),
         }
     }
+
+    /// The text of `name` in the directory, empty when it does not exist.
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.dir.join(name)).unwrap_or_default()
+    }
 }
 
 /// `pebble` and `pebble-challtestsrv`, killed on drop.
@@ -92,7 +114,22 @@ struct Pebble {
 
 impl Pebble {
     /// Starts both, with pebble's HTTP-01 validation pointed at `http_port` on 127.0.0.1.
+    ///
+    /// The ports come from [`free_port`], which another process can take between the probe and
+    /// the bind (and `cargo test` runs these tests as threads of one process), so a process
+    /// that exits at start is retried with fresh ports.
     async fn start(pki: Pki, http_port: u16) -> Self {
+        let mut failures = Vec::new();
+        for attempt in 1..=START_ATTEMPTS {
+            match Self::try_start(pki.clone(), http_port).await {
+                Ok(started) => return started,
+                Err(reason) => failures.push(format!("attempt {attempt}: {reason}")),
+            }
+        }
+        panic!("pebble did not start:\n{}", failures.join("\n"));
+    }
+
+    async fn try_start(pki: Pki, http_port: u16) -> Result<Self, String> {
         let (acme, management, tls_alpn) = (free_port(), free_port(), free_port());
         let (dns, challtest_management) = (free_port(), free_port());
         let config = json!({"pebble": {
@@ -132,7 +169,7 @@ impl Pebble {
                 "",
             ])
             .stdout(log("challtestsrv.log"))
-            .stderr(Stdio::null())
+            .stderr(log("challtestsrv.err"))
             .spawn()
             .expect("spawn pebble-challtestsrv: it must be on PATH (devenv shell)");
         let pebble = Command::new("pebble")
@@ -142,34 +179,50 @@ impl Pebble {
             .env("PEBBLE_VA_NOSLEEP", "1")
             .env("PEBBLE_AUTHZREUSE", "0")
             .stdout(log("pebble.log"))
-            .stderr(Stdio::null())
+            .stderr(log("pebble.err"))
             .spawn()
             .expect("spawn pebble: it must be on PATH (devenv shell)");
-        let this = Self {
+        let mut this = Self {
             children: vec![challtest, pebble],
             directory: format!("https://127.0.0.1:{acme}/dir"),
             management: SocketAddr::from(([127, 0, 0, 1], management)),
             pki,
         };
-        this.wait_until_listening(acme).await;
-        this
+        // On `Err`, dropping `this` kills what is left.
+        this.wait_until_listening(acme).await?;
+        Ok(this)
     }
 
-    async fn wait_until_listening(&self, acme_port: u16) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+    /// `Ok` once both of pebble's ports accept connections; `Err` as soon as either process
+    /// exits, with its exit status and output, or after [`START_WAIT`].
+    async fn wait_until_listening(&mut self, acme_port: u16) -> Result<(), String> {
+        let deadline = Instant::now() + START_WAIT;
         while Instant::now() < deadline {
+            for (child, name) in self.children.iter_mut().zip(["challtestsrv", "pebble"]) {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!(
+                        "{name} exited with {status}\n--- {name}.log\n{}\n--- {name}.err\n{}",
+                        self.pki.read(&format!("{name}.log")),
+                        self.pki.read(&format!("{name}.err")),
+                    ));
+                }
+            }
             let up = TcpStream::connect(("127.0.0.1", acme_port)).await.is_ok()
                 && TcpStream::connect(self.management).await.is_ok();
             if up {
-                return;
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("pebble did not start; log:\n{}", self.log());
+        Err(format!(
+            "no listener after {START_WAIT:?}\n--- pebble.log\n{}\n--- pebble.err\n{}",
+            self.pki.read("pebble.log"),
+            self.pki.read("pebble.err"),
+        ))
     }
 
     fn log(&self) -> String {
-        std::fs::read_to_string(self.pki.dir.join("pebble.log")).unwrap_or_default()
+        self.pki.read("pebble.log")
     }
 
     /// pebble's root certificate, for a client that must trust what pebble issues.
@@ -377,10 +430,12 @@ impl Drop for Setup {
 /// An issuer node called `n1` that trusts pebble's CA, and a running pebble whose HTTP-01
 /// validation hits that node.
 async fn setup() -> Setup {
+    let _startup = STARTUP.lock().await;
+    static DIRS: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "podgate-acme-{}-{}",
         std::process::id(),
-        free_port()
+        DIRS.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let pki = Pki::new(&dir);
@@ -435,7 +490,7 @@ fn trust(der: CertificateDer<'static>) -> TestCert {
 #[tokio::test]
 async fn acme_challenge_event() {
     let setup = setup().await;
-    let other = Podgate::start_with_env(&[("NODE_NAME", "n2")]).await;
+    let other = node("n2").await;
     let apps = vec![setup.acme_app("a", &["a.test"])];
     let mut plane = Plane::new(
         vec![Arc::clone(&setup.issuer), Arc::new(other)],
@@ -466,7 +521,7 @@ async fn acme_challenge_event() {
 #[tokio::test]
 async fn acme_http01_served() {
     let setup = setup().await;
-    let other = Arc::new(Podgate::start_with_env(&[("NODE_NAME", "n2")]).await);
+    let other = Arc::new(node("n2").await);
     let apps = vec![setup.acme_app("a", &["a.test"])];
     let mut plane = Plane::new(
         vec![Arc::clone(&setup.issuer), Arc::clone(&other)],
@@ -760,7 +815,7 @@ async fn on_demand_refuses_unknown() {
 #[tokio::test]
 async fn on_demand_non_issuer_requests() {
     // A node that is not the issuer cannot order: it tells the control plane instead.
-    let node = Arc::new(Podgate::start_with_env(&[("NODE_NAME", "n2")]).await);
+    let node = Arc::new(node("n2").await);
     let upstream = Upstream::start("upstream body").await;
     let mut on_demand = app("p", &["*.preview.test"], &[serving("r1", upstream.addr)]);
     on_demand["tls"]["mode"] = json!("on_demand");
