@@ -41,6 +41,8 @@ Place `cache` after authentication. A hit is answered from the chain's `routed` 
 
 Two chain shapes are refused at compile (`422`, `invalid_middleware`, naming the stage) instead of being skipped on a hit: a `buffering` with `max_response_body_bytes` before the cache (it holds and counts the body as it streams, which a hit does not do: declare it after), and a `headers` with `cors` after the cache (the stored copy would carry the first client's `Access-Control-Allow-Origin`: declare it before).
 
+**With `errors`.** A status an `errors` stage of the chain replaces with a page (in either order) is never stored and never served from the store: a stored entry with such a status (stored before the page was configured, or while the page server was down) is skipped, and the request goes the normal way, where the page replaces the response. The page is not part of any stored response, and a failed page fetch leaves the upstream's response standing for that request only. A `HEAD` is never paged, so it is answered as without `errors`.
+
 ## What is stored, and as what
 
 The entry is the response as the client received it on the miss that stored it: status, headers (without hop-by-hop headers, `Age`, `Content-Length` and the tag header) and body.

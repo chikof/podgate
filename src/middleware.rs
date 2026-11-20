@@ -159,6 +159,10 @@ pub struct RoutedCx<'a> {
     /// The request head as it arrived, before any middleware changed it. Set only when the chain
     /// has a stage that needs it (`cache`, to replay the request as a subrequest).
     pub original: Option<RequestHeader>,
+    /// The statuses an `errors` stage of the chain replaces with a page for this request (none for
+    /// a `HEAD`, which is never paged). A cache must neither store nor serve such a response: the
+    /// page, not the stored copy, is the answer. Filled by [`run_routed`].
+    pub pages: Vec<std::ops::RangeInclusive<u16>>,
 }
 
 /// What a finished request looks like to [`Kind::finished`].
@@ -815,6 +819,7 @@ pub async fn run_routed(
     cx: &mut RoutedCx<'_>,
     state: &mut State,
 ) -> pingora::Result<Flow> {
+    cx.pages = page_statuses(stages, chain, cx.session.req_header());
     cx.original = state.original.take();
     let mut flow = Flow::Continue;
     for (position, index) in chain.iter().enumerate() {
@@ -837,6 +842,25 @@ pub async fn run_routed(
     }
     state.original = cx.original.take();
     Ok(flow)
+}
+
+/// The statuses the `errors` stages of `chain` replace for `request`.
+fn page_statuses(
+    stages: &[Named],
+    chain: &[usize],
+    request: &RequestHeader,
+) -> Vec<std::ops::RangeInclusive<u16>> {
+    if request.method == pingora::http::Method::HEAD {
+        return Vec::new();
+    }
+    chain
+        .iter()
+        .filter_map(|index| match &stages.get(*index)?.stage {
+            Stage::Errors(errors) => Some(errors.statuses().iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// Runs the upstream-request hooks of `chain` on the request head going to the upstream.

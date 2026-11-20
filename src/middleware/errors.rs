@@ -300,6 +300,11 @@ impl Errors {
         self.statuses.iter().any(|range| range.contains(&status))
     }
 
+    /// The statuses this stage replaces with a page.
+    pub(crate) fn statuses(&self) -> &[RangeInclusive<u16>] {
+        &self.statuses
+    }
+
     /// The request target of the page for `status`: the template and three digits, nothing else.
     fn path(&self, status: u16) -> String {
         self.query.replace(STATUS, &format!("{status:03}"))

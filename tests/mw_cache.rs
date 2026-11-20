@@ -1858,3 +1858,113 @@ async fn cache_chain_order_that_would_skip_a_stage_is_refused() {
         assert_eq!(response.status, 200, "{}", response.body);
     }
 }
+
+/// An app with the upstream `upstream`, an error page service `pages` on `pages`, and the chain
+/// `middlewares`.
+fn paged_app(upstream: SocketAddr, pages: SocketAddr, middlewares: &[Value]) -> Value {
+    let mut declared = common::with_chain(
+        app("a", &["a.test"], &[serving("r1", upstream)]),
+        middlewares,
+    );
+    declared["services"] = json!([common::service("pages", &[pages])]);
+    declared
+}
+
+fn errors_stage() -> Value {
+    common::middleware(
+        "e",
+        "errors",
+        json!({ "status": ["404"], "service": "pages" }),
+    )
+}
+
+fn cache_stage() -> Value {
+    common::middleware("c", "cache", json!({}))
+}
+
+#[tokio::test]
+async fn cache_hit_runs_earlier_error_page() {
+    let backend = Backend::start(|seen, _| match seen.path.as_str() {
+        "/gone" => Reply::ok("nope").status(404).fresh(3600),
+        _ => Reply::ok("fine").fresh(3600),
+    })
+    .await;
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let down = Arc::clone(&failing);
+    let pages = Backend::start(move |_, _| {
+        if down.load(Ordering::SeqCst) {
+            Reply::ok("down").status(500)
+        } else {
+            Reply::ok("<h1>page</h1>").with("Content-Type", "text/html")
+        }
+    })
+    .await;
+    // Either order of the two stages: the page is the answer, on a miss and where an entry could
+    // be served.
+    for (round, chain) in [
+        [errors_stage(), cache_stage()],
+        [cache_stage(), errors_stage()],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let podgate = Podgate::start().await;
+        let first = round as u64 * 10;
+        // The app caches without an error page: a 404 is stored and served as a hit.
+        let plain = paged_app(backend.addr, pages.addr, &[cache_stage()]);
+        assert_eq!(
+            podgate
+                .push_snapshot(&snapshot(first + 1, &[plain]))
+                .await
+                .status,
+            200
+        );
+        let before = backend.count_path("/gone");
+        assert_eq!(get(&podgate, "/gone").await.text(), "nope");
+        assert_eq!(get(&podgate, "/gone").await.result(), "hit");
+        // The error page is configured: the stored 404 is not served, the page is.
+        let paged = paged_app(backend.addr, pages.addr, &chain);
+        assert_eq!(
+            podgate
+                .push_snapshot(&snapshot(first + 2, &[paged]))
+                .await
+                .status,
+            200
+        );
+        for _ in 0..2 {
+            let got = get(&podgate, "/gone").await;
+            assert_eq!(
+                (got.status, got.text().as_str()),
+                (404, "<h1>page</h1>"),
+                "round {round}"
+            );
+            assert_ne!(got.result(), "hit", "the page is never a cache hit");
+        }
+        assert_eq!(
+            backend.count_path("/gone") - before,
+            3,
+            "the 404 was fetched each time, never stored again"
+        );
+        // A page that cannot be fetched leaves the 404 standing, and it is not stored either:
+        // when the page server is back, the next request gets the page.
+        failing.store(true, Ordering::SeqCst);
+        let raw = get(&podgate, "/gone").await;
+        assert_eq!(
+            (raw.status, raw.text().as_str()),
+            (404, "nope"),
+            "round {round}"
+        );
+        failing.store(false, Ordering::SeqCst);
+        assert_eq!(
+            get(&podgate, "/gone").await.text(),
+            "<h1>page</h1>",
+            "round {round}"
+        );
+        // Statuses the stage does not page are cached as usual.
+        assert_eq!(get(&podgate, "/ok").await.result(), "miss");
+        assert_eq!(get(&podgate, "/ok").await.result(), "hit");
+        // A HEAD is never paged: it is answered with what the upstream sent.
+        let head = send(podgate.proxy_addr, "HEAD", "a.test", "/gone", &[]).await;
+        assert_eq!(head.status, 404, "round {round}");
+    }
+}

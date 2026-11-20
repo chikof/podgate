@@ -194,6 +194,9 @@ pub struct State {
     fetch: Fetch,
     /// The entry whose validators go to the origin: set in a refresh subrequest.
     confirming: Option<Arc<Entry>>,
+    /// The statuses an `errors` stage of the chain replaces with a page: such a response is
+    /// neither stored nor served from the store, so the page is never skipped.
+    pages: Vec<std::ops::RangeInclusive<u16>>,
 }
 
 /// How a request that may use the cache relates to it.
@@ -306,6 +309,7 @@ impl Kind for Cache {
         state: &mut State,
     ) -> pingora::Result<Flow> {
         *state = State::default();
+        state.pages = std::mem::take(&mut cx.pages);
         if refresh::of(cx.session).is_some() {
             self.begin_refresh(cx, state);
             return Ok(Flow::Continue);
@@ -332,13 +336,16 @@ impl Kind for Cache {
                 Mode::Normal => store.lookup(&key, &cx.session.req_header().headers),
             };
             let entry = match found {
-                Lookup::Hit(entry) => entry,
+                Lookup::Hit(entry) if !paged(&state.pages, entry.head.status.as_u16()) => entry,
                 Lookup::Unkeyable => {
                     cx.cache.count(app, "miss");
                     state.result = Some("miss");
                     return Ok(Flow::Continue);
                 }
-                Lookup::Miss => {
+                // A stored status an `errors` stage pages (stored before it was configured, or
+                // while its page server was down) is not served: the request goes the normal way
+                // and the page replaces the response.
+                Lookup::Hit(_) | Lookup::Miss => {
                     return self
                         .miss(cx, earlier, state, &key, store, tenant, mode, waited)
                         .await;
@@ -789,6 +796,10 @@ impl Cache {
         let Fetch::Leading(leading) = std::mem::take(&mut state.fetch) else {
             return;
         };
+        if paged(&state.pages, head.status.as_u16()) {
+            // Dropping the fetch ends the lead with nothing stored.
+            return;
+        }
         let Leading {
             lead,
             key,
@@ -916,6 +927,11 @@ impl Cache {
         }
         Ok(())
     }
+}
+
+/// Whether `status` is one an `errors` stage of the chain replaces with a page.
+fn paged(pages: &[std::ops::RangeInclusive<u16>], status: u16) -> bool {
+    pages.iter().any(|range| range.contains(&status))
 }
 
 fn text(value: &http::HeaderValue) -> Option<&str> {
