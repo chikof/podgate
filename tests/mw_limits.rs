@@ -53,6 +53,10 @@ async fn connection(mut stream: TcpStream, slow: Duration, hits: Arc<AtomicUsize
             hits.fetch_add(1, Ordering::SeqCst);
             let head = String::from_utf8_lossy(&seen[..end]).into_owned();
             seen.drain(..end + 4);
+            if head.to_ascii_lowercase().contains("upgrade: websocket") {
+                echo_upgraded(stream).await;
+                return;
+            }
             if head.starts_with("GET /slow") {
                 tokio::time::sleep(slow).await;
             }
@@ -65,6 +69,27 @@ async fn connection(mut stream: TcpStream, slow: Duration, hits: Arc<AtomicUsize
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
             Ok(read) => seen.extend_from_slice(&chunk[..read]),
+        }
+    }
+}
+
+/// Answers `101` and then echoes every byte until the peer closes: a WebSocket upstream that
+/// needs no framing.
+async fn echo_upgraded(mut stream: TcpStream) {
+    let reply =
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+    if stream.write_all(reply.as_bytes()).await.is_err() {
+        return;
+    }
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => {
+                if stream.write_all(&buffer[..read]).await.is_err() {
+                    return;
+                }
+            }
         }
     }
 }
@@ -645,6 +670,18 @@ async fn limits_invalid_config_rejected() {
             "in_flight_req",
             json!({"amount": 1, "source": {"cookie": "a"}}),
         ),
+        (
+            "rate_limit",
+            json!({"average": 1, "burst": 1, "source": {"ip": {"ipv6_subnet_bits": 0}}}),
+        ),
+        (
+            "rate_limit",
+            json!({"average": 1, "burst": 1, "source": {"ip": {"ipv6_subnet_bits": 129}}}),
+        ),
+        (
+            "in_flight_req",
+            json!({"amount": 1, "source": {"ip": {"ipv6_subnet": 64}}}),
+        ),
     ];
     for (kind, config) in cases {
         let podgate = Podgate::start().await;
@@ -722,4 +759,116 @@ async fn plan_lists_limit_changes() {
     assert!(kinds(&stricter).is_empty(), "{}", stricter.body);
     let same = plan(&[both(10, 5, 5, json!({"ip": {}}))]).await;
     assert!(kinds(&same).is_empty(), "{}", same.body);
+}
+
+/// A request whose trusted proxy (the test client) says the client is `chain`.
+async fn forwarded(podgate: &Podgate, chain: &str) -> Response {
+    podgate
+        .get_with_headers("a.test", "/", &[("X-Forwarded-For", chain)])
+        .await
+}
+
+async fn trusting_proxy(backend: &Backend, source: Value) -> Podgate {
+    let podgate = Podgate::start().await;
+    let mut pushed = snapshot(1, &[limited(backend.addr, "rate_limit", rate(1, source))]);
+    pushed["entry_points"] =
+        json!([{"name": "web", "forwarded_headers": {"trusted_ips": ["127.0.0.0/8"]}}]);
+    let response = podgate.push_snapshot(&pushed).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    podgate
+}
+
+#[tokio::test]
+async fn rate_limit_ipv6_keyed_by_subnet() {
+    let backend = Backend::start(Duration::ZERO).await;
+
+    let by_default = trusting_proxy(&backend, json!({ "ip": {} })).await;
+    assert_eq!(forwarded(&by_default, "2001:db8:1:2::1").await.status, 200);
+    assert_limited(&forwarded(&by_default, "2001:db8:1:2:ffff:ffff:ffff:ffff").await);
+    assert_eq!(
+        forwarded(&by_default, "2001:db8:1:3::1").await.status,
+        200,
+        "another /64 is another source"
+    );
+    assert_eq!(forwarded(&by_default, "203.0.113.1").await.status, 200);
+    assert_eq!(
+        forwarded(&by_default, "203.0.113.2").await.status,
+        200,
+        "IPv4 addresses are never merged"
+    );
+
+    let wide = trusting_proxy(&backend, json!({ "ip": { "ipv6_subnet_bits": 32 } })).await;
+    assert_eq!(forwarded(&wide, "2001:db8:1::1").await.status, 200);
+    assert_limited(&forwarded(&wide, "2001:db8:ffff::1").await);
+
+    let exact = trusting_proxy(&backend, json!({ "ip": { "ipv6_subnet_bits": 128 } })).await;
+    assert_eq!(forwarded(&exact, "2001:db8:1:2::1").await.status, 200);
+    assert_eq!(
+        forwarded(&exact, "2001:db8:1:2::2").await.status,
+        200,
+        "a full-length prefix counts every address"
+    );
+}
+
+#[tokio::test]
+async fn in_flight_req_held_for_websocket_lifetime() {
+    let backend = Backend::start(Duration::ZERO).await;
+    let podgate = serve(
+        limited(
+            backend.addr,
+            "in_flight_req",
+            json!({ "amount": 1, "source": { "header": "x-api-key" } }),
+        ),
+        None,
+    )
+    .await;
+    let mut socket = TcpStream::connect(podgate.proxy_addr)
+        .await
+        .expect("connect");
+    socket
+        .write_all(
+            b"GET /chat HTTP/1.1\r\nHost: a.test\r\nX-Api-Key: ws\r\nConnection: Upgrade\r\n\
+              Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .expect("send the upgrade");
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 512];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut chunk))
+            .await
+            .expect("the upgrade answers")
+            .expect("read");
+        assert_ne!(read, 0, "closed before the 101: {head:?}");
+        head.extend_from_slice(&chunk[..read]);
+    }
+    assert!(
+        String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&head)
+    );
+    socket
+        .write_all(b"ping")
+        .await
+        .expect("send through the tunnel");
+    let mut echoed = [0_u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut echoed))
+        .await
+        .expect("the echo arrives")
+        .expect("read");
+    assert_eq!(&echoed, b"ping");
+
+    let during = keyed(&podgate, "a.test", "ws").await;
+    assert_eq!(
+        during.status, 429,
+        "the open connection holds the slot: {during:?}"
+    );
+    assert_eq!(keyed(&podgate, "a.test", "other").await.status, 200);
+
+    drop(socket);
+    let after = until_served(&podgate, "ws", Duration::from_secs(5)).await;
+    assert_eq!(
+        after.status, 200,
+        "closing the connection returned the slot: {after:?}"
+    );
 }

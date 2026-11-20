@@ -6,9 +6,10 @@
 //!
 //! A limiter counts per source. [`Source`] turns a request into a 64-bit key:
 //!
-//! - `{"ip": {depth?, excluded?}}`: [`ClientIp::resolve`] over the request's [`ForwardedView`],
-//!   the address the entry point's trust policy allows the request to name. The middleware never
-//!   reads `X-Forwarded-For` itself.
+//! - `{"ip": {depth?, excluded?, ipv6_subnet_bits?}}`: [`ClientIp::resolve`] over the request's
+//!   [`ForwardedView`], the address the entry point's trust policy allows the request to name,
+//!   with an IPv6 client counted by its first `ipv6_subnet_bits` bits (default 64). The
+//!   middleware never reads `X-Forwarded-For` itself.
 //! - `{"header": "<name>"}`: the first value of that request header.
 //! - `{"host": true}`: the host a trusted proxy reported, else the request's own host.
 //!
@@ -27,6 +28,12 @@
 //! source uses the table's one shared overflow value instead. An attacker who invents sources
 //! fills sets and is then limited together, as one source; honest sources that already have an
 //! entry are untouched. The number of requests that took the overflow is a metric.
+//!
+//! The overflow trade-off: a source that finds its set full is limited together with every
+//! other such source, so it can be throttled by sources that are not its own. That limits more,
+//! never less. A flood of distinct sources can therefore throttle innocent clients whose set
+//! it filled; counting IPv6 clients by prefix keeps one network from doing that with its
+//! addresses.
 //!
 //! An entry is reclaimable when it holds nothing a limit still needs (`rate_limit`: the bucket
 //! would be full again; `in_flight_req`: no request is in flight), which the caller states per
@@ -47,6 +54,8 @@ use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
 use std::mem::size_of;
+use std::net::{IpAddr, Ipv6Addr};
+use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
@@ -58,7 +67,7 @@ use serde_json::{Value, json};
 
 use super::{Named, Stage};
 use crate::budget::{BufferGuard, Escaped, TenantBudget};
-use crate::client_ip::{ClientIp, ForwardedView, IpStrategy, normalize};
+use crate::client_ip::{Cidr, ClientIp, ForwardedView, IpStrategy, normalize};
 use crate::compile::{Invalid, Rejected};
 use crate::route::request_host;
 use crate::table::RoutingTable;
@@ -73,18 +82,36 @@ pub(super) const MAX_SOURCES: u32 = 1_000_000;
 /// Most blocks in `source.ip.excluded`: each is tested against every address of the chain.
 const MAX_EXCLUDED: usize = 64;
 
+/// Prefix length an IPv6 client is counted by when `ipv6_subnet_bits` is absent: a client that
+/// owns a /64 has 2^64 addresses, and counting each would let it spread over every set of the
+/// table.
+const DEFAULT_IPV6_SUBNET_BITS: u8 = 64;
+
 /// Entries per set: the most sources that can share one mutex.
 const WAYS: usize = 8;
 
 /// What an absent header or host counts as.
 const ABSENT: &[u8] = b"-";
 
+/// A `source.ip` as written in a snapshot: Traefik's `ipStrategy`, plus the IPv6 prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IpSource {
+    #[serde(default)]
+    depth: Option<NonZeroU16>,
+    #[serde(default)]
+    excluded: Vec<Cidr>,
+    /// Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].
+    #[serde(default)]
+    ipv6_subnet_bits: Option<u8>,
+}
+
 /// A `source` as written in a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SourceConfig {
     /// The client address under an `ipStrategy`.
-    Ip(IpStrategy),
+    Ip(IpSource),
     /// The first value of a request header.
     Header(String),
     /// The host of the request; only `true` is valid.
@@ -95,9 +122,10 @@ impl SourceConfig {
     /// What explain shows.
     pub(super) fn describe(&self) -> Value {
         match self {
-            Self::Ip(strategy) => json!({ "ip": {
-                "depth": strategy.depth,
-                "excluded": strategy.excluded.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            Self::Ip(ip) => json!({ "ip": {
+                "depth": ip.depth,
+                "excluded": ip.excluded.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "ipv6_subnet_bits": ip.ipv6_subnet_bits.unwrap_or(DEFAULT_IPV6_SUBNET_BITS),
             } }),
             Self::Header(name) => json!({ "header": name }),
             Self::Host(on) => json!({ "host": on }),
@@ -108,9 +136,23 @@ impl SourceConfig {
 /// A compiled `source`.
 #[derive(Debug)]
 pub(super) enum Source {
-    Ip(IpStrategy),
+    Ip {
+        strategy: IpStrategy,
+        subnet_bits: u8,
+    },
     Header(HeaderName),
     Host,
+}
+
+/// `addr` as the first address of the `/bits` subnet it belongs to, when it is IPv6.
+fn subnet_of(addr: IpAddr, bits: u8) -> IpAddr {
+    match addr {
+        IpAddr::V6(v6) if bits < 128 => {
+            let mask = u128::MAX << (128 - u32::from(bits));
+            IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+        }
+        _ => addr,
+    }
 }
 
 impl Source {
@@ -121,13 +163,23 @@ impl Source {
     /// The message of what is wrong with it.
     pub(super) fn compile(config: &SourceConfig) -> Result<Self, String> {
         match config {
-            SourceConfig::Ip(strategy) => {
-                if strategy.excluded.len() > MAX_EXCLUDED {
+            SourceConfig::Ip(ip) => {
+                if ip.excluded.len() > MAX_EXCLUDED {
                     return Err(format!(
                         "`source.ip.excluded` has more than {MAX_EXCLUDED} entries"
                     ));
                 }
-                Ok(Self::Ip(strategy.clone()))
+                let subnet_bits = ip.ipv6_subnet_bits.unwrap_or(DEFAULT_IPV6_SUBNET_BITS);
+                if !(1..=128).contains(&subnet_bits) {
+                    return Err("`source.ip.ipv6_subnet_bits` must be 1 to 128".to_owned());
+                }
+                Ok(Self::Ip {
+                    strategy: IpStrategy {
+                        depth: ip.depth,
+                        excluded: ip.excluded.clone(),
+                    },
+                    subnet_bits,
+                })
             }
             SourceConfig::Header(name) => HeaderName::from_bytes(name.as_bytes())
                 .map(Self::Header)
@@ -145,7 +197,13 @@ impl Source {
         view: &ForwardedView,
     ) -> u64 {
         let hash = match self {
-            Self::Ip(strategy) => hasher.hash_one(normalize(ClientIp::resolve(view, strategy))),
+            Self::Ip {
+                strategy,
+                subnet_bits,
+            } => hasher.hash_one(subnet_of(
+                normalize(ClientIp::resolve(view, strategy)),
+                *subnet_bits,
+            )),
             Self::Header(name) => hasher.hash_one(
                 request
                     .headers
@@ -469,6 +527,21 @@ mod test {
     use super::*;
     use crate::budget::Budgets;
     use podgate_model::Budget;
+
+    #[test]
+    fn an_ipv6_address_is_counted_by_its_prefix_and_ipv4_is_not_masked() {
+        let v6 = |text: &str| text.parse::<IpAddr>().expect("address");
+        assert_eq!(
+            subnet_of(v6("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), 64),
+            v6("2001:db8:1:2::")
+        );
+        assert_eq!(
+            subnet_of(v6("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), 128),
+            v6("2001:db8:1:2:aaaa:bbbb:cccc:dddd")
+        );
+        assert_eq!(subnet_of(v6("2001:db8::1"), 1), v6("::"));
+        assert_eq!(subnet_of(v6("203.0.113.9"), 64), v6("203.0.113.9"));
+    }
 
     fn tenant(max_buffer_bytes: u64) -> Arc<TenantBudget> {
         Budgets::new().tenant(
