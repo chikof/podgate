@@ -111,7 +111,9 @@ impl TenantBudget {
         guard
     }
 
-    fn charge(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
+    /// Charges `bytes` and counts nothing on refusal: the caller knows what a refusal means to
+    /// it (`basic_auth` answers `503`).
+    pub(crate) fn charge(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
         let limit = self.max_buffer_bytes.load(Ordering::Relaxed);
         let charged = self
             .buffered

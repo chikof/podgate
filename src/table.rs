@@ -833,6 +833,8 @@ pub struct TableHandle {
     states: Arc<service::Registry>,
     // Circuit breaker state that outlives swaps; touched only by `swap`.
     breakers: Arc<crate::middleware::circuit_breaker::Registry>,
+    // Failure counters and credential cache of `basic_auth`; touched only by `swap`.
+    basic_auth: Arc<middleware::basic_auth::Registry>,
     // The entry points this process bound; fixed for the life of the handle.
     context: Arc<CompileContext>,
 }
@@ -963,6 +965,7 @@ impl TableHandle {
         self.canaries.settle(&mut table.apps);
         self.states.settle(&mut table.apps);
         self.breakers.settle(&mut table.apps);
+        self.basic_auth.settle(&mut table.apps);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);

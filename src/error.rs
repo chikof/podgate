@@ -69,6 +69,10 @@ pub enum AppError {
     /// retry in a second.
     #[error("buffering is over the tenant's budget")]
     BufferingOverBudget,
+    /// A `basic_auth` verification found no worker, tenant share or memory in time: `503`, retry
+    /// in a second. A flood of bad passwords causes it, not a broken deploy.
+    #[error("password verification is busy")]
+    AuthBusy,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -95,7 +99,8 @@ impl AppError {
             | Self::WakeTimeout
             | Self::FilterBusy
             | Self::FilterOverBudget
-            | Self::BufferingOverBudget => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::BufferingOverBudget
+            | Self::AuthBusy => StatusCode::SERVICE_UNAVAILABLE,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -112,7 +117,8 @@ impl AppError {
             | Self::Saturated
             | Self::FilterBusy
             | Self::FilterOverBudget
-            | Self::BufferingOverBudget => Some(1),
+            | Self::BufferingOverBudget
+            | Self::AuthBusy => Some(1),
             Self::WakeTimeout => Some(5),
             _ => None,
         }
@@ -133,6 +139,7 @@ impl AppError {
                 | Self::WakeTimeout
                 | Self::FilterBusy
                 | Self::BufferingOverBudget
+                | Self::AuthBusy
         )
     }
 

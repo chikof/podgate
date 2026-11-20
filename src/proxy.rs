@@ -141,6 +141,7 @@ pub struct Gateway {
     wake: Wake,
     outcomes: Outcomes,
     wasm: wasm::Executor,
+    basic_auth: middleware::basic_auth::Pool,
     upstream_policy: UpstreamPolicy,
     entry_point: Arc<str>,
     events: EventFeed,
@@ -162,6 +163,7 @@ impl Gateway {
             wake: Wake::default(),
             outcomes: Outcomes::new(),
             wasm: wasm::Executor::default(),
+            basic_auth: middleware::basic_auth::Pool::default(),
             upstream_policy: UpstreamPolicy::builtin(),
             events: EventFeed::new(),
             backends: Backends::new(),
@@ -218,6 +220,13 @@ impl Gateway {
     #[must_use]
     pub fn with_events(mut self, events: EventFeed) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Verifies `basic_auth` passwords through `pool`, the executor that bounds their workers.
+    #[must_use]
+    pub fn with_basic_auth(mut self, pool: middleware::basic_auth::Pool) -> Self {
+        self.basic_auth = pool;
         self
     }
 
@@ -293,6 +302,7 @@ impl Gateway {
             executor: &self.wasm,
             capacity_refusal: &mut ctx.capacity_refusal,
             events: &self.events,
+            hashing: &self.basic_auth,
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;

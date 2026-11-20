@@ -60,6 +60,7 @@ const _: () =
 /// | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
+/// | `BASIC_AUTH_MAX_CONCURRENT` | available cores, at most 256 | `basic_auth` password verifications at once, 1..=256; one tenant may hold half of them. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
@@ -81,6 +82,10 @@ pub struct Config {
     /// A filter run waits at most this many milliseconds for a free worker; then the request
     /// answers `503` with `retry-after`.
     pub wasm_queue_timeout_ms: NonZeroU16,
+    /// `basic_auth` password verifications that may run at once, across all tenants. A tenant
+    /// may hold at most half of them; a verification that finds none free within a second
+    /// answers `503` with `retry-after`.
+    pub basic_auth_max_concurrent: NonZeroUsize,
     /// Name of this node, compared with the snapshot's `acme.issuer_node`. Absent: never issues.
     pub node_name: Option<Box<str>>,
     /// PEM file with the root certificate trusted for the ACME server. Absent: platform roots.
@@ -102,11 +107,9 @@ impl Default for Config {
             admin_socket: PathBuf::from("/run/podgate/admin.sock"),
             request_timeout_secs: NonZeroU16::MIN.saturating_add(29),
             log_format: LogFormat::Pretty,
-            wasm_max_concurrent: std::thread::available_parallelism()
-                .ok()
-                .and_then(|cores| NonZeroUsize::new(cores.get().min(WASM_WORKERS_MAX)))
-                .unwrap_or(NonZeroUsize::MIN),
+            wasm_max_concurrent: default_workers(),
             wasm_queue_timeout_ms: NonZeroU16::MIN.saturating_add(999),
+            basic_auth_max_concurrent: default_workers(),
             node_name: None,
             acme_ca_file: None,
             catch_all_tenants: Vec::new(),
@@ -114,6 +117,13 @@ impl Default for Config {
             access_log_file: None,
         }
     }
+}
+
+fn default_workers() -> NonZeroUsize {
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| NonZeroUsize::new(cores.get().min(WASM_WORKERS_MAX)))
+        .unwrap_or(NonZeroUsize::MIN)
 }
 
 fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -275,6 +285,20 @@ impl Config {
             }
             config.wasm_queue_timeout_ms = millis;
         }
+        if let Some(raw) = lookup("BASIC_AUTH_MAX_CONCURRENT") {
+            let workers: NonZeroUsize = raw.trim().parse().map_err(|err| ConfigError {
+                var: "BASIC_AUTH_MAX_CONCURRENT",
+                reason: format!("{raw:?} is not a whole number in 1..={WASM_WORKERS_MAX} ({err})")
+                    .into(),
+            })?;
+            if workers.get() > WASM_WORKERS_MAX {
+                return Err(ConfigError {
+                    var: "BASIC_AUTH_MAX_CONCURRENT",
+                    reason: format!("{workers} is outside 1..={WASM_WORKERS_MAX}").into(),
+                });
+            }
+            config.basic_auth_max_concurrent = workers;
+        }
         let non_empty = |var: &'static str| match lookup(var) {
             Some(raw) if raw.trim().is_empty() => Err(ConfigError {
                 var,
@@ -326,6 +350,7 @@ mod test {
             ("LOG_FORMAT", "JSON"),
             ("WASM_MAX_CONCURRENT", "2"),
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
+            ("BASIC_AUTH_MAX_CONCURRENT", "3"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
@@ -344,6 +369,7 @@ mod test {
                 log_format: LogFormat::Json,
                 wasm_max_concurrent: NonZeroUsize::new(2).expect("2 is not zero"),
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
+                basic_auth_max_concurrent: NonZeroUsize::new(3).expect("3 is not zero"),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
@@ -370,6 +396,8 @@ mod test {
             ("WASM_MAX_CONCURRENT", "many"),
             ("WASM_QUEUE_TIMEOUT_MS", "0"),
             ("WASM_QUEUE_TIMEOUT_MS", "60001"),
+            ("BASIC_AUTH_MAX_CONCURRENT", "0"),
+            ("BASIC_AUTH_MAX_CONCURRENT", "257"),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
             ("UPSTREAM_POLICY_FILE", " "),

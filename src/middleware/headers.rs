@@ -35,7 +35,7 @@ use podgate_model::Declared;
 /// Headers a tenant can neither set nor remove: they frame the message or belong to the
 /// connection, and an upstream that disagrees with the proxy about them is a request smuggling
 /// or response splitting primitive. `Proxy-*` and `:` pseudo headers are refused as well.
-const FORBIDDEN: &[&str] = &[
+pub(super) const FORBIDDEN: &[&str] = &[
     "host",
     "content-length",
     "transfer-encoding",

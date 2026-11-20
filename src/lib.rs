@@ -158,6 +158,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_wasm(wasm::Executor::new(
             config.wasm_max_concurrent.get(),
             config.wasm_queue_timeout(),
+        ))
+        .with_basic_auth(middleware::basic_auth::Pool::new(
+            config.basic_auth_max_concurrent.get(),
+            std::time::Duration::from_secs(1),
         ));
     for point in &config.entry_points {
         let mut proxy = http_proxy_service_with_name(

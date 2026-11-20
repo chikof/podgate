@@ -35,6 +35,7 @@ use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
+pub mod basic_auth;
 pub mod buffering;
 pub mod circuit_breaker;
 pub mod content_type;
@@ -45,6 +46,7 @@ pub mod redirect_regex;
 pub mod redirect_scheme;
 pub mod replace_path;
 pub mod replace_path_regex;
+pub mod state;
 pub mod strip_prefix;
 pub mod strip_prefix_regex;
 pub mod wasm;
@@ -84,6 +86,8 @@ pub struct RequestCx<'a> {
     pub capacity_refusal: &'a mut bool,
     /// The event feed, for a hook that tells the control plane something happened.
     pub events: &'a EventFeed,
+    /// The bounded pool for password verifications (`basic_auth`).
+    pub hashing: &'a basic_auth::Pool,
 }
 
 /// What a finished request looks like to [`Kind::finished`].
@@ -457,7 +461,7 @@ kinds! {
 
     "content_type" => ContentType(content_type::ContentType),
 
-    "basic_auth" => unbuilt,
+    "basic_auth" => BasicAuth(basic_auth::BasicAuth),
 
     "digest_auth" => unbuilt,
 

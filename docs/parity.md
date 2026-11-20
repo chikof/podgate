@@ -89,7 +89,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Custom headers, security headers | `headers` | `header`, `request_header` | built: `src/middleware/headers.rs`; framing headers cannot be set; HSTS only over TLS |
 | CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |
 | Content type sniffing | `contentType` | none | built: never sniffs; `auto_detect: true` refused |
-| Basic auth | `basicAuth` (MD5, SHA1, bcrypt) | `basic_auth` | 0046 (bcrypt and argon2 only; bounded, charged cost) |
+| Basic auth | `basicAuth` (MD5, SHA1, bcrypt) | `basic_auth` | built: `src/middleware/basic_auth.rs`; bcrypt and argon2 only, costs capped; verification bounded by `BASIC_AUTH_MAX_CONCURRENT`, a tenant share and the tenant's `max_buffer_bytes` |
 | Digest auth | `digestAuth` | none | 0047 |
 | Forward auth | `forwardAuth` | `forward_auth` | 0048 (fail closed) |
 | IP allow list | `ipAllowList` | `remote_ip` plus `respond` | 0049 |
