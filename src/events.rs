@@ -65,6 +65,16 @@ pub enum EventKind {
         /// Why the previous snapshot does not compile.
         error: Box<str>,
     },
+    /// The canary of an app breached its `max_error_permille` and was pulled back to
+    /// a share of `0`. Emitted once per canary; only a new snapshot gives it traffic again.
+    CanaryRegressed {
+        /// The app.
+        app: Box<str>,
+        /// The canary revision.
+        revision: Box<str>,
+        /// Its `5xx` per thousand requests over the judged window.
+        error_permille: u64,
+    },
 }
 
 /// One entry of the feed: a sequence number and what happened.

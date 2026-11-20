@@ -8,6 +8,7 @@ use axum::http::{Method, Uri};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::canary;
 use crate::host::{self, MatchKind};
 use crate::proxy;
 use crate::table::RoutingTable;
@@ -75,6 +76,9 @@ pub struct Explanation<'a> {
     declared_by: &'a str,
     matched: Matched,
     revisions: Vec<RevisionView<'a>>,
+    /// The canary policy and its live share; absent when the app has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    canary: Option<canary::Status<'a>>,
     middleware: Vec<&'static str>,
 }
 
@@ -92,7 +96,7 @@ struct RevisionView<'a> {
     /// As configured in the snapshot.
     weight: u16,
     /// What the picker uses for new requests right now: `0` unless the revision is `serving`
-    /// with a positive weight and a backend.
+    /// with a positive weight and a backend. With a canary, parts of 10000 shared by the app.
     effective_weight: u16,
     upstreams: &'a [std::net::SocketAddr],
 }
@@ -142,6 +146,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
                 upstreams: revision.upstreams(),
             })
             .collect(),
+        canary: app.canary(),
         middleware: proxy::middleware_chain(app, target.tls),
     })
 }

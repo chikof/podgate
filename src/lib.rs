@@ -16,6 +16,7 @@
 //!   report drained revisions into it.
 //! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
+//! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
@@ -25,6 +26,7 @@
 
 pub mod admin;
 pub mod budget;
+pub mod canary;
 pub mod compress;
 pub mod config;
 pub mod conflict;
@@ -58,6 +60,7 @@ use tracing_subscriber::EnvFilter;
 
 pub use admin::{AdminService, AppState};
 pub use budget::Budgets;
+pub use canary::CanaryService;
 pub use config::{Config, ConfigError, LogFormat};
 pub use conflict::Conflict;
 pub use error::AppError;
@@ -123,6 +126,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.add_service(background_service(
         "scale to zero",
         WakeService::new(wake, table.clone()),
+    ));
+    server.add_service(background_service(
+        "canary",
+        CanaryService::new(table.clone(), outcomes.clone(), events.clone()),
     ));
     server.add_service(background_service(
         "admin API",

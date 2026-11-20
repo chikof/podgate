@@ -9,6 +9,8 @@
 //! them were `5xx`; the minimum keeps one failure out of one request from reverting a deploy,
 //! and means an app with less traffic than that in the window is never reverted. Apps the
 //! snapshot did not change are not looked at, so an unrelated outage cannot revert a deploy.
+//! While the pushed snapshot gives an app a canary policy ([`crate::canary`]), the `5xx` of the
+//! canary revision do not count: the canary already isolates them and pulls itself back.
 //!
 //! On a trip the previous snapshot is compiled again and goes live ([`TableHandle::revert_to`]),
 //! `config_reverted {from_version, to_version}` goes into the event feed, and
@@ -28,6 +30,7 @@
 //! of a process (no previous snapshot) is never watched, because the only thing to go back to
 //! is an empty table.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -53,6 +56,7 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(500);
 struct Armed {
     generation: u64,
     apps: Vec<Box<str>>,
+    canaries: HashMap<Box<str>, Box<str>>,
     previous: Arc<Snapshot>,
     from_version: u64,
     to_version: u64,
@@ -69,9 +73,22 @@ impl Armed {
         let counts = self
             .apps
             .iter()
-            .map(|app| outcomes.window_at(app, None, span, now))
+            .map(|app| self.counted(outcomes, app, span, now))
             .fold(Counts::default(), |sum, counts| sum + counts);
         counts.total >= MIN_REQUESTS && counts.errors_5xx * 100 > counts.total * MAX_ERROR_PERCENT
+    }
+
+    /// The counts of one watched app, less its canary revision when it has one.
+    fn counted(&self, outcomes: &Outcomes, app: &str, span: Duration, now: Instant) -> Counts {
+        let all = outcomes.window_at(app, None, span, now);
+        let Some(revision) = self.canaries.get(app) else {
+            return all;
+        };
+        let own = outcomes.window_at(app, Some(revision), span, now);
+        Counts {
+            total: all.total.saturating_sub(own.total),
+            errors_5xx: all.errors_5xx.saturating_sub(own.errors_5xx),
+        }
     }
 }
 
@@ -128,6 +145,12 @@ impl Reverter {
             return;
         };
         let apps = plan::changed_apps(&replaced.previous, &replaced.current);
+        // The canary revision of a watched app: its own 5xx do not count (see [`crate::canary`]).
+        let canaries: HashMap<Box<str>, Box<str>> = (0..)
+            .map_while(|index| replaced.current.app(index))
+            .filter(|app| apps.contains(&Box::from(app.id())))
+            .filter_map(|app| Some((app.id().into(), app.canary_policy()?.revision.clone())))
+            .collect();
         if secs == 0 || apps.is_empty() {
             return;
         }
@@ -138,6 +161,7 @@ impl Reverter {
             previous,
             from_version: replaced.current.version(),
             armed_at: Instant::now(),
+            canaries,
             window: Duration::from_secs(secs),
         };
         tokio::spawn(Arc::clone(inner).watch(armed));
@@ -228,6 +252,7 @@ mod test {
             from_version: 2,
             to_version: 1,
             armed_at: Instant::now(),
+            canaries: HashMap::new(),
             window: Duration::from_secs(window_secs),
         }
     }

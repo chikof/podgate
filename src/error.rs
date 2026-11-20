@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::canary;
 use crate::conflict::Conflict;
 use crate::route::RouteError;
 use crate::table::{ApplyError, CompileError};
@@ -125,6 +126,9 @@ fn rejection(err: &CompileError) -> Vec<Value> {
         CompileError::Certificate(_) => other("invalid_certificate"),
         CompileError::SkewSecretTooShort => other("invalid_skew_secret"),
         CompileError::Wasm(rejections) => rejections.iter().map(Rejection::to_json).collect(),
+        CompileError::Canary(rejections) => {
+            rejections.iter().map(canary::Rejection::to_json).collect()
+        }
     }
 }
 

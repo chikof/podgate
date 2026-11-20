@@ -249,6 +249,7 @@ mod test {
             record_bodies: false,
             scale_to_zero: None,
             filters: Vec::new(),
+            canary: None,
         }
     }
 

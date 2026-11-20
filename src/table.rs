@@ -8,13 +8,15 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
 use tokio::sync::watch;
 
+use crate::canary::{self, Runtime};
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
@@ -59,6 +61,9 @@ pub enum CompileError {
     /// rejected filter is listed.
     #[error("{}", wasm::join(.0))]
     Wasm(Vec<wasm::Rejection>),
+    /// A canary policy is unsound. Every rejected policy is listed.
+    #[error("{}", canary::join(.0))]
+    Canary(Vec<canary::Rejection>),
 }
 
 /// Why a snapshot was not applied.
@@ -98,6 +103,7 @@ pub struct CompiledRevision {
     upstreams: Box<[SocketAddr]>,
     weight: u16,
     state: RevisionState,
+    live: AtomicU16,
     next_upstream: AtomicU64,
 }
 
@@ -108,6 +114,7 @@ impl CompiledRevision {
             upstreams: revision.upstreams.clone().into_boxed_slice(),
             weight: revision.weight,
             state: revision.state,
+            live: AtomicU16::new(0),
             next_upstream: AtomicU64::new(0),
         }
     }
@@ -130,15 +137,16 @@ impl CompiledRevision {
         self.weight
     }
 
-    /// The weight [`CompiledApp::pick`] gives this revision right now: the configured weight
-    /// while it takes new requests, `0` otherwise (not `serving`, or no backend).
+    /// The weight [`CompiledApp::pick`] gives this revision right now, the one value the picker
+    /// and `GET /v1/explain` both read; `0` when the revision takes no new requests (not
+    /// `serving`, no weight, or no backend).
+    ///
+    /// Without a canary it is the configured weight. With one it counts in parts of
+    /// [`CANARY_TOTAL_WEIGHT`] shared by the app's revisions, following the canary's share; see
+    /// [`crate::canary`].
     #[must_use]
     pub fn effective_weight(&self) -> u16 {
-        if self.takes_new_requests() {
-            self.weight
-        } else {
-            0
-        }
+        self.live.load(Ordering::Relaxed)
     }
 
     /// The revision's backends.
@@ -150,6 +158,11 @@ impl CompiledRevision {
     /// Whether new requests may be sent here: serving, weighted, and with a backend.
     fn takes_new_requests(&self) -> bool {
         self.state == RevisionState::Serving && self.weight > 0 && !self.upstreams.is_empty()
+    }
+
+    /// Whether the revision is `serving` and has a backend, whatever its weight.
+    fn serving_with_backend(&self) -> bool {
+        self.state == RevisionState::Serving && !self.upstreams.is_empty()
     }
 
     /// The next backend, in turn; `None` without backends.
@@ -189,6 +202,7 @@ pub struct CompiledApp {
     filters_digest: u64,
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
+    canary: Option<Runtime>,
 }
 
 fn filters_digest(filters: &[Filter]) -> u64 {
@@ -201,6 +215,12 @@ fn filters_digest(filters: &[Filter]) -> u64 {
     hasher.finish()
 }
 
+/// What the effective weights of an app's revisions add up to while it has a canary.
+pub const CANARY_TOTAL_WEIGHT: u64 = 10_000;
+
+/// Multiplier that spreads picks over a turn of tickets; a prime above any ticket total.
+const TICKET_STRIDE: u64 = 2_654_435_761;
+
 /// Where [`CompiledApp::pick`] sent a new request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pick {
@@ -212,7 +232,14 @@ pub struct Pick {
 
 impl CompiledApp {
     fn new(app: &App, filters: Box<[CompiledFilter]>) -> Self {
-        Self {
+        let canary = app.canary.as_ref().and_then(|policy| {
+            let index = app
+                .revisions
+                .iter()
+                .position(|rev| rev.id == policy.revision)?;
+            Some(Runtime::new(policy.clone(), index, Instant::now()))
+        });
+        let compiled = Self {
             filters,
             id: app.id.clone(),
             tenant: app.tenant.clone(),
@@ -229,7 +256,81 @@ impl CompiledApp {
                 .collect(),
             filters_digest: filters_digest(&app.filters),
             tls: app.tls.clone(),
+            canary,
+        };
+        compiled.reweigh();
+        compiled
+    }
+
+    /// Computes every revision's [`CompiledRevision::effective_weight`] from its configuration
+    /// and the canary's share. The only place those weights are defined.
+    fn reweigh(&self) {
+        let Some(canary) = &self.canary else {
+            for revision in &self.revisions {
+                let weight = if revision.takes_new_requests() {
+                    revision.weight
+                } else {
+                    0
+                };
+                revision.live.store(weight, Ordering::Relaxed);
+            }
+            return;
+        };
+        let others: u64 = self
+            .revisions
+            .iter()
+            .enumerate()
+            .filter(|(index, revision)| *index != canary.index() && revision.takes_new_requests())
+            .map(|(_, revision)| u64::from(revision.weight))
+            .sum();
+        let share = u64::from(canary.share());
+        let canary_serves = self
+            .revisions
+            .get(canary.index())
+            .is_some_and(CompiledRevision::serving_with_backend);
+        let canary_part = match (canary_serves, others, share) {
+            (false, _, _) | (_, _, 0) => 0,
+            (true, 0, _) => CANARY_TOTAL_WEIGHT,
+            (true, _, share) => share * CANARY_TOTAL_WEIGHT / 100,
+        };
+        let rest = CANARY_TOTAL_WEIGHT - canary_part;
+        for (index, revision) in self.revisions.iter().enumerate() {
+            let part = if index == canary.index() {
+                canary_part
+            } else if revision.takes_new_requests() && rest > 0 {
+                (u64::from(revision.weight) * rest / others).max(1)
+            } else {
+                0
+            };
+            revision
+                .live
+                .store(u16::try_from(part).unwrap_or(u16::MAX), Ordering::Relaxed);
         }
+    }
+
+    /// The canary's runtime state, for [`canary::judge`].
+    pub(crate) fn canary_runtime(&self) -> Option<&Runtime> {
+        self.canary.as_ref()
+    }
+
+    /// Moves the canary to `percent` of new sessions and reweighs the revisions.
+    pub(crate) fn set_canary_share(&self, percent: u8) {
+        if let Some(canary) = &self.canary {
+            canary.set_share(percent);
+            self.reweigh();
+        }
+    }
+
+    /// The canary policy as declared, `None` when the app has none.
+    #[must_use]
+    pub fn canary_policy(&self) -> Option<&crate::snapshot::Canary> {
+        self.canary.as_ref().map(Runtime::policy)
+    }
+
+    /// The canary's policy and where it stands, `None` when the app has none.
+    #[must_use]
+    pub fn canary(&self) -> Option<canary::Status<'_>> {
+        self.canary.as_ref().map(canary::Status::of)
     }
 
     /// The app's WASM request filters, in the order they run.
@@ -304,24 +405,24 @@ impl CompiledApp {
     ///
     /// Only `serving` revisions with a weight and a backend are candidates; `retiring` and
     /// `draining` ones never get new requests here. Revisions share traffic in proportion to
-    /// their weights, backends of one revision take turns.
+    /// their [`CompiledRevision::effective_weight`], backends of one revision take turns.
     #[must_use]
     pub fn pick(&self) -> Option<Pick> {
         let total: u64 = self
             .revisions
             .iter()
-            .filter(|revision| revision.takes_new_requests())
-            .map(|revision| u64::from(revision.weight))
+            .map(|revision| u64::from(revision.effective_weight()))
             .sum();
         if total == 0 {
             return None;
         }
-        let mut ticket = self.next_revision.fetch_add(1, Ordering::Relaxed) % total;
+        // Walking tickets in order would send the first `weight` requests to the first
+        // revision; the stride is coprime to `total`, so every turn of `total` tickets still
+        // visits each ticket exactly once, but interleaved.
+        let turn = self.next_revision.fetch_add(1, Ordering::Relaxed) % total;
+        let mut ticket = turn * (TICKET_STRIDE % total) % total;
         for (index, revision) in self.revisions.iter().enumerate() {
-            if !revision.takes_new_requests() {
-                continue;
-            }
-            let weight = u64::from(revision.weight);
+            let weight = u64::from(revision.effective_weight());
             if ticket < weight {
                 return Some(Pick {
                     revision: index,
@@ -330,7 +431,17 @@ impl CompiledApp {
             }
             ticket -= weight;
         }
-        None
+        // A canary step landed between summing and walking: take the last revision in use.
+        let (index, revision) = self
+            .revisions
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, revision)| revision.effective_weight() > 0)?;
+        Some(Pick {
+            revision: index,
+            upstream: revision.take_upstream()?,
+        })
     }
 
     /// The pick for a session pinned to revision `id`: `serving` or `retiring` revisions with a
@@ -344,6 +455,14 @@ impl CompiledApp {
             .enumerate()
             .find(|(_, revision)| &*revision.id == id)?;
         if revision.state == RevisionState::Draining {
+            return None;
+        }
+        // A regressed canary keeps no session: they fall back to the weighted pick.
+        if self
+            .canary
+            .as_ref()
+            .is_some_and(|canary| canary.index() == index && canary.regressed())
+        {
             return None;
         }
         Some(Pick {
@@ -401,6 +520,10 @@ impl RoutingTable {
         let conflicts = conflict::detect(&snapshot.apps, &claims);
         if !conflicts.is_empty() {
             return Err(CompileError::Conflicts(conflicts));
+        }
+        let unsound: Vec<_> = snapshot.apps.iter().flat_map(canary::validate).collect();
+        if !unsound.is_empty() {
+            return Err(CompileError::Canary(unsound));
         }
         let mut wasm = wasm::Compiler::default();
         let mut filters = Vec::with_capacity(snapshot.apps.len());
@@ -649,6 +772,7 @@ mod test {
             record_bodies: false,
             scale_to_zero: None,
             filters: Vec::new(),
+            canary: None,
         }
     }
 

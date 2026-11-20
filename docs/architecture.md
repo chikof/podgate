@@ -23,6 +23,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/outcomes.rs` | `Outcomes`: response outcomes (total, `5xx`) per (app id, revision id) over a sliding window, recorded in `Gateway::logging` by `record_request`. Read by auto-revert; the canary reads per revision. |
 | `src/plan.rs` | `diff(live, candidate) -> Plan` (added, removed, changed hosts, posture changes) and `changed_apps`: the diff of two compiled tables. |
 | `src/revert.rs` | `Reverter`: after every snapshot push, watches the `5xx` ratio of the apps it changed and restores the previous table on a spike. |
+| `src/canary.rs` | SLO-driven canary: `Canary` policy validation (`canary_*` codes), the live share kept in the compiled table, `judge` (ramp, hold, regress and the `canary_regressed` event) and `CanaryService`, the background ticker. `CompiledApp::reweigh` in `table.rs` is the one place effective weights are defined. |
 | `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`) and the per-request `Ctx`. |
 | `src/respond.rs` | `write_error`: answers a proxied request with an `AppError`. |
 | `src/budget.rs` | `Budgets` (per-tenant registry that survives snapshot swaps), `TenantBudget`, the `TenantSlot` and `BufferGuard` RAII charges, `admit`, and the Prometheus rendering. |
@@ -43,6 +44,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/explain.rs` | End-to-end: `GET /v1/explain` for known, wildcard and unknown hosts, bad queries, and answers that follow a snapshot swap. |
 | `tests/skew.rs` | Skew protection end to end: cookie set and HMAC-signed, `serving` and `retiring` revisions pin, `draining`, removed, tampered and other-app cookies fall back, no cookie without `skew_secret`. |
 | `tests/wake.rs` | Scale to zero through the real binary: one `wake_requested` per cycle, release on snapshot, `503` after `wake_timeout_secs`, `app_idle`, and held requests counting against `max_inflight`. |
+| `tests/canary.rs` | Canary through the real binary: ramp and promotion with the observed traffic split, regression and the single event, explain, rejected policies, reset by a new snapshot, and sessions unpinned from a regressed canary. |
 | `tests/conflict.rs` | End-to-end: conflicting snapshots get a `422` naming every conflict, and the previous snapshot keeps serving. |
 | `tests/pool.rs` | Pool isolation through the real binary with an upstream that numbers its connections: per tenant, app and revision, and NTLM/Negotiate pinning. |
 | `tests/failures.rs` | Failed-request ring, redaction, opt-in bodies, replay and the method guard, with an upstream that returns 5xx on demand. |
@@ -100,6 +102,8 @@ The control plane sends `PUT /v1/snapshot` with a JSON snapshot. Entities:
 
 `Snapshot` also takes an optional `revert_window_secs` (u64, default `60`, `0` turns auto-revert off, values above `300` are treated as `300`); see `## Plan and auto-revert`.
 
+`App` also takes an optional `canary` (`revision`, `step_percent`, `interval_secs`, `max_error_permille`); see `### Canary`.
+
 ### Compile and swap
 
 The snapshot is compiled into an immutable routing table and swapped atomically. Requests in flight keep the table they started with. A rejected snapshot leaves the current one live.
@@ -108,9 +112,21 @@ The snapshot is compiled into an immutable routing table and swapped atomically.
 
 `serving` revisions get new sessions by weight. `retiring` revisions get no new sessions but still serve sessions pinned to them. `draining` revisions get no new requests at all. In-flight requests finish.
 
+### Canary
+
+`App.canary` ramps one `serving` revision up while its own `5xx` rate stays low. The snapshot owns the policy; podgate owns the live share, kept in the compiled table, so every new snapshot (and the recompile of an auto-revert) starts the canary over.
+
+- Weights: the canary gets `share` percent of new, unpinned sessions; the other `serving` revisions with a weight split the rest by their configured weights. The canary's own `weight` is ignored. The share starts at `step_percent`. While an app has a canary, `effective_weight` counts in parts of 10000 shared by its revisions (the canary at 25 percent shows `2500`); the picker and `GET /v1/explain` read the same value. If no other revision takes requests, the canary takes all of them while its share is above `0`.
+- Judging: every `interval_secs` (the first one second after the snapshot goes live) the canary's `5xx` rate comes from `Outcomes::window` for its revision, over the time since the last decision. With fewer than 20 requests the share holds and the window keeps growing. Below `max_error_permille` the share grows by `step_percent` up to `100`, where judging stops (promoted). At or above it the share drops to `0` for good and `canary_regressed {app, revision, error_permille}` is emitted once. Only a new snapshot gives the canary traffic again.
+- Sessions: a regressed canary is refused by skew protection (`pick_pinned`), so sessions pinned to it fall back to the weighted pick and get a fresh cookie.
+- Auto-revert: while the pushed snapshot has a canary policy, the canary revision's `5xx` do not count toward auto-revert of its app; the other revisions still do.
+- Compile: a policy that names no revision, a revision that is not `serving`, a `step_percent` outside `1..=100`, an `interval_secs` of `0`, a `max_error_permille` outside `1..=1000`, or no other serving revision with a weight to share traffic with, is refused with `422` and the codes `canary_revision_missing`, `canary_revision_not_serving`, `canary_step_invalid`, `canary_interval_invalid`, `canary_threshold_invalid` and `canary_no_baseline`, each with `app` and `declared_by`.
+
 ### Event feed
 
 `GET /v1/events?after=<seq>&timeout_secs=<n>` is a long poll. It returns the ordered events with sequence numbers greater than `after`, or an empty list after the timeout. The event kinds are `revision_drained`, `config_reverted`, `canary_regressed`, `wake_requested`, `app_idle`, `acme_challenge` and `certificate_issued`.
+
+`canary_regressed` carries `app`, `revision` and `error_permille` (the canary's `5xx` per thousand requests over the judged window).
 
 `config_reverted` carries `from_version` (the snapshot that was reverted; the live version stays at this number) and `to_version` (the version of the snapshot serving again). `config_revert_failed` carries `from_version`, `to_version` and `error`: a `5xx` spike called for a revert but the previous snapshot no longer compiles (a certificate that expired meanwhile, say); the current table stays live and the change is no longer watched.
 
@@ -121,6 +137,8 @@ Admin API errors are `{"error": "<message>"}`, the same shape `AppError` renders
 Every entry of `conflicts` is an object with a stable `code` and a human `message`. Conflicts between declarations carry the fields documented in `### Snapshot conflicts`; other compile failures use the codes `invalid_host`, `unknown_tenant` and `invalid_certificate`.
 
 WASM filter failures use the codes `wasm_invalid` and `wasm_forbidden_import`; see `### WASM filters`.
+
+Canary policy failures use the codes `canary_revision_missing`, `canary_revision_not_serving`, `canary_step_invalid`, `canary_interval_invalid`, `canary_threshold_invalid` and `canary_no_baseline`; see `### Canary`.
 
 ### Snapshot conflicts
 
@@ -222,7 +240,7 @@ Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects)
 | `POST /v1/snapshot/plan` | Same body as `PUT /v1/snapshot`; applies nothing. `200` with `{"from_version","to_version","added":[...],"removed":[...],"changed":[...],"posture_changes":[{"host","app","kind"}]}` (hosts are declared patterns, sorted); `400`, `409` and `422` exactly as the `PUT` answers the same body, because the plan runs the same version check and compiler. See `## Plan and auto-revert`. |
 | `GET /metrics` | Prometheus text (`text/plain; version=0.0.4`): the per-tenant series listed under `## Memory budgets`. |
 | `GET /v1/events?after=<seq>&timeout_secs=<n>` | Long poll of the event feed. `200 {"boot_id":"...","events":[{"seq":N,"kind":"revision_drained","app":"...","revision":"..."}]}` (other kinds: `{"kind":"wake_requested","app":"..."}`, `{"kind":"app_idle","app":"..."}`): events with `seq` greater than `after` (default `0`), oldest first; an empty list when none arrive within `timeout_secs` (default `0`: answer at once; capped at `REQUEST_TIMEOUT_SECS - 1` so the poll ends before the `408`). `410 {"error":"...","boot_id":"...","oldest":N}` when `after` is older than the 4096-event ring: resync. `400` for a malformed query. Sequence numbers start at `1` and restart with the process; compare `boot_id` to detect a restart. |
-| `GET /v1/explain?url=<url>&method=<m>` | Why a request goes where it goes, read from the live routing table. `url` is absolute `http` or `https` (only scheme and host are read; `https` adds the TLS-only stages); `method` defaults to `GET`. `200 {"version":N,"host":"...","method":"...","app":"...","tenant":"...","declared_by":"...","matched":{"pattern":"*.a.test","kind":"exact"|"wildcard"},"revisions":[{"id":"...","state":"...","weight":W,"effective_weight":E,"upstreams":[...]}],"middleware":["route",...]}`. `effective_weight` is the weight new requests are picked with now: `0` unless the revision is `serving` with a positive weight and a backend. `middleware` is `proxy::middleware_chain`, in the order `request_filter` runs the stages; a stage that cannot act for the app (`sni_check` with `allow_domain_fronting`) is left out. `404 {"error":"not found","nearest_wildcard":"*.a.test"|null}` when no app answers for the host; the nearest wildcard is the declared one whose suffix is the longest suffix of the host, the host itself included (so `a.test` is nearest to `*.a.test`, which never matches it). `400` for a missing or invalid `url` or `method`. Read-only: it picks no backend and moves no counter. |
+| `GET /v1/explain?url=<url>&method=<m>` | Why a request goes where it goes, read from the live routing table. `url` is absolute `http` or `https` (only scheme and host are read; `https` adds the TLS-only stages); `method` defaults to `GET`. `200 {"version":N,"host":"...","method":"...","app":"...","tenant":"...","declared_by":"...","matched":{"pattern":"*.a.test","kind":"exact"|"wildcard"},"revisions":[{"id":"...","state":"...","weight":W,"effective_weight":E,"upstreams":[...]}],"middleware":["route",...]}`. `effective_weight` is the weight new requests are picked with now: `0` unless the revision is `serving` with a positive weight and a backend. An app with a canary adds `"canary":{"revision","share_percent","regressed","step_percent","interval_secs","max_error_permille"}` and its effective weights count in parts of 10000 (`### Canary`). `middleware` is `proxy::middleware_chain`, in the order `request_filter` runs the stages; a stage that cannot act for the app (`sni_check` with `allow_domain_fronting`) is left out. `404 {"error":"not found","nearest_wildcard":"*.a.test"|null}` when no app answers for the host; the nearest wildcard is the declared one whose suffix is the longest suffix of the host, the host itself included (so `a.test` is nearest to `*.a.test`, which never matches it). `400` for a missing or invalid `url` or `method`. Read-only: it picks no backend and moves no counter. |
 | `GET /v1/apps/{app}/failures` | `200 {"failures": [...]}`: the last 100 requests of the app that got a 5xx, newest first (see `### Failed requests`). `404` when the live table has no such app. |
 | `POST /v1/apps/{app}/failures/{id}/replay?revision=<r>[&force=true]` | Re-sends a recorded request to the first upstream of revision `r` in the live table. `200 {"status","headers","body","body_truncated"}` with the upstream's new response, whatever its status; `400` without `revision`; `404` for an unknown app, record or revision; `409` for a method other than `GET` or `HEAD` unless `force=true`; `502` when the upstream cannot be reached; `503` when the revision has no upstream. |
 | anything else | `404 {"error":"not found"}`. |

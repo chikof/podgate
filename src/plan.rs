@@ -77,6 +77,7 @@ fn same_serving(live: &CompiledApp, candidate: &CompiledApp) -> bool {
         && live.tls() == candidate.tls()
         && live.allow_domain_fronting() == candidate.allow_domain_fronting()
         && live.filters_digest() == candidate.filters_digest()
+        && live.canary_policy() == candidate.canary_policy()
         && live.revisions().len() == candidate.revisions().len()
         && live
             .revisions()

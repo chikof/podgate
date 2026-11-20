@@ -84,6 +84,28 @@ pub struct App {
     /// WASM request filters, run in order on the request headers. Absent: none.
     #[serde(default)]
     pub filters: Vec<Filter>,
+    /// Ramp one serving revision up while it stays healthy, and pull it back when it does not
+    ///. Absent: revisions share traffic by their weights.
+    #[serde(default)]
+    pub canary: Option<Canary>,
+}
+
+/// Canary policy of an app: the rollout of one revision, judged by its own `5xx` rate.
+///
+/// The snapshot owns the policy; podgate owns the live share at runtime (see [`crate::canary`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Canary {
+    /// The canary's [`Revision::id`]; it must be `serving`. Its own `weight` is ignored: the
+    /// canary's share replaces it.
+    pub revision: Box<str>,
+    /// Percent of new sessions the canary gains per healthy interval, `1..=100`. It is also the
+    /// share the canary starts with.
+    pub step_percent: u32,
+    /// Seconds between two judgments, at least `1`.
+    pub interval_secs: u64,
+    /// At this many `5xx` per thousand requests of the canary, or more, it is pulled back to
+    /// `0`. `1..=1000`.
+    pub max_error_permille: u32,
 }
 
 /// Scale-to-zero policy of an app.
