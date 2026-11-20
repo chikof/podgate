@@ -160,6 +160,7 @@ impl AppError {
             Self::Saturated => "backend_saturated",
             Self::WakeTimeout => "wake_timeout",
             Self::FilterBusy => "filter_busy",
+            Self::AuthBusy => "auth_busy",
             Self::Unavailable(_) => "no_upstream",
             Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
         }
