@@ -168,7 +168,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
 | Access log (fields, filters, JSON and CLF) | `accessLog` | `log` | built (query and headers dropped by default, credential headers redacted, never blocks a request) |
-| Prometheus metrics per entry point, router, service | `metrics.prometheus` | `metrics` | 0066 (separate metrics listener, cardinality caps) |
+| Prometheus metrics per entry point, router, service | `metrics.prometheus` | `metrics` | built (separate metrics listener, cardinality caps) |
 | OpenTelemetry tracing | `tracing.otlp` | `tracing` | 0067 (OTLP over HTTP), 0112 (OTLP over gRPC) |
 | Health endpoint | `ping` | none | built (`/healthz`, `/readyz` on the admin socket) |
 | JSON schema of the configuration | none | `caddy adapt`, JSON docs | 0068 (`GET /v1/schema`) |
