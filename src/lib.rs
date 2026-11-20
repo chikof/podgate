@@ -15,6 +15,7 @@
 //!   report drained revisions into it.
 //! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
 //! - [`admin`]: the admin API router and its background service.
+//! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -26,6 +27,7 @@ pub mod conflict;
 pub mod error;
 pub mod events;
 pub mod explain;
+pub mod failures;
 pub mod host;
 pub mod inflight;
 pub mod pool;
@@ -51,6 +53,7 @@ pub use config::{Config, ConfigError, LogFormat};
 pub use conflict::Conflict;
 pub use error::AppError;
 pub use events::{Event, EventFeed, EventKind};
+pub use failures::Failures;
 pub use inflight::{Inflight, InflightGuard};
 pub use proxy::{Ctx, Gateway};
 pub use snapshot::Snapshot;
@@ -84,9 +87,12 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let mut server = Server::new_with_opt_and_conf(None::<Opt>, server_conf);
     server.bootstrap();
 
+    let failures = Failures::new();
     let mut proxy = http_proxy_service(
         &server.configuration,
-        Gateway::new(table.clone(), inflight.clone(), timeout).with_budgets(budgets.clone()),
+        Gateway::new(table.clone(), inflight.clone(), timeout)
+            .with_budgets(budgets.clone())
+            .with_failures(failures.clone()),
     );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {
@@ -99,7 +105,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         "admin API",
         AdminService::new(
             admin_listener,
-            AppState::new(table, events, inflight).with_budgets(budgets),
+            AppState::new(table, events, inflight)
+                .with_budgets(budgets)
+                .with_failures(failures),
             timeout,
         ),
     ));

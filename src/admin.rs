@@ -8,6 +8,7 @@
 
 mod events;
 mod explain;
+mod failures;
 mod health;
 mod metrics;
 mod snapshot;
@@ -33,6 +34,7 @@ use tower_http::trace::TraceLayer;
 use crate::budget::Budgets;
 use crate::error::AppError;
 use crate::events::EventFeed;
+use crate::failures::Failures;
 use crate::inflight::Inflight;
 use crate::table::TableHandle;
 
@@ -44,6 +46,7 @@ pub struct AppState {
     events: EventFeed,
     inflight: Inflight,
     budgets: Budgets,
+    failures: Failures,
 }
 
 impl AppState {
@@ -56,6 +59,7 @@ impl AppState {
             events,
             inflight,
             budgets: Budgets::new(),
+            failures: Failures::new(),
         }
     }
 
@@ -100,6 +104,19 @@ impl AppState {
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
     }
+
+    /// Reads failed requests from `failures`, the recorder the proxy shares.
+    #[must_use]
+    pub fn with_failures(mut self, failures: Failures) -> Self {
+        self.failures = failures;
+        self
+    }
+
+    /// The failed-request recorder `GET /v1/apps/{app}/failures` serves.
+    #[must_use]
+    pub fn failures(&self) -> &Failures {
+        &self.failures
+    }
 }
 
 async fn not_found() -> AppError {
@@ -109,7 +126,8 @@ async fn not_found() -> AppError {
 /// Builds the router with all routes and middleware.
 ///
 /// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`,
-/// `GET /v1/explain`; anything else is a JSON 404.
+/// `GET /v1/explain`, `GET /v1/apps/{app}/failures`, `POST /v1/apps/{app}/failures/{id}/replay`;
+/// anything else is a JSON 404.
 ///
 /// Middleware, outermost first:
 ///
@@ -126,6 +144,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(snapshot::routes())
         .merge(events::routes())
         .merge(explain::routes())
+        .merge(failures::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)

@@ -33,14 +33,20 @@ async fn explain_known_host() {
                 {"id": "r1", "state": "draining", "weight": 30, "effective_weight": 0, "upstreams": [old.addr.to_string()]},
                 {"id": "r2", "state": "serving", "weight": 70, "effective_weight": 70, "upstreams": [new.addr.to_string()]},
             ],
-            "middleware": ["route", "inflight_admit", "tenant_admit"],
+            "middleware": ["route", "inflight_admit", "tenant_admit", "failure_capture"],
         })
     );
 
     let tls = podgate.admin_get("/v1/explain?url=https://a.test/").await;
     assert_eq!(
         tls.json()["middleware"],
-        json!(["sni_check", "route", "inflight_admit", "tenant_admit"])
+        json!([
+            "sni_check",
+            "route",
+            "inflight_admit",
+            "tenant_admit",
+            "failure_capture"
+        ])
     );
     assert_eq!(tls.json()["method"], "GET");
 

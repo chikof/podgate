@@ -26,5 +26,6 @@ async fn put_snapshot(State(state): State<AppState>, body: Bytes) -> Result<Json
         .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
     state.table().apply(&snapshot)?;
     state.inflight().sync(&state.table().load());
+    state.failures().retain_apps(&state.table().load());
     Ok(Json(json!({ "version": snapshot.version })))
 }

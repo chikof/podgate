@@ -11,6 +11,14 @@
 //!
 //! Core host routing is `route.rs`; this file never matches hosts or picks backends itself.
 //!
+//! # Callback order
+//!
+//! `request_filter` runs SNI, route, in-flight admission, tenant admission, then starts the
+//! failure capture, so a request refused earlier is never recorded. `response_filter` and
+//! `response_body_filter` run the failure capture first, then compression, so a recorded failure
+//! shows the upstream's headers and uncompressed body. `logging` records the failure first and
+//! then releases the tenant slot, so the recorder sees the final status the client got.
+//!
 //! # The middleware chain
 //!
 //! [`middleware_chain`] lists, in order, the request-path stages [`Gateway::request_filter`]
@@ -33,6 +41,7 @@ use pingora::upstreams::peer::HttpPeer;
 use crate::budget::{self, Budgets, TenantSlot};
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
+use crate::failures::{self, Failures};
 use crate::inflight::{Inflight, InflightGuard};
 use crate::pool;
 use crate::respond;
@@ -58,6 +67,7 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     chain.push("route");
     chain.push("inflight_admit");
     chain.push("tenant_admit");
+    chain.push("failure_capture");
     chain
 }
 
@@ -82,6 +92,8 @@ pub struct Ctx {
     pub compression: Option<Gzip>,
     /// Pool partition state of the downstream connection, see [`pool`].
     pub pool: pool::State,
+    /// Failed-request capture, begun by `request_filter` for a routed request.
+    pub failures: failures::Capture,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -91,6 +103,7 @@ pub struct Gateway {
     inflight: Inflight,
     upstream_timeout: Duration,
     budgets: Budgets,
+    failures: Failures,
 }
 
 impl Gateway {
@@ -104,6 +117,7 @@ impl Gateway {
             inflight,
             upstream_timeout,
             budgets: Budgets::new(),
+            failures: Failures::new(),
         }
     }
 
@@ -111,6 +125,13 @@ impl Gateway {
     #[must_use]
     pub fn with_budgets(mut self, budgets: Budgets) -> Self {
         self.budgets = budgets;
+        self
+    }
+
+    /// Records failed requests into `failures`, the recorder the admin API shares.
+    #[must_use]
+    pub fn with_failures(mut self, failures: Failures) -> Self {
+        self.failures = failures;
         self
     }
 }
@@ -127,6 +148,7 @@ impl ProxyHttp for Gateway {
             tenant_slot: None,
             compression: None,
             pool: pool::State::default(),
+            failures: failures::Capture::default(),
         }
     }
 
@@ -155,6 +177,11 @@ impl ProxyHttp for Gateway {
                 }
                 ctx.route = Some(selected);
                 ctx.inflight = Some(guard);
+                let keep_bodies = ctx
+                    .table
+                    .app(selected.app)
+                    .is_some_and(CompiledApp::record_bodies);
+                ctx.failures.begin(keep_bodies);
                 return Ok(false);
             }
             // The revision drained after this request loaded its table: route again with the
@@ -174,6 +201,7 @@ impl ProxyHttp for Gateway {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
+        ctx.failures.upstream_response(upstream_response);
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         if let Some(slot) = &ctx.tenant_slot {
             ctx.compression =
@@ -189,12 +217,14 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora::Result<Option<Duration>> {
+        ctx.failures.response_chunk(body.as_ref());
         compress::filter(&mut ctx.compression, body, end_of_stream)
             .map_err(|err| Error::because(InternalError, "gzip encoding failed", err))?;
         Ok(None)
     }
 
-    async fn logging(&self, _session: &mut Session, _error: Option<&Error>, ctx: &mut Ctx) {
+    async fn logging(&self, session: &mut Session, _error: Option<&Error>, ctx: &mut Ctx) {
+        self.failures.log(session, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
     }
@@ -233,5 +263,16 @@ impl ProxyHttp for Gateway {
         prev_ctx: Box<dyn Any + Send + Sync>,
     ) {
         pool::restore(&mut ctx.pool, prev_ctx);
+    }
+
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        ctx.failures.request_chunk(body.as_ref());
+        Ok(())
     }
 }

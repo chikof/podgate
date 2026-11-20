@@ -69,6 +69,10 @@ pub struct App {
     /// with `421`.
     #[serde(default)]
     pub allow_domain_fronting: bool,
+    /// Keep request and response bodies (up to 64 KiB) of failed requests for replay.
+    /// Absent: record headers only.
+    #[serde(default)]
+    pub record_bodies: bool,
 }
 
 /// How an app gets certificates, plus optional client authentication.

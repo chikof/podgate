@@ -159,6 +159,7 @@ pub struct CompiledApp {
     tenant: Box<str>,
     declared_by: Box<str>,
     allow_domain_fronting: bool,
+    record_bodies: bool,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
 }
@@ -179,6 +180,7 @@ impl CompiledApp {
             tenant: app.tenant.clone(),
             declared_by: app.declared_by.clone(),
             allow_domain_fronting: app.allow_domain_fronting,
+            record_bodies: app.record_bodies,
             revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
             next_revision: AtomicU64::new(0),
         }
@@ -188,6 +190,12 @@ impl CompiledApp {
     #[must_use]
     pub fn allow_domain_fronting(&self) -> bool {
         self.allow_domain_fronting
+    }
+
+    /// Whether failed requests keep their bodies for replay.
+    #[must_use]
+    pub fn record_bodies(&self) -> bool {
+        self.record_bodies
     }
 
     /// The app id.
@@ -469,6 +477,7 @@ mod test {
             },
             revisions,
             allow_domain_fronting: false,
+            record_bodies: false,
         }
     }
 
