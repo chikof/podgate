@@ -49,9 +49,10 @@ never ignored.
 ## Defaults
 
 - A server named `https://` with no `transport`, or a transport with no `server_name`, uses the
-  URL host. Today the host is always an IP literal (servers by DNS name are
-  `dns_upstream_not_built`): **no SNI is sent**, and the certificate must carry the IP as a SAN.
-  Verification is on: it is never skipped for lack of a name.
+  URL host. For a host name (`https://app.internal:8443`, see `docs/ref/dns-resolver.md`) the name
+  is the SNI and the name the certificate is verified against, while the connection goes to the
+  address the name resolved to. For an IP literal **no SNI is sent**, and the certificate must
+  carry the IP as a SAN. Verification is on: it is never skipped for lack of a name.
 - With neither `ca_pem` nor `insecure_skip_verify`, the server certificate is verified against the
   platform roots (`SSL_CERT_FILE` and `SSL_CERT_DIR` count, as in Pingora).
 - `http://` and `h2c://` servers ignore transports with no TLS fields. A transport that sets any
