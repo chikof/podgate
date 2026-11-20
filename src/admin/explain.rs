@@ -1,5 +1,7 @@
 //! `GET /v1/explain`: why a request goes where it goes.
 
+use std::net::IpAddr;
+
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -24,6 +26,8 @@ struct Params {
     method: Option<String>,
     /// The entry point the request arrives on. Absent: `web` for `http`, `websecure` for `https`.
     entry_point: Option<String>,
+    /// The resolved client address to match `client_ip` routers against. Absent: none matches.
+    client_ip: Option<IpAddr>,
 }
 
 /// `200` with the app, tenant, declaring source, matched router, the routers it shadows, the
@@ -42,6 +46,10 @@ async fn get_explain(
         params.entry_point.as_deref(),
     )
     .map_err(|err| AppError::BadRequest(err.to_string().into()))?;
+    let target = match params.client_ip {
+        Some(client_ip) => target.with_client_ip(client_ip),
+        None => target,
+    };
     let table = state.table().load();
     Ok(match explain::explain(&table, &target) {
         Ok(explanation) => Json(explanation).into_response(),

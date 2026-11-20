@@ -14,7 +14,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Per-router entry point list | `entryPoints` on a router | site address | 0028; unbound names rejected |
 | Per-tenant entry point access | none | none | 0028 |
 | TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 (parse), 0058, 0062 |
-| Forwarded-header trust | `forwardedHeaders.trustedIPs`, `insecure` | `trusted_proxies`, `client_ip_headers` | 0026 |
+| Forwarded-header trust | `forwardedHeaders.trustedIPs`, `insecure` | `trusted_proxies`, `client_ip_headers` | built: `forwarded_headers {trusted_ips, insecure}` per entry point; untrusted peers' headers are removed |
 | `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | 0097 (Traefik's set minus `-Server`, which is opt-in; found missing by the 0020 benchmark) |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | 0030 |
@@ -35,7 +35,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Method | `Method` | `method` | built |
 | Header, header regexp | `Header`, `HeaderRegexp` | `header`, `header_regexp` | 0025 |
 | Query, query regexp | `Query`, `QueryRegexp` | `query` | 0025 |
-| Client IP | `ClientIP` (peer) | `remote_ip`, `client_ip` | 0026 (`client_ip` resolves through trusted proxies) |
+| Client IP | `ClientIP` (peer) | `remote_ip`, `client_ip` | built: `client_ip` resolves through the entry point's trusted proxies, IPv4-mapped normalized |
 | Boolean combination | `&&`, `||`, `!` in a rule string | `not`, named matchers | model (`all`, `any`, `not`), 0022; rule strings are translated by 0071 |
 | Explicit priority | `priority` | route order | 0022 (within a tenant); Traefik's order reproduced by 0071 |
 | Ambiguity detection | none | none | 0022 (`route_ambiguity`) |

@@ -17,7 +17,7 @@
 //! # Callback order
 //!
 //! `request_filter` runs, in this order (`GET /v1/explain` reports it, see [`crate::pipeline`]):
-//! the ACME challenge answer, path normalization, the route match, the SNI check, the failure
+//! the ACME challenge answer, path normalization and the forwarded-header view, the route match, the SNI check, the failure
 //! capture start, the router's middleware chain, then the backend selection (where a request for
 //! a sleeping app waits), in-flight admission, tenant admission and backend admission (where a
 //! request waits when its upstream is at its limit). The chain runs before any slot is taken or
@@ -43,6 +43,7 @@ use pingora::upstreams::peer::HttpPeer;
 
 use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
+use crate::client_ip::ForwardedView;
 use crate::clientauth;
 use crate::compress::{self, Gzip};
 use crate::entry;
@@ -77,6 +78,9 @@ pub struct Ctx {
     pub table: Arc<RoutingTable>,
     /// The router the request matched, set by `request_filter`. Indices into `table`.
     pub matched: Option<Matched>,
+    /// Who the client is and what scheme and host it used, decided in the stage that normalizes
+    /// the path: forged inbound forwarding headers are already gone (see [`crate::client_ip`]).
+    pub forwarded: ForwardedView,
     /// The routing decision, set by `request_filter` once a revision and backend are chosen and
     /// every admission passed.
     pub route: Option<Selected>,
@@ -257,6 +261,7 @@ impl ProxyHttp for Gateway {
         Ctx {
             table: self.table.load(),
             matched: None,
+            forwarded: ForwardedView::default(),
             route: None,
             chain: middleware::State::default(),
             chain_answered: false,
@@ -283,7 +288,14 @@ impl ProxyHttp for Gateway {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
-        let found = route::matching(&ctx.table, session.req_header(), entry::of(tls), tls);
+        ctx.forwarded = ForwardedView::of(session, tls, ctx.table.forwarded_trust(entry::of(tls)));
+        let found = route::matching(
+            &ctx.table,
+            session.req_header(),
+            entry::of(tls),
+            tls,
+            ctx.forwarded.known_client(),
+        );
         // Right after matching and before anything answers: a misdirected request gets `421`
         // whether or not a router matched, and the matched app decides fronting.
         if let Err(err) = sni::check(session, &ctx.table, found) {

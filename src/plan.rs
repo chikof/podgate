@@ -33,6 +33,10 @@ pub mod kind {
     pub const ON_DEMAND_TLS_ENABLED: &str = "on_demand_tls_enabled";
 }
 
+/// What stands in the `host` of a [`PostureChange`] that is about an entry point, followed by its
+/// name (`entry_point:web`); its `app` is empty.
+pub const ENTRY_POINT_PREFIX: &str = "entry_point:";
+
 /// One relaxation, for one host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PostureChange {
@@ -150,6 +154,17 @@ pub fn diff(live: &RoutingTable, candidate: &RoutingTable) -> Plan {
                         kind,
                     }),
             );
+    }
+    let mut entry_points: Vec<_> = candidate.forwarded_trusts().collect();
+    entry_points.sort_unstable_by_key(|(name, _)| *name);
+    for (name, trust) in entry_points {
+        if let Some(kind) = trust.relaxation(live.forwarded_trust(name)) {
+            plan.posture_changes.push(PostureChange {
+                host: format!("{ENTRY_POINT_PREFIX}{name}").into(),
+                app: "".into(),
+                kind,
+            });
+        }
     }
     plan
 }

@@ -5,6 +5,8 @@
 //! parses a snapshot. It only reads: it does not pick a backend, so it does not advance any
 //! round-robin or counter.
 
+use std::net::IpAddr;
+
 use axum::http::{Method, Uri};
 use pingora::http::RequestHeader;
 use serde::Serialize;
@@ -26,6 +28,7 @@ pub struct Target {
     tls: bool,
     method: Method,
     entry_point: Option<String>,
+    client_ip: Option<IpAddr>,
 }
 
 /// A `url` or `method` that cannot be explained.
@@ -86,7 +89,16 @@ impl Target {
             tls,
             method,
             entry_point: entry_point.map(str::to_owned),
+            client_ip: None,
         })
+    }
+
+    /// Asks as a client at `client_ip` (already resolved, as the proxy would after trusting its
+    /// proxies), so routers with a `client_ip` matcher can match. Without it none does.
+    #[must_use]
+    pub fn with_client_ip(mut self, client_ip: IpAddr) -> Self {
+        self.client_ip = Some(crate::client_ip::normalize(client_ip));
+        self
     }
 
     fn entry_point(&self) -> &str {
@@ -196,6 +208,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
         entry_point: target.entry_point(),
         tls: target.tls,
         request: &request,
+        client_ip: target.client_ip,
     };
     let candidates = table.index().find_all(table.apps(), &view);
     let best = candidates.first().ok_or_else(miss)?;

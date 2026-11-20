@@ -5,7 +5,7 @@
 //! things: `parse`, `matches`, its contribution to the specificity ([`Spec`]), and `claims` (a
 //! host leaf says which hosts the router is for). [`disjoint`] says when two matchers can
 //! never both match, which the ambiguity check needs. Leaves of the planned set that no spec has
-//! built yet (`header`, `header_regexp`, `query`, `query_regexp`, `client_ip`) are refused with
+//! built yet (`header`, `header_regexp`, `query`, `query_regexp`) are refused with
 //! `matcher_not_built`; a key that is not planned is `invalid_matcher`.
 //!
 //! Adding a leaf: a file in this directory with the four functions, one variant in [`Matcher`],
@@ -13,12 +13,14 @@
 //! `UNBUILT`.
 
 use std::fmt;
+use std::net::IpAddr;
 
 use pingora::http::RequestHeader;
 use serde_json::Value;
 
 use crate::host::HostPattern;
 
+mod client_ip;
 mod combinator;
 mod host;
 mod host_regexp;
@@ -27,6 +29,7 @@ mod path;
 mod path_prefix;
 mod path_regexp;
 
+use client_ip::ClientIp;
 use host::Host;
 use host_regexp::HostRegexp;
 use method::Method;
@@ -41,13 +44,7 @@ pub const MAX_DEPTH: usize = 8;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Leaves that are planned and not built: refused with `matcher_not_built`.
-const UNBUILT: [&str; 5] = [
-    "header",
-    "header_regexp",
-    "query",
-    "query_regexp",
-    "client_ip",
-];
+const UNBUILT: [&str; 4] = ["header", "header_regexp", "query", "query_regexp"];
 
 /// Why a matcher is refused: a stable code and a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +83,9 @@ pub struct View<'a> {
     pub tls: bool,
     /// The request head: method, headers, query.
     pub request: &'a RequestHeader,
+    /// The resolved client address (see [`crate::client_ip`]); `None` when it is not known, which
+    /// no `client_ip` leaf matches.
+    pub client_ip: Option<IpAddr>,
 }
 
 /// A host a router is for.
@@ -122,6 +122,8 @@ pub enum Matcher {
     PathRegexp(PathRegexp),
     /// `method`
     Method(Method),
+    /// `client_ip`
+    ClientIp(ClientIp),
     /// `all`: every child matches.
     All(Vec<Matcher>),
     /// `any`: some child matches.
@@ -163,6 +165,7 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
         "path_prefix" => Matcher::PathPrefix(PathPrefix::parse(argument)?),
         "path_regexp" => Matcher::PathRegexp(PathRegexp::parse(argument)?),
         "method" => Matcher::Method(Method::parse(argument)?),
+        "client_ip" => Matcher::ClientIp(ClientIp::parse(argument)?),
         "all" => Matcher::All(combinator::parse_list(key, argument, depth)?),
         "any" => Matcher::Any(combinator::parse_list(key, argument, depth)?),
         "not" => Matcher::Not(Box::new(parse_at(argument, depth + 1)?)),
@@ -195,6 +198,7 @@ impl Matcher {
             Self::PathPrefix(leaf) => leaf.matches(view),
             Self::PathRegexp(leaf) => leaf.matches(view),
             Self::Method(leaf) => leaf.matches(view),
+            Self::ClientIp(leaf) => leaf.matches(view),
             Self::All(children) => children.iter().all(|child| child.matches(view)),
             Self::Any(children) => children.iter().any(|child| child.matches(view)),
             Self::Not(child) => !child.matches(view),
@@ -214,6 +218,7 @@ impl Matcher {
             | Self::PathPrefix(_)
             | Self::PathRegexp(_)
             | Self::Method(_)
+            | Self::ClientIp(_)
             | Self::Not(_) => None,
             Self::All(children) => {
                 let limited: Vec<Vec<Claim>> = children.iter().filter_map(Self::claims).collect();
@@ -256,6 +261,7 @@ impl Matcher {
             Self::PathPrefix(leaf) => leaf.spec(),
             Self::PathRegexp(leaf) => leaf.spec(),
             Self::Method(leaf) => leaf.spec(),
+            Self::ClientIp(leaf) => leaf.spec(),
             Self::All(children) => {
                 children
                     .iter()
@@ -296,6 +302,7 @@ pub fn disjoint(a: &Matcher, b: &Matcher) -> bool {
         }
         (Matcher::PathPrefix(a), Matcher::PathPrefix(b)) => path_prefix::disjoint(a, b),
         (Matcher::Method(a), Matcher::Method(b)) => method::disjoint(a, b),
+        (Matcher::ClientIp(a), Matcher::ClientIp(b)) => client_ip::disjoint(a, b),
         _ => false,
     }
 }

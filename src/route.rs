@@ -6,7 +6,7 @@
 //! middleware chain between the two; `proxy.rs` calls these and does nothing else about routing.
 
 use std::borrow::Cow;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use pingora::http::RequestHeader;
 use thiserror::Error;
@@ -58,14 +58,15 @@ pub fn request_host(request: &RequestHeader) -> Option<Cow<'_, str>> {
 }
 
 /// The router that answers `request`, which arrived on entry point `entry_point` (over TLS when
-/// `tls`). `None` when the request names no host, its path cannot be normalized, or no router
-/// matches.
+/// `tls`) from `client_ip` (see [`crate::client_ip`]). `None` when the request names no host, its
+/// path cannot be normalized, or no router matches.
 #[must_use]
 pub fn matching(
     table: &RoutingTable,
     request: &RequestHeader,
     entry_point: &str,
     tls: bool,
+    client_ip: Option<IpAddr>,
 ) -> Option<Matched> {
     let host = request_host(request)?;
     let path = path::normalize(request.uri.path()).ok()?;
@@ -75,6 +76,7 @@ pub fn matching(
         entry_point,
         tls,
         request,
+        client_ip,
     };
     table.index().find(table.apps(), &view)
 }
@@ -121,8 +123,10 @@ pub fn resolve(
     request: &RequestHeader,
     entry_point: &str,
     tls: bool,
+    client_ip: Option<IpAddr>,
 ) -> Result<Selected, RouteError> {
-    let matched = matching(table, request, entry_point, tls).ok_or(RouteError::NoRoute)?;
+    let matched =
+        matching(table, request, entry_point, tls, client_ip).ok_or(RouteError::NoRoute)?;
     select(table, matched, request)
 }
 
@@ -163,7 +167,7 @@ mod test {
     }
 
     fn port(table: &RoutingTable, request: &RequestHeader) -> Result<u16, RouteError> {
-        resolve(table, request, "web", false).map(|selected| selected.upstream.port())
+        resolve(table, request, "web", false, None).map(|selected| selected.upstream.port())
     }
 
     #[test]
@@ -188,7 +192,7 @@ mod test {
         request
             .insert_header("Host", "other.test")
             .expect("valid header");
-        assert!(resolve(&table, &request, "web", false).is_ok());
+        assert!(resolve(&table, &request, "web", false, None).is_ok());
     }
 
     #[test]

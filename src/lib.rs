@@ -11,6 +11,7 @@
 //! - [`acme`]: HA ACME issuance with ARI renewal, HTTP-01 answers and on-demand TLS.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
+//! - [`client_ip`]: who the client is behind trusted proxies, the forged forwarding headers dropped, and the `client_ip` matcher's address.
 //! - [`clientauth`]: client certificates per app (`tls.client_ca_pem`), asked for by SNI and checked per request.
 //! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
 //! - [`skew`]: the signed cookie that keeps a browser session on the revision that first served it.
@@ -35,6 +36,7 @@ pub mod acme;
 pub mod admin;
 pub mod budget;
 pub mod canary;
+pub mod client_ip;
 pub mod clientauth;
 pub mod compile;
 pub mod compress;

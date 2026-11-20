@@ -9,7 +9,8 @@
 //!
 //! 1. `acme_http01`: answers a validation request before any route exists.
 //! 2. `entry_point`: normalizes the path (the path that is matched is the path that is served),
-//!    so a request with an unsafe path is refused first.
+//!    so a request with an unsafe path is refused first, then settles who the client is: the
+//!    forwarding headers of a peer the entry point does not trust are removed ([`crate::client_ip`]).
 //! 3. `route`: picks the router. No match is `404`.
 //! 4. `sni_check`: over TLS, the matched app decides whether a request may name a host other
 //!    than the SNI. It runs for requests no router matched too (they get `421`, not `404`).

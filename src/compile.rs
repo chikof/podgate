@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 use crate::acme::Plan;
 use crate::canary;
+use crate::client_ip::Trust;
 use crate::clientauth::ClientAuth;
 use crate::conflict;
 use crate::entry::CompileContext;
@@ -295,6 +296,9 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
                 format!("entry point {} has two policies", policy.name),
             ));
         }
+        if let Some(Err(invalid)) = policy.forwarded_headers.as_ref().map(Trust::parse) {
+            problem(invalid);
+        }
         if let Some(field) = unsupported_policy_field(policy) {
             problem(Invalid::new(
                 "unsupported_setting",
@@ -367,9 +371,7 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
 }
 
 fn unsupported_policy_field(policy: &EntryPointPolicy) -> Option<&'static str> {
-    if policy.forwarded_headers.is_some() {
-        Some("forwarded_headers")
-    } else if policy.proxy_protocol.is_some() {
+    if policy.proxy_protocol.is_some() {
         Some("proxy_protocol")
     } else if policy.timeouts.is_some() {
         Some("timeouts")

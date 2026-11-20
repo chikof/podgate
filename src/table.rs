@@ -20,6 +20,7 @@ use tokio::sync::watch;
 
 use crate::acme::{Plan, PlanError};
 use crate::canary::{self, Runtime};
+use crate::client_ip::Trust;
 use crate::clientauth::{self, ClientAuth};
 use crate::compile::{self, Rejected};
 use crate::conflict::{self, Conflict};
@@ -584,6 +585,7 @@ pub struct RoutingTable {
     budgets: HashMap<Box<str>, Budget>,
     weights: HashMap<Box<str>, u32>,
     skew_secret: Option<SkewSecret>,
+    forwarded: HashMap<Box<str>, Trust>,
 }
 
 impl RoutingTable {
@@ -633,6 +635,7 @@ impl RoutingTable {
                 .map(|tenant| (tenant.id.clone(), tenant.weight))
                 .collect(),
             skew_secret: snapshot.skew_secret.clone(),
+            forwarded: crate::client_ip::policies(snapshot),
         })
     }
 
@@ -731,6 +734,18 @@ impl RoutingTable {
     #[must_use]
     pub fn skew_secret(&self) -> Option<&SkewSecret> {
         self.skew_secret.as_ref()
+    }
+
+    /// Whom the entry point called `entry_point` believes about the client (see
+    /// [`crate::client_ip`]); `None` when its policy says nothing, so nobody is trusted.
+    #[must_use]
+    pub fn forwarded_trust(&self, entry_point: &str) -> Option<&Trust> {
+        self.forwarded.get(entry_point)
+    }
+
+    /// Every entry point that has a forwarded-header policy, with it, by name.
+    pub fn forwarded_trusts(&self) -> impl Iterator<Item = (&str, &Trust)> {
+        self.forwarded.iter().map(|(name, trust)| (&**name, trust))
     }
 
     /// The ACME view of the snapshot: HTTP-01 answers, missing and due certificates.
@@ -950,6 +965,7 @@ mod test {
             entry_point: "web",
             tls: false,
             request: &request,
+            client_ip: None,
         };
         let matched = table.index().find(table.apps(), &view)?;
         table.app(matched.app)
