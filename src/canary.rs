@@ -2,8 +2,8 @@
 //!
 //! The snapshot owns the policy ([`Canary`]); podgate owns the live share. It is kept outside
 //! the table, in a registry the [`crate::table::TableHandle`] owns, keyed by app id and a
-//! fingerprint of the canary policy plus the app's serving set (every revision's id, backends,
-//! weight and state). A swap that leaves that fingerprint as it was gives the new table the same
+//! fingerprint of the canary policy plus the app's serving set (every revision's id, state and
+//! weight, never its backends). A swap that leaves that fingerprint as it was gives the new table the same
 //! runtime, so a push for another app neither restarts a ramp nor revives a regressed canary;
 //! any change to the policy or the serving set, and an auto-revert that restores a different
 //! one, starts the canary over. Entries of apps that lost their canary are dropped.
@@ -59,7 +59,7 @@ use thiserror::Error;
 
 use crate::events::{EventFeed, EventKind};
 use crate::outcomes::Outcomes;
-use crate::snapshot::{App, Canary, Revision, RevisionState};
+use crate::snapshot::{App, Canary, RevisionState};
 use crate::table::{CompiledApp, TableHandle};
 
 /// Fewest requests of the canary in a window before its error rate means anything.
@@ -179,19 +179,36 @@ pub(crate) fn validate(app: &App) -> Vec<Rejection> {
 }
 
 /// What a canary's runtime state is valid for: the policy (which names the canary revision) and
-/// the serving set of its app, every revision's id, backends, weight and state in order. A new
+/// the serving set of its app, every revision's id, state and weight in order. Backends are not
+/// part of it: autoscaling changes them all the time and must not reset a verdict. A new
 /// snapshot that leaves all of it as it was keeps the state; any difference starts over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Fingerprint {
     policy: Canary,
-    revisions: Box<[Revision]>,
+    revisions: Box<[Slot]>,
+}
+
+/// One revision of a [`Fingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Slot {
+    id: Box<str>,
+    state: RevisionState,
+    weight: u16,
 }
 
 impl Fingerprint {
     pub(crate) fn of(app: &App, policy: &Canary) -> Self {
         Self {
             policy: policy.clone(),
-            revisions: app.revisions.iter().cloned().collect(),
+            revisions: app
+                .revisions
+                .iter()
+                .map(|rev| Slot {
+                    id: rev.id.clone(),
+                    state: rev.state,
+                    weight: rev.weight,
+                })
+                .collect(),
         }
     }
 }
@@ -607,5 +624,48 @@ mod test {
             .and_then(CompiledApp::canary)
             .map(|s| (s.share_percent, s.regressed));
         assert_eq!(status, Some((20, false)));
+    }
+
+    #[test]
+    fn canary_state_ignores_backend_changes_but_weights_follow_them() {
+        let handle = TableHandle::new();
+        let first = snapshot(&policy("new", 20, 5, 50));
+        handle.apply(&first).expect("applies");
+        regress(&handle);
+        let weights = |handle: &TableHandle| -> Vec<u16> {
+            handle.load().app(0).map_or_else(Vec::new, |app| {
+                app.revisions()
+                    .iter()
+                    .map(crate::table::CompiledRevision::effective_weight)
+                    .collect()
+            })
+        };
+        assert_eq!(weights(&handle), [10_000, 0, 0]);
+
+        // A scale-out of the baseline keeps the verdict.
+        let mut scaled = with_version(2, first.clone());
+        scaled.apps[0].revisions[0]
+            .upstreams
+            .push(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+        handle.apply(&scaled).expect("applies");
+        let table = handle.load();
+        let status = table.app(0).and_then(CompiledApp::canary);
+        assert_eq!(
+            status.map(|status| (status.share_percent, status.regressed)),
+            Some((0, true))
+        );
+        assert_eq!(weights(&handle), [10_000, 0, 0]);
+
+        // The baseline loses every backend: it takes nothing, and the weights say so.
+        let mut empty = with_version(3, first);
+        empty.apps[0].revisions[0].upstreams.clear();
+        handle.apply(&empty).expect("applies");
+        let table = handle.load();
+        let status = table.app(0).and_then(CompiledApp::canary);
+        assert_eq!(
+            status.map(|status| (status.share_percent, status.regressed)),
+            Some((0, true))
+        );
+        assert_eq!(weights(&handle), [0, 0, 0]);
     }
 }

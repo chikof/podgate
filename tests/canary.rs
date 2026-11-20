@@ -577,3 +577,61 @@ async fn canary_reset_on_serving_set_change() {
     assert_eq!(reset["canary"]["regressed"], false);
     assert_eq!(share(&reset), 25);
 }
+
+#[tokio::test]
+async fn canary_survives_upstream_scale_out() {
+    let podgate = Arc::new(Podgate::start().await);
+    let base = Upstream::start("base").await;
+    let extra = Upstream::start("base").await;
+    let canary = Switch::start("canary", 500).await;
+    let app_a = canary_app(base.addr, canary.addr, 25, 100);
+    assert_eq!(
+        podgate
+            .push_snapshot(&snapshot(1, std::slice::from_ref(&app_a)))
+            .await
+            .status,
+        200
+    );
+    let load = Load::start(&podgate);
+    wait_until(&podgate, 20, |explained| {
+        explained["canary"]["regressed"] == true
+    })
+    .await;
+    load.stop().await;
+    assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
+
+    // The baseline scales out, twice: only its upstream list changes.
+    canary.set(200);
+    let mut scaled = app_a;
+    scaled["revisions"][0]["upstreams"] = json!([base.addr.to_string(), extra.addr.to_string()]);
+    assert_eq!(
+        podgate
+            .push_snapshot(&snapshot(2, &[scaled.clone()]))
+            .await
+            .status,
+        200
+    );
+    scaled["revisions"][0]["upstreams"] = json!([extra.addr.to_string()]);
+    assert_eq!(
+        podgate.push_snapshot(&snapshot(3, &[scaled])).await.status,
+        200
+    );
+    let explained = explain(&podgate).await;
+    assert_eq!(explained["version"], 3);
+    assert_eq!(explained["canary"]["regressed"], true);
+    assert_eq!(share(&explained), 0);
+    assert_eq!(weights(&explained), [10_000, 0]);
+
+    let load = Load::start(&podgate);
+    sleep(Duration::from_secs(3)).await;
+    load.stop().await;
+    assert_eq!(share(&explain(&podgate).await), 0);
+    assert_eq!(
+        events_of(&podgate, "canary_regressed").await.len(),
+        1,
+        "no new event"
+    );
+    for _ in 0..20 {
+        assert_eq!(podgate.get("a.test", "/").await.body, "base");
+    }
+}

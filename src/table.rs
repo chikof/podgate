@@ -329,6 +329,9 @@ impl CompiledApp {
             revision.live = Arc::clone(weight);
         }
         self.canary = Some(runtime);
+        // The backends may differ from those the weights were made for, and a revision without one
+        // takes no requests: recompute them from this table and the shared share.
+        self.reweigh();
     }
     /// The canary's runtime state, for [`canary::judge`].
     pub(crate) fn canary_runtime(&self) -> Option<&Arc<Runtime>> {
