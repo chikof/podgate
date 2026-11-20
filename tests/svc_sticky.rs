@@ -248,19 +248,25 @@ async fn sticky_falls_back_and_repins() {
 
     let header = format!("{NAME}={old}");
     let moved = get(&podgate, "a.test", "/", &header).await;
-    assert_eq!(moved.status, 200);
-    assert_ne!(moved.body, first.body, "the removed server is not used");
+    assert_eq!(moved.status, 200, "first {first:?}, moved {moved:?}");
+    assert_ne!(
+        moved.body, first.body,
+        "the removed server is not used: first {first:?}, moved {moved:?}"
+    );
     let fresh = cookie_of(&moved, NAME);
-    assert_ne!(fresh, old, "the client is pinned again");
+    assert_ne!(fresh, old, "the client is pinned again: {moved:?}");
     let fresh_header = format!("{NAME}={fresh}");
     for _ in 0..5 {
         let again = get(&podgate, "a.test", "/", &fresh_header).await;
-        assert_eq!(again.body, moved.body);
-        assert!(header_of(&again, NAME).is_none());
+        assert_eq!(again.body, moved.body, "moved {moved:?}, again {again:?}");
+        assert!(
+            header_of(&again, NAME).is_none(),
+            "moved {moved:?}, again {again:?}"
+        );
     }
     // The old cookie is still refused, not remembered.
     let stale = get(&podgate, "a.test", "/", &header).await;
-    assert!(header_of(&stale, NAME).is_some());
+    assert!(header_of(&stale, NAME).is_some(), "{stale:?}");
 }
 
 #[tokio::test]
