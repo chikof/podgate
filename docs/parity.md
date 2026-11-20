@@ -75,8 +75,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 |---|---|---|---|
 | Upstream TLS, SNI, CA, client certificate | `serversTransport` | `transport http { tls_* }` | built (`min_tls_version` 1.3 is `unsupported_setting`, see `docs/ref/transports.md`) |
 | `insecureSkipVerify` | yes | `tls_insecure_skip_verify` | built (allowed, listed as a posture change) |
-| HTTP/2 and h2c upstream | `h2c://`, `disableHTTP2` | `versions h2 h2c` | 0040 |
-| Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | 0040 (pool size works or is rejected) |
+| HTTP/2 and h2c upstream | `h2c://`, `disableHTTP2` | `versions h2 h2c` | built (`http2`, ALPN for `https://`, `h2c://` by prior knowledge, see `docs/ref/transports.md`) |
+| Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | built (dial, read, write and idle timeouts; `max_idle_per_host` is `unsupported_setting`, pool size is `UPSTREAM_POOL_SIZE`) |
 | SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | 0104 (Workload API client, one SVID per tenant, upstream mTLS and client identity) |
 | PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | 0098 (rejected as `unsupported_setting` if Pingora has no hook) |
 
