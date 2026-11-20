@@ -8,7 +8,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::{Key, Matched, Tier, View};
+use super::matcher::Failure;
+use super::{CompiledRouter, Key, Matched, Tier, View};
 use crate::host::HostPattern;
 use crate::table::CompiledApp;
 
@@ -73,6 +74,15 @@ pub struct Candidate<'v> {
     pub key: Key,
     /// How it was found.
     pub via: Via<'v>,
+}
+
+/// A router that fits a request's host and entry point but not the rest of its matcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearMiss {
+    /// Where the router is.
+    pub matched: Matched,
+    /// The leaves that failed, never a host leaf.
+    pub failed: Vec<Failure>,
 }
 
 /// Routers of all apps, by host.
@@ -147,12 +157,14 @@ impl Index {
             .filter_map(|at| apps.get(at.app as usize))
     }
 
-    /// Calls `found` for every router that matches `view` and may serve it, in no order.
-    pub fn scan<'v>(
+    /// Calls `each` for every router that may serve `view`: found by its host (the exact bucket,
+    /// the wildcard above it, and the fallbacks open to the host's tenant) and listening on the
+    /// entry point. It does not look at the rest of the matcher.
+    fn visit<'v>(
         &self,
         apps: &[CompiledApp],
         view: &View<'v>,
-        found: &mut impl FnMut(Candidate<'v>),
+        each: &mut impl FnMut(&CompiledRouter, Matched, Via<'v>),
     ) {
         let mut check = |at: &Ref, via: Via<'v>| {
             let Some(app) = apps.get(at.app as usize) else {
@@ -161,15 +173,12 @@ impl Index {
             let Some(router) = app.routers().get(at.router as usize) else {
                 return;
             };
-            if router.listens_on(view.entry_point) && router.matcher().matches(view) {
-                found(Candidate {
-                    matched: Matched {
-                        app: at.app as usize,
-                        router: at.router as usize,
-                    },
-                    key: router.key(&via),
-                    via,
-                });
+            if router.listens_on(view.entry_point) {
+                let matched = Matched {
+                    app: at.app as usize,
+                    router: at.router as usize,
+                };
+                each(router, matched, via);
             }
         };
         for at in self.exact.get(view.host).into_iter().flatten() {
@@ -207,6 +216,43 @@ impl Index {
             };
             check(at, via);
         }
+    }
+
+    /// Calls `found` for every router that matches `view` and may serve it, in no order.
+    pub fn scan<'v>(
+        &self,
+        apps: &[CompiledApp],
+        view: &View<'v>,
+        found: &mut impl FnMut(Candidate<'v>),
+    ) {
+        self.visit(apps, view, &mut |router, matched, via| {
+            if router.matcher().matches(view) {
+                found(Candidate {
+                    matched,
+                    key: router.key(&via),
+                    via,
+                });
+            }
+        });
+    }
+
+    /// The routers that may serve `view` and whose host and entry point fit, but whose matcher
+    /// does not match, each with the leaves that failed. A router that fails on a host leaf is
+    /// not a near miss.
+    #[must_use]
+    pub fn near_misses(&self, apps: &[CompiledApp], view: &View<'_>) -> Vec<NearMiss> {
+        let mut found: Vec<NearMiss> = Vec::new();
+        self.visit(apps, view, &mut |router, matched, _| {
+            let failed = router.matcher().failures(view);
+            if failed.is_empty()
+                || failed.iter().any(Failure::is_host)
+                || found.iter().any(|seen| seen.matched == matched)
+            {
+                return;
+            }
+            found.push(NearMiss { matched, failed });
+        });
+        found
     }
 
     /// The router that wins for `view`, if any matches.

@@ -16,7 +16,7 @@ use crate::canary;
 use crate::entry::Protocol;
 use crate::host;
 use crate::pipeline;
-use crate::router::{Candidate, View, path};
+use crate::router::{Candidate, Matched as RouterMatch, View, path};
 use crate::service::TransportSummary;
 use crate::service::outlier;
 use crate::table::RoutingTable;
@@ -126,6 +126,11 @@ pub struct Explanation<'a> {
     matched: Matched<'a>,
     /// Every router that matches, best first: a router shadowed by a better one is visible.
     considered: Vec<&'a str>,
+    /// Routers that fit the host and entry point but fail on another leaf (a header, a query
+    /// parameter, a method, ...), with the failing leaf. A router that fails on the host is not
+    /// listed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    near_misses: Vec<NearMissView>,
     /// The service the matched router names.
     service: &'a str,
     revisions: Vec<RevisionView<'a>>,
@@ -174,6 +179,15 @@ struct ServerView<'a> {
     transport: Option<TransportSummary<'a>>,
 }
 
+/// A router that fits the request's host and entry point but not the rest of its matcher.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct NearMissView {
+    app: String,
+    router: String,
+    /// The leaves that failed, like `header x-env = "canary"`.
+    failed: Vec<String>,
+}
+
 /// The answer for a request without a route: `404` body of `GET /v1/explain`.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Miss {
@@ -186,6 +200,9 @@ pub struct Miss {
     /// exists but listens elsewhere than the entry point asked about.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     routed_on: Vec<String>,
+    /// The routers that fit the request's host and entry point but fail on another leaf.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    near_misses: Vec<NearMissView>,
 }
 
 /// The entry points a request is tried on: the one `entry_point` names, else every bound entry
@@ -207,6 +224,23 @@ fn asked<'a>(table: &'a RoutingTable, target: &'a Target) -> Vec<&'a str> {
         .collect()
 }
 
+/// What a matcher sees of `target` arriving on `entry_point`.
+fn view_of<'v>(
+    target: &'v Target,
+    request: &'v RequestHeader,
+    entry_point: &'v str,
+    tls: bool,
+) -> View<'v> {
+    View {
+        host: &target.host,
+        path: &target.path,
+        entry_point,
+        tls,
+        request,
+        client_ip: target.client_ip,
+    }
+}
+
 /// The routers that match `target` arriving on `entry_point`, best first.
 fn route_on<'v>(
     table: &RoutingTable,
@@ -215,15 +249,39 @@ fn route_on<'v>(
     entry_point: &'v str,
     tls: bool,
 ) -> Vec<Candidate<'v>> {
-    let view = View {
-        host: &target.host,
-        path: &target.path,
-        entry_point,
-        tls,
-        request,
-        client_ip: target.client_ip,
-    };
+    let view = view_of(target, request, entry_point, tls);
     table.index().find_all(table.apps(), &view)
+}
+
+/// The routers that fit `target` on any of `entry_points` by host and entry point and fail on
+/// another leaf, each once, with the failing leaves. The request is the one `target` describes:
+/// method, path, query and `Host`, and no other header, so a header leaf fails for it.
+fn near_misses(
+    table: &RoutingTable,
+    target: &Target,
+    request: &RequestHeader,
+    entry_points: &[&str],
+    tls: bool,
+) -> Vec<NearMissView> {
+    let mut seen: Vec<RouterMatch> = Vec::new();
+    let mut views = Vec::new();
+    for entry_point in entry_points {
+        let view = view_of(target, request, entry_point, tls);
+        for miss in table.index().near_misses(table.apps(), &view) {
+            if seen.contains(&miss.matched) {
+                continue;
+            }
+            seen.push(miss.matched);
+            if let Some((app, router)) = table.router(miss.matched) {
+                views.push(NearMissView {
+                    app: app.id().to_owned(),
+                    router: router.name().to_owned(),
+                    failed: miss.failed.iter().map(ToString::to_string).collect(),
+                });
+            }
+        }
+    }
+    views
 }
 
 /// Explains how `table` routes `target`.
@@ -236,6 +294,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
         error: "not found",
         nearest_wildcard: table.nearest_wildcard(&target.host),
         routed_on: Vec::new(),
+        near_misses: Vec::new(),
     };
     let mut request = RequestHeader::build(
         target.method.as_str(),
@@ -260,6 +319,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
             })
             .map(|(name, _)| name.to_owned())
             .collect(),
+        near_misses: near_misses(table, target, &request, &asked(table, target), target.tls),
         ..plain_miss()
     };
     let (entry_point, candidates) = asked(table, target)
@@ -296,6 +356,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
             .filter_map(|candidate| table.router(candidate.matched))
             .map(|(_, router)| router.name())
             .collect(),
+        near_misses: near_misses(table, target, &request, &[entry_point], target.tls),
         service: router.service(),
         revisions: app
             .revisions()

@@ -28,9 +28,9 @@ use crate::host::HostPattern;
 use crate::observe::access_log;
 use podgate_model::{App, EntryPointPolicy, Router};
 
-pub use matcher::{Claim, Matcher, Spec, View};
+pub use matcher::{Claim, Failure, Matcher, Spec, View};
 pub use priority::Key;
-pub use tree::{Candidate, Index, Via};
+pub use tree::{Candidate, Index, NearMiss, Via};
 
 /// The router a request matched: indices into the table the request was matched against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

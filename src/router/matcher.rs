@@ -5,8 +5,8 @@
 //! things: `parse`, `matches`, its contribution to the specificity ([`Spec`]), and `claims` (a
 //! host leaf says which hosts the router is for). [`disjoint`] says when two matchers can
 //! never both match, which the ambiguity check needs. Leaves of the planned set that no spec has
-//! built yet (`header`, `header_regexp`, `query`, `query_regexp`) are refused with
-//! `matcher_not_built`; a key that is not planned is `invalid_matcher`.
+//! built yet (none today) are refused with `matcher_not_built`; a key that is not planned is
+//! `invalid_matcher`.
 //!
 //! Adding a leaf: a file in this directory with the four functions, one variant in [`Matcher`],
 //! and one arm in each of its `match` statements (the compiler lists them); remove the key from
@@ -22,20 +22,28 @@ use crate::host::HostPattern;
 
 mod client_ip;
 mod combinator;
+mod header;
+mod header_regexp;
 mod host;
 mod host_regexp;
 mod method;
 mod path;
 mod path_prefix;
 mod path_regexp;
+mod query;
+mod query_regexp;
 
 use client_ip::ClientIp;
+use header::Header;
+use header_regexp::HeaderRegexp;
 use host::Host;
 use host_regexp::HostRegexp;
 use method::Method;
 use path::Path;
 use path_prefix::PathPrefix;
 use path_regexp::PathRegexp;
+use query::Query;
+use query_regexp::QueryRegexp;
 
 /// Deepest nesting of combinators a matcher may have.
 pub const MAX_DEPTH: usize = 8;
@@ -44,7 +52,7 @@ pub const MAX_DEPTH: usize = 8;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Leaves that are planned and not built: refused with `matcher_not_built`.
-const UNBUILT: [&str; 4] = ["header", "header_regexp", "query", "query_regexp"];
+const UNBUILT: [&str; 0] = [];
 
 /// Why a matcher is refused: a stable code and a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +115,41 @@ pub struct Spec {
     pub others: u32,
 }
 
+/// A leaf that kept a request from matching: what explain shows for a near miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The matcher key (`header`, `path_prefix`, `not`, ...).
+    pub leaf: &'static str,
+    /// What the leaf wanted, for the leaves that say (`header`, `header_regexp`, `query`,
+    /// `query_regexp`); empty otherwise.
+    pub wanted: String,
+}
+
+impl Failure {
+    fn key(leaf: &'static str) -> Self {
+        Self {
+            leaf,
+            wanted: String::new(),
+        }
+    }
+
+    /// Whether the leaf is about the host, which a near miss must not be.
+    #[must_use]
+    pub fn is_host(&self) -> bool {
+        matches!(self.leaf, "host" | "host_regexp")
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.wanted.is_empty() {
+            f.write_str(self.leaf)
+        } else {
+            write!(f, "{} {}", self.leaf, self.wanted)
+        }
+    }
+}
+
 /// A parsed matcher tree.
 #[derive(Debug)]
 pub enum Matcher {
@@ -124,6 +167,14 @@ pub enum Matcher {
     Method(Method),
     /// `client_ip`
     ClientIp(ClientIp),
+    /// `header`
+    Header(Header),
+    /// `header_regexp`
+    HeaderRegexp(HeaderRegexp),
+    /// `query`
+    Query(Query),
+    /// `query_regexp`
+    QueryRegexp(QueryRegexp),
     /// `all`: every child matches.
     All(Vec<Matcher>),
     /// `any`: some child matches.
@@ -166,6 +217,10 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
         "path_regexp" => Matcher::PathRegexp(PathRegexp::parse(argument)?),
         "method" => Matcher::Method(Method::parse(argument)?),
         "client_ip" => Matcher::ClientIp(ClientIp::parse(argument)?),
+        "header" => Matcher::Header(Header::parse(argument)?),
+        "header_regexp" => Matcher::HeaderRegexp(HeaderRegexp::parse(argument)?),
+        "query" => Matcher::Query(Query::parse(argument)?),
+        "query_regexp" => Matcher::QueryRegexp(QueryRegexp::parse(argument)?),
         "all" => Matcher::All(combinator::parse_list(key, argument, depth)?),
         "any" => Matcher::Any(combinator::parse_list(key, argument, depth)?),
         "not" => Matcher::Not(Box::new(parse_at(argument, depth + 1)?)),
@@ -199,10 +254,52 @@ impl Matcher {
             Self::PathRegexp(leaf) => leaf.matches(view),
             Self::Method(leaf) => leaf.matches(view),
             Self::ClientIp(leaf) => leaf.matches(view),
+            Self::Header(leaf) => leaf.matches(view),
+            Self::HeaderRegexp(leaf) => leaf.matches(view),
+            Self::Query(leaf) => leaf.matches(view),
+            Self::QueryRegexp(leaf) => leaf.matches(view),
             Self::All(children) => children.iter().all(|child| child.matches(view)),
             Self::Any(children) => children.iter().any(|child| child.matches(view)),
             Self::Not(child) => !child.matches(view),
         }
+    }
+
+    /// The leaves that keep `view` from matching, empty when it matches. `all` names every child
+    /// that fails, `any` (when none matches) the failures of every branch, and `not` itself when
+    /// its child matches.
+    #[must_use]
+    pub fn failures(&self, view: &View<'_>) -> Vec<Failure> {
+        let mut failed = Vec::new();
+        self.collect_failures(view, &mut failed);
+        failed
+    }
+
+    fn collect_failures(&self, view: &View<'_>, failed: &mut Vec<Failure>) {
+        if self.matches(view) {
+            return;
+        }
+        let said = |leaf, wanted| Failure { leaf, wanted };
+        let failure = match self {
+            Self::Host(_) => Failure::key("host"),
+            Self::HostRegexp(_) => Failure::key("host_regexp"),
+            Self::Path(_) => Failure::key("path"),
+            Self::PathPrefix(_) => Failure::key("path_prefix"),
+            Self::PathRegexp(_) => Failure::key("path_regexp"),
+            Self::Method(_) => Failure::key("method"),
+            Self::ClientIp(_) => Failure::key("client_ip"),
+            Self::Header(leaf) => said("header", leaf.describe()),
+            Self::HeaderRegexp(leaf) => said("header_regexp", leaf.describe()),
+            Self::Query(leaf) => said("query", leaf.describe()),
+            Self::QueryRegexp(leaf) => said("query_regexp", leaf.describe()),
+            Self::Not(_) => Failure::key("not"),
+            Self::All(children) | Self::Any(children) => {
+                for child in children {
+                    child.collect_failures(view, failed);
+                }
+                return;
+            }
+        };
+        failed.push(failure);
     }
 
     /// The hosts a match can be for, or `None` when the matcher does not limit the host (so the
@@ -219,6 +316,10 @@ impl Matcher {
             | Self::PathRegexp(_)
             | Self::Method(_)
             | Self::ClientIp(_)
+            | Self::Header(_)
+            | Self::HeaderRegexp(_)
+            | Self::Query(_)
+            | Self::QueryRegexp(_)
             | Self::Not(_) => None,
             Self::All(children) => {
                 let limited: Vec<Vec<Claim>> = children.iter().filter_map(Self::claims).collect();
@@ -262,6 +363,10 @@ impl Matcher {
             Self::PathRegexp(leaf) => leaf.spec(),
             Self::Method(leaf) => leaf.spec(),
             Self::ClientIp(leaf) => leaf.spec(),
+            Self::Header(leaf) => leaf.spec(),
+            Self::HeaderRegexp(leaf) => leaf.spec(),
+            Self::Query(leaf) => leaf.spec(),
+            Self::QueryRegexp(leaf) => leaf.spec(),
             Self::All(children) => {
                 children
                     .iter()
@@ -303,6 +408,8 @@ pub fn disjoint(a: &Matcher, b: &Matcher) -> bool {
         (Matcher::PathPrefix(a), Matcher::PathPrefix(b)) => path_prefix::disjoint(a, b),
         (Matcher::Method(a), Matcher::Method(b)) => method::disjoint(a, b),
         (Matcher::ClientIp(a), Matcher::ClientIp(b)) => client_ip::disjoint(a, b),
+        (Matcher::Header(a), Matcher::Header(b)) => header::disjoint(a, b),
+        (Matcher::Query(a), Matcher::Query(b)) => query::disjoint(a, b),
         _ => false,
     }
 }
@@ -437,5 +544,120 @@ mod test {
             json!({"any": [{"path": "/a"}, {"path": "/c"}]}),
             json!({"path": "/c"})
         ));
+    }
+
+    #[test]
+    fn request_leaves_specificity() {
+        let spec = |value: Value| parsed(&value).spec();
+        for leaf in [
+            json!({"header": {"name": "x-env", "value": "a"}}),
+            json!({"header": {"name": "x-env"}}),
+            json!({"header_regexp": {"name": "x-env", "regex": "^a"}}),
+            json!({"query": {"name": "debug", "value": "1"}}),
+            json!({"query_regexp": {"name": "debug", "regex": "1"}}),
+        ] {
+            assert_eq!(spec(leaf.clone()), Spec { path: 0, others: 1 }, "{leaf}");
+        }
+        let several = spec(json!({"all": [
+            {"header": {"name": "x-env", "value": "a"}},
+            {"query": {"name": "debug"}},
+            {"method": ["GET"]},
+        ]}));
+        assert_eq!(several.others, 1, "`all` takes the largest, not the sum");
+        assert!(
+            spec(json!({"all": [{"path_prefix": "/a"}, {"header": {"name": "x"}}]}))
+                > spec(json!({"path_prefix": "/a"}))
+        );
+        let either = spec(json!({"any": [
+            {"header": {"name": "x-env", "value": "a"}},
+            {"path_prefix": "/a"},
+        ]}));
+        assert_eq!(either.others, 0);
+    }
+
+    #[test]
+    fn request_leaves_disjoint() {
+        let pair = |a: Value, b: Value| disjoint(&parsed(&a), &parsed(&b));
+        let header = |name: &str, value: &str| json!({"header": {"name": name, "value": value}});
+        assert!(pair(header("x-env", "a"), header("X-Env", "b")));
+        assert!(!pair(header("x-env", "a"), header("x-env", "a")));
+        assert!(!pair(header("x-env", "a"), header("x-other", "b")));
+        assert!(!pair(
+            header("x-env", "a"),
+            json!({"header": {"name": "x-env"}})
+        ));
+        assert!(!pair(
+            header("x-env", "a"),
+            json!({"header_regexp": {"name": "x-env", "regex": "b"}})
+        ));
+        let query = |name: &str, value: &str| json!({"query": {"name": name, "value": value}});
+        assert!(pair(query("debug", "1"), query("debug", "2")));
+        assert!(!pair(query("debug", "1"), query("debug", "1")));
+        assert!(!pair(query("debug", "1"), query("trace", "2")));
+        assert!(!pair(query("debug", "1"), header("debug", "2")));
+        assert!(!pair(
+            query("debug", "1"),
+            json!({"query_regexp": {"name": "debug", "regex": "2"}})
+        ));
+        assert!(pair(
+            json!({"all": [{"host": "a.test"}, header("x-env", "a")]}),
+            header("x-env", "b")
+        ));
+    }
+
+    #[test]
+    fn regexp_leaf_too_large_rejected() {
+        let huge = "(a{1000}){1000}";
+        for leaf in [
+            json!({"header_regexp": {"name": "x", "regex": huge}}),
+            json!({"query_regexp": {"name": "x", "regex": huge}}),
+        ] {
+            let err = parse(&leaf).expect_err("over the compiled-size limit");
+            assert_eq!(err.code, "invalid_matcher", "{leaf}: {err}");
+        }
+        assert!(parse(&json!({"header_regexp": {"name": "x", "regex": "(a{10}){10}"}})).is_ok());
+    }
+
+    #[test]
+    fn failures_name_the_leaves_that_fail() {
+        let request = {
+            let mut request =
+                pingora::http::RequestHeader::build("GET", b"/a?debug=1", None).expect("request");
+            request.insert_header("x-env", "prod").expect("header");
+            request
+        };
+        let view = View {
+            host: "a.test",
+            path: "/a",
+            entry_point: "web",
+            tls: false,
+            request: &request,
+            client_ip: None,
+        };
+        let failed = |value: Value| -> Vec<String> {
+            parsed(&value)
+                .failures(&view)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert!(failed(json!({"path": "/a"})).is_empty());
+        assert_eq!(
+            failed(json!({"all": [
+                {"host": "a.test"},
+                {"header": {"name": "x-env", "value": "canary"}},
+                {"query": {"name": "debug", "value": "1"}},
+                {"method": ["POST"]},
+            ]})),
+            ["header x-env = \"canary\"", "method"]
+        );
+        assert_eq!(
+            failed(
+                json!({"any": [{"path": "/b"}, {"header_regexp": {"name": "x-env", "regex": "^c"}}]})
+            ),
+            ["path", "header_regexp x-env ~ \"^c\""]
+        );
+        assert_eq!(failed(json!({"not": {"host": "a.test"}})), ["not"]);
+        assert!(Failure::key("host").is_host() && !Failure::key("not").is_host());
     }
 }

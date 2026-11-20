@@ -105,10 +105,6 @@ async fn v2_rejects_bad_matcher() {
         (json!({ "nonsense": "x" }), "invalid_matcher"),
         (json!({ "path_regexp": "(" }), "invalid_matcher"),
         (json!({ "host": "a b" }), "invalid_host"),
-        (
-            json!({ "header": { "name": "x", "value": "y" } }),
-            "matcher_not_built",
-        ),
     ] {
         let mut bad = app("a", &["a.test"], &[serving("r1", up.addr)]);
         bad["routers"][0]["match"] = matcher.clone();
