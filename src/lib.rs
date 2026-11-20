@@ -87,7 +87,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.add_service(proxy);
     server.add_service(background_service(
         "admin API",
-        AdminService::new(admin_listener, AppState::new(table, events, inflight), timeout),
+        AdminService::new(
+            admin_listener,
+            AppState::new(table, events, inflight),
+            timeout,
+        ),
     ));
 
     tracing::info!(

@@ -244,7 +244,10 @@ async fn events_resume_after() {
     let all = events(&podgate, 0, 0).await;
     let list = all["events"].as_array().expect("list");
     assert_eq!(list.len(), 2, "{all}");
-    assert_eq!((list[0]["seq"].clone(), list[1]["seq"].clone()), (json!(1), json!(2)));
+    assert_eq!(
+        (list[0]["seq"].clone(), list[1]["seq"].clone()),
+        (json!(1), json!(2))
+    );
 
     let rest = events(&podgate, 1, 0).await;
     assert_eq!(rest["events"], json!([list[1]]), "no duplicate of seq 1");

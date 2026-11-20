@@ -40,7 +40,11 @@ mod test {
 
     #[tokio::test]
     async fn readyz_follows_state() {
-        let state = AppState::new(TableHandle::new(), EventFeed::new(), Inflight::new(EventFeed::new()));
+        let state = AppState::new(
+            TableHandle::new(),
+            EventFeed::new(),
+            Inflight::new(EventFeed::new()),
+        );
         let (status, Json(body)) = readyz(State(state.clone())).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["status"], "not ready");
