@@ -178,7 +178,13 @@ async fn wasm_filter_runs() {
     let explained = podgate.admin_get("/v1/explain?url=http://a.test/").await;
     assert_eq!(
         explained.json()["middleware"],
-        json!(["route", "inflight_admit", "tenant_admit", "wasm_filters"])
+        json!([
+            "route",
+            "inflight_admit",
+            "tenant_admit",
+            "failure_capture",
+            "wasm_filters"
+        ])
     );
 }
 
