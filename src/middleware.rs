@@ -28,15 +28,15 @@ use serde_json::Value;
 use crate::budget::TenantBudget;
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
-use crate::events::EventFeed;
 use crate::error::AppError;
+use crate::events::EventFeed;
 use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
-pub mod circuit_breaker;
 pub mod buffering;
+pub mod circuit_breaker;
 pub mod content_type;
 pub mod headers;
 mod path_rewrite;
