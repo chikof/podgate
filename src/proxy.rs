@@ -13,11 +13,13 @@
 //!
 //! # Callback order
 //!
-//! `request_filter` runs SNI, route, in-flight admission, tenant admission, then starts the
+//! `request_filter` runs SNI, route, in-flight admission, tenant admission, backend admission
+//! (where a request waits when its upstream is at its limit), then starts the
 //! failure capture, so a request refused earlier is never recorded. `response_filter` and
 //! `response_body_filter` run the failure capture first, then compression, so a recorded failure
 //! shows the upstream's headers and uncompressed body. `logging` records the failure first and
-//! then releases the tenant slot, so the recorder sees the final status the client got.
+//! then releases the tenant slot, so the recorder sees the final status the client got. The
+//! backend slot is released when the upstream response ends, before the client has read it all.
 //!
 //! # The middleware chain
 //!
@@ -35,6 +37,7 @@ use bytes::Bytes;
 use pingora::Error;
 use pingora::ErrorType::InternalError;
 use pingora::http::ResponseHeader;
+use pingora::protocols::Digest;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
@@ -43,6 +46,7 @@ use crate::budget::{Budgets, TenantSlot};
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::failures::{self, Failures};
+use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
 use crate::outcomes::{self, Outcomes};
 use crate::pool;
@@ -78,6 +82,7 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     }
     chain.push("inflight_admit");
     chain.push("tenant_admit");
+    chain.push("backend_admit");
     chain.push("failure_capture");
     if !app.filters().is_empty() {
         chain.push("wasm_filters");
@@ -114,6 +119,9 @@ pub struct Ctx {
     /// the request says the proxy or tenant is busy, not that the deploy is broken, so
     /// [`crate::outcomes::record_request`] does not count it.
     pub capacity_refusal: bool,
+    /// The backend slot and latency timer (see [`crate::fairq`]), taken by `request_filter` after
+    /// the tenant slot and freed when the upstream response ends, or in `logging`.
+    pub backend: fairq::Slot,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -123,6 +131,7 @@ pub struct Gateway {
     inflight: Inflight,
     upstream_timeout: Duration,
     budgets: Budgets,
+    backends: Backends,
     failures: Failures,
     wake: Wake,
     outcomes: Outcomes,
@@ -144,6 +153,7 @@ impl Gateway {
             wake: Wake::default(),
             outcomes: Outcomes::new(),
             wasm: wasm::Executor::default(),
+            backends: Backends::new(),
         }
     }
 
@@ -181,6 +191,14 @@ impl Gateway {
         self.wasm = wasm;
         self
     }
+
+    /// Admits requests to their backends through `backends`, a registry shared with the admin
+    /// API's metrics.
+    #[must_use]
+    pub fn with_backends(mut self, backends: Backends) -> Self {
+        self.backends = backends;
+        self
+    }
 }
 
 #[async_trait]
@@ -198,6 +216,7 @@ impl ProxyHttp for Gateway {
             failures: failures::Capture::default(),
             wake: wake::State::default(),
             capacity_refusal: false,
+            backend: fairq::Slot::default(),
         }
     }
 
@@ -241,6 +260,14 @@ impl ProxyHttp for Gateway {
                     .admit(&mut ctx.wake, &self.budgets, &ctx.table, selected.app)
                 {
                     Ok(slot) => ctx.tenant_slot = slot,
+                    Err(err) => {
+                        ctx.capacity_refusal = err.is_capacity_refusal();
+                        respond::write_error(session, &err).await?;
+                        return Ok(true);
+                    }
+                }
+                match self.backends.admit(&ctx.table, &selected).await {
+                    Ok(slot) => ctx.backend = slot,
                     Err(err) => {
                         ctx.capacity_refusal = err.is_capacity_refusal();
                         respond::write_error(session, &err).await?;
@@ -303,6 +330,9 @@ impl ProxyHttp for Gateway {
         ctx.failures.response_chunk(body.as_ref());
         compress::filter(&mut ctx.compression, body, end_of_stream)
             .map_err(|err| Error::because(InternalError, "gzip encoding failed", err))?;
+        if end_of_stream {
+            ctx.backend.release();
+        }
         Ok(None)
     }
 
@@ -311,6 +341,7 @@ impl ProxyHttp for Gateway {
         outcomes::record_request(&self.outcomes, session, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
+        ctx.backend.release();
     }
 
     async fn upstream_peer(
@@ -347,6 +378,29 @@ impl ProxyHttp for Gateway {
         prev_ctx: Box<dyn Any + Send + Sync>,
     ) {
         pool::restore(&mut ctx.pool, prev_ctx);
+    }
+
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        _reused: bool,
+        _peer: &HttpPeer,
+        _fd: std::os::unix::io::RawFd,
+        _digest: Option<&Digest>,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        ctx.backend.connected();
+        Ok(())
+    }
+
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        ctx.backend.responded(upstream_response.status.as_u16());
+        Ok(())
     }
 
     async fn request_body_filter(

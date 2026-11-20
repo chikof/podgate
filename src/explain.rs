@@ -230,7 +230,7 @@ mod test {
                     {"id": "old", "state": "retiring", "weight": 5, "effective_weight": 0, "upstreams": ["127.0.0.1:1"]},
                     {"id": "new", "state": "serving", "weight": 7, "effective_weight": 7, "upstreams": ["127.0.0.1:2"]}
                 ],
-                "middleware": ["sni_check", "route", "inflight_admit", "tenant_admit", "failure_capture"],
+                "middleware": ["sni_check", "route", "inflight_admit", "tenant_admit", "backend_admit", "failure_capture"],
             })
         );
     }

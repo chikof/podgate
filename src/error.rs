@@ -47,6 +47,10 @@ pub enum AppError {
     /// The tenant's buffer budget cannot take a filter's memory: `503`, retry in a second.
     #[error("wasm filter memory is over the tenant's budget")]
     FilterOverBudget,
+    /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
+    /// and the client should retry in a second. Another tenant on a shared backend can cause it.
+    #[error("backend is saturated")]
+    Saturated,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -64,6 +68,7 @@ impl AppError {
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unavailable(_)
             | Self::Overloaded
+            | Self::Saturated
             | Self::WakeTimeout
             | Self::FilterBusy
             | Self::FilterOverBudget => StatusCode::SERVICE_UNAVAILABLE,
@@ -75,7 +80,9 @@ impl AppError {
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<u32> {
         match self {
-            Self::Overloaded | Self::FilterBusy | Self::FilterOverBudget => Some(1),
+            Self::Overloaded | Self::Saturated | Self::FilterBusy | Self::FilterOverBudget => {
+                Some(1)
+            }
             Self::WakeTimeout => Some(5),
             _ => None,
         }
@@ -83,14 +90,15 @@ impl AppError {
 
     /// Whether this answer says the tenant, an app or the proxy is out of capacity (busy or
     /// cold), not that the deploy is broken. Auto-revert does not count such answers.
-    /// [`Self::FilterBusy`] is one: the filter pool is shared by every tenant. A filter that
-    /// does not fit its own tenant's budget ([`Self::FilterOverBudget`]) is not: the deploy
+    /// [`Self::FilterBusy`] is one: the filter pool is shared by every tenant. So is
+    /// [`Self::Saturated`]: the backend may be shared, and another tenant can fill it. A filter
+    /// that does not fit its own tenant's budget ([`Self::FilterOverBudget`]) is not: the deploy
     /// raised the filter's memory above what the tenant can pay.
     #[must_use]
     pub fn is_capacity_refusal(&self) -> bool {
         matches!(
             self,
-            Self::Overloaded | Self::WakeTimeout | Self::FilterBusy
+            Self::Overloaded | Self::Saturated | Self::WakeTimeout | Self::FilterBusy
         )
     }
 
@@ -176,6 +184,11 @@ mod test {
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.retry_after_secs(), Some(1));
         assert_eq!(AppError::NotFound.retry_after_secs(), None);
+        assert_eq!(
+            AppError::Saturated.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(AppError::Saturated.retry_after_secs(), Some(1));
     }
 
     #[test]

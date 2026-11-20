@@ -36,6 +36,7 @@ use crate::budget::Budgets;
 use crate::error::AppError;
 use crate::events::EventFeed;
 use crate::failures::Failures;
+use crate::fairq::Backends;
 use crate::inflight::Inflight;
 use crate::outcomes::Outcomes;
 use crate::revert::Reverter;
@@ -49,6 +50,7 @@ pub struct AppState {
     events: EventFeed,
     inflight: Inflight,
     budgets: Budgets,
+    backends: Backends,
     failures: Failures,
     reverter: Reverter,
 }
@@ -69,6 +71,7 @@ impl AppState {
             events,
             inflight,
             budgets: Budgets::new(),
+            backends: Backends::new(),
             failures: Failures::new(),
             reverter,
         }
@@ -114,6 +117,19 @@ impl AppState {
     #[must_use]
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
+    }
+
+    /// Reports `backends`, the limiters the proxy admits through, on `GET /metrics`.
+    #[must_use]
+    pub fn with_backends(mut self, backends: Backends) -> Self {
+        self.backends = backends;
+        self
+    }
+
+    /// The per-backend limiters `GET /metrics` reports.
+    #[must_use]
+    pub fn backends(&self) -> &Backends {
+        &self.backends
     }
 
     /// Reads failed requests from `failures`, the recorder the proxy shares.

@@ -13,11 +13,12 @@ pub(super) fn routes() -> Router<AppState> {
 }
 
 /// Per-tenant buffer bytes, in-flight requests and the counters behind them, as read from
-/// [`crate::Budgets`] against the live table.
+/// [`crate::Budgets`] against the live table, then each backend's limit and queue from
+/// [`crate::Backends`].
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        state.budgets().render(&state.table().load()),
+        state.budgets().render(&state.table().load()) + &state.backends().render(),
     )
 }
 

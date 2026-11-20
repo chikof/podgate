@@ -503,6 +503,7 @@ pub struct RoutingTable {
     certificates: CertStore,
     acme: Plan,
     budgets: HashMap<Box<str>, Budget>,
+    weights: HashMap<Box<str>, u32>,
     skew_secret: Option<SkewSecret>,
 }
 
@@ -580,6 +581,11 @@ impl RoutingTable {
                 .iter()
                 .map(|tenant| (tenant.id.clone(), tenant.budget))
                 .collect(),
+            weights: snapshot
+                .tenants
+                .iter()
+                .map(|tenant| (tenant.id.clone(), tenant.weight))
+                .collect(),
             skew_secret: snapshot.skew_secret.clone(),
         })
     }
@@ -627,6 +633,12 @@ impl RoutingTable {
     #[must_use]
     pub fn tenant_budget(&self, id: &str) -> Option<Budget> {
         self.budgets.get(id).copied()
+    }
+
+    /// The fair-share weight of tenant `id`, or `None` when the snapshot does not declare it.
+    #[must_use]
+    pub fn tenant_weight(&self, id: &str) -> Option<u32> {
+        self.weights.get(id).copied()
     }
 
     /// Certificates for the TLS listener.

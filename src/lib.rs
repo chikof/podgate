@@ -22,6 +22,8 @@
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
 //!   and [`revert`] undoes a snapshot that makes the apps it changed fail.
+//! - [`Backends`]: the adaptive concurrency limit per upstream and the weighted fair queues of the
+//!   tenants waiting for it.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -36,6 +38,7 @@ pub mod error;
 pub mod events;
 pub mod explain;
 pub mod failures;
+pub mod fairq;
 pub mod host;
 pub mod inflight;
 pub mod outcomes;
@@ -71,6 +74,7 @@ pub use conflict::Conflict;
 pub use error::AppError;
 pub use events::{Event, EventFeed, EventKind};
 pub use failures::Failures;
+pub use fairq::Backends;
 pub use inflight::{Inflight, InflightGuard};
 pub use outcomes::Outcomes;
 pub use proxy::{Ctx, Gateway};
@@ -102,6 +106,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         config.node_name.clone(),
         config.acme_ca_file.clone(),
     );
+    let backends = Backends::new();
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -119,6 +124,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         &server.configuration,
         Gateway::new(table.clone(), inflight.clone(), timeout)
             .with_budgets(budgets.clone())
+            .with_backends(backends.clone())
             .with_failures(failures.clone())
             .with_wake(wake.clone())
             .with_outcomes(outcomes.clone())
@@ -152,6 +158,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             admin_listener,
             AppState::new(table, events, inflight)
                 .with_budgets(budgets)
+                .with_backends(backends)
                 .with_failures(failures)
                 .with_outcomes(outcomes),
             timeout,

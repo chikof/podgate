@@ -33,7 +33,7 @@ async fn explain_known_host() {
                 {"id": "r1", "state": "draining", "weight": 30, "effective_weight": 0, "upstreams": [old.addr.to_string()]},
                 {"id": "r2", "state": "serving", "weight": 70, "effective_weight": 70, "upstreams": [new.addr.to_string()]},
             ],
-            "middleware": ["acme_http01", "route", "inflight_admit", "tenant_admit", "failure_capture"],
+            "middleware": ["acme_http01", "route", "inflight_admit", "tenant_admit", "backend_admit", "failure_capture"],
         })
     );
 
@@ -45,6 +45,7 @@ async fn explain_known_host() {
             "route",
             "inflight_admit",
             "tenant_admit",
+            "backend_admit",
             "failure_capture"
         ])
     );
