@@ -7,8 +7,12 @@
 //! GHSA-53qr-784g-cj35, GHSA-xv5x-242w-7hf7, GHSA-p956-6gvv-mxqp).
 //!
 //! [`isolate`] sets `HttpPeer::group_key`, which Pingora mixes into the reuse hash next to the
-//! upstream address. The key is `(tenant, app, revision)`, so the pool key is
-//! `(tenant, app, revision, upstream addr)`.
+//! upstream address. The key is `(tenant, app, revision, transport)`, so the pool key is
+//! `(tenant, app, revision, transport, upstream addr)`. The transport is the fingerprint of the
+//! service's `servers_transport` (every field, client certificate and key included) and whether
+//! the connection is TLS, so TLS and plain connections, or connections with different client
+//! certificates, never mix. Pingora's own hash names a client certificate by its serial number
+//! alone.
 //!
 //! # NTLM and Negotiate
 //!
@@ -79,6 +83,8 @@ pub struct Identity<'a> {
     pub app: &'a str,
     /// The revision's id.
     pub revision: &'a str,
+    /// The transport the connection is made with: its fingerprint and whether it is TLS.
+    pub transport: u64,
 }
 
 /// What a pooled connection is shared with, beyond its [`Identity`].
@@ -93,16 +99,18 @@ enum Pin {
 }
 
 impl<'a> Identity<'a> {
-    /// The identity of the app and revision `selected` points at in `table`, or `None` when it
-    /// points outside the table.
+    /// The identity of the app and revision `selected` points at in `table`, reached through the
+    /// transport with pool key `transport` ([`crate::service::Upstream::pool_key`]), or `None`
+    /// when it points outside the table.
     #[must_use]
-    pub fn of(table: &'a RoutingTable, selected: &Selected) -> Option<Self> {
+    pub fn of(table: &'a RoutingTable, selected: &Selected, transport: u64) -> Option<Self> {
         let app = table.app(selected.app)?;
         let revision = app.revisions().get(selected.revision)?;
         Some(Self {
             tenant: app.tenant(),
             app: app.id(),
             revision: revision.id(),
+            transport,
         })
     }
 }
@@ -164,7 +172,13 @@ pub fn isolate(peer: &mut HttpPeer, identity: Identity<'_>, state: State, sessio
 }
 
 fn group_key(identity: Identity<'_>, pin: Pin) -> u64 {
-    KEYS.hash_one((identity.tenant, identity.app, identity.revision, pin))
+    KEYS.hash_one((
+        identity.tenant,
+        identity.app,
+        identity.revision,
+        identity.transport,
+        pin,
+    ))
 }
 
 fn pin_for(session: &Session) -> Pin {
@@ -203,6 +217,7 @@ mod test {
         tenant: "t1",
         app: "a",
         revision: "r1",
+        transport: 0,
     };
 
     #[test]
@@ -301,12 +316,14 @@ mod test {
             other(Identity {
                 tenant: "ab",
                 app: "c",
-                revision: "r1"
+                revision: "r1",
+                transport: 0
             }),
             other(Identity {
                 tenant: "a",
                 app: "bc",
-                revision: "r1"
+                revision: "r1",
+                transport: 0
             })
         );
     }
@@ -326,5 +343,24 @@ mod test {
                 assert_ne!(left, right);
             }
         }
+    }
+
+    #[test]
+    fn reuse_hash_separates_transports_even_for_equal_peers() {
+        use pingora::upstreams::peer::Peer;
+        let hash = |transport| {
+            peer(
+                "127.0.0.1:9000",
+                Identity {
+                    transport,
+                    ..IDENTITY
+                },
+                Pin::Shared,
+            )
+            .reuse_hash()
+        };
+        assert_eq!(hash(1), hash(1));
+        assert_ne!(hash(1), hash(2));
+        assert_ne!(hash(0), hash(1));
     }
 }

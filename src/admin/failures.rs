@@ -88,7 +88,7 @@ async fn replay(
     let upstream = compiled
         .first_upstream(revision)
         .ok_or_else(|| AppError::Unavailable("revision has no upstream".into()))?;
-    match failures::replay(&failed, upstream).await {
+    match failures::replay(&failed, upstream.peer()).await {
         Ok(replayed) => Ok(Json(replayed.to_json()).into_response()),
         Err(err) => Ok((
             StatusCode::BAD_GATEWAY,

@@ -73,8 +73,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| Upstream TLS, SNI, CA, client certificate | `serversTransport` | `transport http { tls_* }` | 0039 |
-| `insecureSkipVerify` | yes | `tls_insecure_skip_verify` | 0039 (allowed, listed as a posture change) |
+| Upstream TLS, SNI, CA, client certificate | `serversTransport` | `transport http { tls_* }` | built (`min_tls_version` 1.3 is `unsupported_setting`, see `docs/ref/transports.md`) |
+| `insecureSkipVerify` | yes | `tls_insecure_skip_verify` | built (allowed, listed as a posture change) |
 | HTTP/2 and h2c upstream | `h2c://`, `disableHTTP2` | `versions h2 h2c` | 0040 |
 | Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | 0040 (pool size works or is rejected) |
 | SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | 0104 (Workload API client, one SVID per tenant, upstream mTLS and client identity) |

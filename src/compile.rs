@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -29,7 +30,7 @@ use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{self, Service};
+use crate::service::{self, NamedTransport, Service, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::CertStore;
 use crate::wasm as engine;
@@ -218,7 +219,14 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut parts = Vec::with_capacity(snapshot.apps.len());
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let stages = stages_of(app, app_routers, &mut engine, &mut rejected);
-        let services = services_of(app, app_routers, context.upstream_policy(), &mut rejected);
+        let transports = transports_of(app, &mut rejected);
+        let services = services_of(
+            app,
+            app_routers,
+            context.upstream_policy(),
+            &transports,
+            &mut rejected,
+        );
         parts.push((stages, services));
     }
     if !rejected.is_empty() {
@@ -354,15 +362,11 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
                 }
             }
         }
-        if let Some(transport) = app.transports.first() {
-            problem(
-                format!("transport {}", transport.name),
-                Invalid::new(
-                    "transport_not_built",
-                    "upstream transports are planned and not built yet",
-                ),
-            );
-        }
+        duplicates(
+            "transport",
+            app.transports.iter().map(|declared| &*declared.name),
+            &mut problem,
+        );
         if let Some(invalid) = l4::reject(app) {
             problem("tcp/udp".to_owned(), invalid);
         }
@@ -668,17 +672,42 @@ fn expand_name<'a>(
     Ok(())
 }
 
+/// Compiles the transports of `app`. A transport no service names is still compiled, so a bad one
+/// is refused whether or not it is used. A bad one keeps its name with a placeholder, so the
+/// services naming it do not add an `unknown_transport` to the one real problem; the snapshot is
+/// refused, so the placeholder is never used.
+fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<NamedTransport> {
+    app.transports
+        .iter()
+        .map(|declared| {
+            let transport = Transport::compile(declared).unwrap_or_else(|invalid| {
+                rejected.push(Rejected::new(
+                    app,
+                    format!("transport {}", declared.name),
+                    invalid,
+                ));
+                Transport::default()
+            });
+            NamedTransport {
+                name: declared.name.clone(),
+                transport: Arc::new(transport),
+            }
+        })
+        .collect()
+}
+
 /// Compiles the services of `app` and of each of its revisions, and finds every router's
 /// service in every revision. The literal server addresses of every service must pass `policy`.
 fn services_of(
     app: &App,
     routers: &[CompiledRouter],
     policy: &UpstreamPolicy,
+    transports: &[NamedTransport],
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
         |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
-            declared,
+            declared, transports,
         ) {
             Ok(service) => {
                 for invalid in
@@ -762,7 +791,6 @@ fn services_of(
 }
 
 /// Hashes anything that is `Hash`, for fingerprints that only need equality within a process.
-#[allow(dead_code, reason = "kept for kinds that fingerprint their own state")]
 pub(crate) fn hash_of(value: &impl Hash) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     value.hash(&mut hasher);

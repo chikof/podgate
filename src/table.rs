@@ -8,7 +8,7 @@
 //! routers, middleware stages, services and revisions, the router index, and the weighted
 //! choice of a revision and server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -27,7 +27,7 @@ use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
 use crate::middleware;
 use crate::router::{CompiledRouter, Index, Matched};
-use crate::service::{self, Lease, PickCx};
+use crate::service::{self, Lease, PickCx, Upstream};
 use crate::tls::{CertError, CertStore};
 use podgate_model::SkewSecret;
 use podgate_model::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
@@ -477,15 +477,31 @@ impl CompiledApp {
     }
 
     /// The first server of revision `revision`, whichever service it belongs to: the revision's
-    /// own services first, then the app's. `None` when it has none.
+    /// own services first, then the app's, with the transport that reaches it. `None` when it
+    /// has none.
     #[must_use]
-    pub fn first_upstream(&self, revision: usize) -> Option<SocketAddr> {
+    pub fn first_upstream(&self, revision: usize) -> Option<Upstream<'_>> {
         let revision = self.revisions.get(revision)?;
         revision
             .services
             .iter()
             .chain(self.services.iter())
-            .find_map(|named| named.service.servers().first().map(|server| server.addr))
+            .find_map(|named| {
+                let addr = named.service.servers().first()?.addr;
+                named.service.upstream(addr)
+            })
+    }
+
+    /// The names of the services, the app's and every revision's, that connect to an `https://`
+    /// server without verifying its certificate: what a plan compares to list the relaxation.
+    #[must_use]
+    pub fn unverified_services(&self) -> BTreeSet<&str> {
+        self.services
+            .iter()
+            .chain(self.revisions.iter().flat_map(|rev| rev.services.iter()))
+            .filter(|named| named.service.skips_tls_verification())
+            .map(|named| &*named.name)
+            .collect()
     }
 
     fn take(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {

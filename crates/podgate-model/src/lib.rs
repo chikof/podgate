@@ -163,7 +163,7 @@ pub struct Router {
 ///
 /// The envelope only knows the name and the type; the module of that type owns the rest and
 /// parses it strictly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declared {
     /// Unique among the app's objects of this kind of object.
     pub name: Box<str>,
@@ -173,6 +173,36 @@ pub struct Declared {
     /// The type's own fields.
     #[serde(flatten)]
     pub config: Map<String, Value>,
+}
+
+impl fmt::Debug for Declared {
+    /// Like the derive, but every `key_pem` in the configuration, at any depth, shows as
+    /// `[redacted]`: a transport's client certificate key must not reach a log.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn redacted(value: &Value) -> Value {
+            match value {
+                Value::Object(map) => Value::Object(
+                    map.iter()
+                        .map(|(key, value)| {
+                            let shown = if key == "key_pem" {
+                                Value::from("[redacted]")
+                            } else {
+                                redacted(value)
+                            };
+                            (key.clone(), shown)
+                        })
+                        .collect(),
+                ),
+                Value::Array(items) => Value::Array(items.iter().map(redacted).collect()),
+                other => other.clone(),
+            }
+        }
+        f.debug_struct("Declared")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("config", &redacted(&Value::Object(self.config.clone())))
+            .finish()
+    }
 }
 
 /// Canary policy of an app: the rollout of one revision, judged by its own `5xx` rate.
@@ -348,6 +378,19 @@ impl fmt::Debug for Acme {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn declared_debug_redacts_every_key_pem() {
+        let declared: Declared = serde_json::from_str(
+            r#"{"name": "t", "type": "servers_transport", "server_name": "x.test",
+                "client_cert": {"cert_pem": "CERT", "key_pem": "SECRET"},
+                "more": [{"key_pem": "SECRET2"}]}"#,
+        )
+        .expect("declared");
+        let shown = format!("{declared:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("[redacted]") && shown.contains("CERT") && shown.contains("x.test"));
+    }
 
     #[test]
     fn declared_keeps_the_kind_fields_apart_from_name_and_type() {

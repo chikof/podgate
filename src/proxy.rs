@@ -497,12 +497,19 @@ impl ProxyHttp for Gateway {
             .ok_or_else(|| Error::explain(InternalError, "upstream_peer without a route"))?;
         // The one place a proxied request dials: every address, whatever produced it, is checked.
         self.check_upstream(&ctx.table, &selected)?;
-        let mut peer = HttpPeer::new(selected.upstream, false, String::new());
+        let outside = || Error::explain(InternalError, "route points outside the table");
+        let upstream = ctx
+            .table
+            .app(selected.app)
+            .and_then(|app| app.service(selected.revision, selected.router))
+            .and_then(|service| service.upstream(selected.upstream))
+            .ok_or_else(outside)?;
+        let mut peer = upstream.peer();
         peer.options.connection_timeout = Some(self.upstream_timeout);
         peer.options.read_timeout = Some(self.upstream_timeout);
         peer.options.write_timeout = Some(self.upstream_timeout);
-        let identity = pool::Identity::of(&ctx.table, &selected)
-            .ok_or_else(|| Error::explain(InternalError, "route points outside the table"))?;
+        let identity =
+            pool::Identity::of(&ctx.table, &selected, upstream.pool_key()).ok_or_else(outside)?;
         pool::observe(&mut ctx.pool, session.req_header());
         pool::isolate(&mut peer, identity, ctx.pool, session);
         Ok(Box::new(peer))

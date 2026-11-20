@@ -13,11 +13,11 @@
 //! | `failover` | `failover.rs` |
 //!
 //! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
-//! (`state.rs`, see [`state`]), and, empty until their specs land, active health checks
-//! (`health.rs`), passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`),
-//! upstream transports (`transport.rs`) and DNS upstreams (`resolve.rs`). [`upstream_policy`]
-//! is built: the operator's rule for which addresses a tenant's servers may have, checked by the
-//! compiler and before every connection.
+//! (`state.rs`, see [`state`]), upstream transports (`transport.rs`: the TLS settings of the
+//! connection to a server), and, empty until their specs land, active health checks
+//! (`health.rs`), passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`) and DNS
+//! upstreams (`resolve.rs`). [`upstream_policy`] is built: the operator's rule for which
+//! addresses a tenant's servers may have, checked by the compiler and before every connection.
 //!
 //! Adding a service type: a file here with `compile` and `pick`, one variant in [`Service`] and
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
@@ -44,6 +44,7 @@ pub use lb::PickCx;
 pub use loadbalancer::{LoadBalancer, Server};
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
+pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transport, Upstream};
 
 /// Service types that are planned and not built yet.
 const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
@@ -72,9 +73,9 @@ impl Service {
     /// `service_not_built` for a planned type nobody has built, `invalid_service` for an unknown
     /// type or a configuration the type refuses, `dns_upstream_not_built` for a server named by
     /// host name.
-    pub fn compile(declared: &Declared) -> Result<Self, Invalid> {
+    pub fn compile(declared: &Declared, transports: &[NamedTransport]) -> Result<Self, Invalid> {
         match &*declared.kind {
-            "loadbalancer" => LoadBalancer::compile(declared).map(Self::LoadBalancer),
+            "loadbalancer" => LoadBalancer::compile(declared, transports).map(Self::LoadBalancer),
             other if UNBUILT.contains(&other) => Err(Invalid::new(
                 "service_not_built",
                 format!("service type {other} is planned and not built yet"),
@@ -106,6 +107,24 @@ impl Service {
     #[must_use]
     pub fn has_servers(&self) -> bool {
         !self.servers().is_empty()
+    }
+
+    /// The server at `addr` and the transport that reaches it, or `None` when the service has no
+    /// such server.
+    #[must_use]
+    pub fn upstream(&self, addr: SocketAddr) -> Option<Upstream<'_>> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.upstream(addr),
+        }
+    }
+
+    /// Whether some `https://` server of the service skips certificate verification
+    /// (`insecure_skip_verify`).
+    #[must_use]
+    pub fn skips_tls_verification(&self) -> bool {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.skips_tls_verification(),
+        }
     }
 
     /// The address of the server a new request goes to and the [`Lease`] that counts the request

@@ -458,13 +458,14 @@ impl Replayed {
     }
 }
 
-/// Re-sends `failed` to `upstream` on a new connection and returns the answer.
+/// Re-sends `failed` to `peer`, the upstream as the proxy would reach it (TLS settings included),
+/// on a new connection and returns the answer.
 ///
 /// # Errors
 ///
 /// Fails when the upstream cannot be reached, resets, times out after 10 seconds or
 /// answers something that is not HTTP/1.1.
-pub async fn replay(failed: &FailedRequest, upstream: SocketAddr) -> Result<Replayed, ReplayError> {
+pub async fn replay(failed: &FailedRequest, mut peer: HttpPeer) -> Result<Replayed, ReplayError> {
     let body: &[u8] = match &failed.request_body {
         Body::Kept(bytes) => bytes,
         Body::NotRecorded | Body::TooLarge => &[],
@@ -479,7 +480,6 @@ pub async fn replay(failed: &FailedRequest, upstream: SocketAddr) -> Result<Repl
         request.insert_header("content-length", body.len().to_string())?;
     }
 
-    let mut peer = HttpPeer::new(upstream, false, String::new());
     peer.options.connection_timeout = Some(REPLAY_TIMEOUT);
     peer.options.read_timeout = Some(REPLAY_TIMEOUT);
     peer.options.write_timeout = Some(REPLAY_TIMEOUT);

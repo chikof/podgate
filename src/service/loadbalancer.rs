@@ -6,12 +6,14 @@
 //! ```
 //!
 //! `servers` may be empty: the service then has no server, and a `scale_to_zero` app wakes on
-//! the first request. Built today: plain `http://ip:port` servers and the algorithms
-//! `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma` and `random` (see
+//! the first request. Built today: `http://ip:port` and `https://ip:port` servers and the
+//! algorithms `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma` and `random` (see
 //! [`super::lb`]); only `weighted_round_robin` takes server weights, and a weight of `0` there
-//! means the server receives nothing. Planned fields (`health_check`, `passive`, `sticky`,
-//! `transport`, a `false` `pass_host_header`), planned algorithms and `https://` or `h2c://`
-//! servers are refused with `service_not_built`; a server named by host name is
+//! means the server receives nothing. An `https://` server is reached through the service's
+//! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
+//! Planned fields (`health_check`, `passive`, `sticky`, a `false` `pass_host_header`), planned
+//! algorithms and `h2c://` servers are refused with `service_not_built`; a server named by host
+//! name is
 //! `dns_upstream_not_built`.
 //!
 //! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
@@ -27,6 +29,7 @@ use serde_json::Value;
 
 use super::lb::{Balancer, PickCx};
 use super::state::{self, Lease, ServerState, ServiceState};
+use super::transport::{self, Transport, Upstream};
 use crate::compile::Invalid;
 use podgate_model::Declared;
 
@@ -65,6 +68,8 @@ pub struct Server {
     pub url: Box<str>,
     /// The address to connect to.
     pub addr: SocketAddr,
+    /// Whether the server is reached over TLS (`https://`).
+    pub tls: bool,
     /// The relative weight, `1` by default; only `weighted_round_robin` uses it, and there `0`
     /// means no requests.
     pub weight: u32,
@@ -88,6 +93,7 @@ pub struct LoadBalancer {
     balancer: Balancer,
     shared: Arc<ServiceState>,
     fingerprint: u64,
+    transport: Arc<Transport>,
 }
 
 fn not_built(what: &str) -> Invalid {
@@ -97,18 +103,15 @@ fn not_built(what: &str) -> Invalid {
     )
 }
 
-/// Parses `http://ip:port`.
+/// Parses `http://ip:port` and `https://ip:port`.
 fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
     let url = config.url.as_str();
     let invalid = |why: &str| Invalid::new("invalid_service", format!("server {url}: {why}"));
-    let rest = match url.split_once("://") {
-        Some(("http", rest)) => rest,
-        Some(("https" | "h2c", _)) => {
-            return Err(not_built(
-                "upstream TLS and h2c (https:// and h2c:// servers)",
-            ));
-        }
-        _ => return Err(invalid("expected http://ip:port")),
+    let (rest, tls) = match url.split_once("://") {
+        Some(("http", rest)) => (rest, false),
+        Some(("https", rest)) => (rest, true),
+        Some(("h2c", _)) => return Err(not_built("h2c servers (h2c://)")),
+        _ => return Err(invalid("expected http://ip:port or https://ip:port")),
     };
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     let addr: SocketAddr = match rest.parse() {
@@ -129,20 +132,24 @@ fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
                     ),
                 )
             } else {
-                invalid("expected http://ip:port")
+                invalid("expected http://ip:port or https://ip:port")
             });
         }
     };
     Ok(Server {
         url: url.into(),
         addr,
+        tls,
         weight: config.weight.unwrap_or(1),
         state: Arc::default(),
     })
 }
 
 impl LoadBalancer {
-    pub(super) fn compile(declared: &Declared) -> Result<Self, Invalid> {
+    pub(super) fn compile(
+        declared: &Declared,
+        transports: &[transport::Named],
+    ) -> Result<Self, Invalid> {
         let config: Config = serde_json::from_value(Value::Object(declared.config.clone()))
             .map_err(|err| Invalid::new("invalid_service", format!("loadbalancer: {err}")))?;
         if config.health_check.is_some() {
@@ -154,9 +161,10 @@ impl LoadBalancer {
         if config.sticky.is_some() {
             return Err(not_built("sticky"));
         }
-        if config.transport.is_some() {
-            return Err(not_built("transport"));
-        }
+        let transport = match config.transport.as_deref() {
+            Some(name) => transport::find(transports, name)?,
+            None => Arc::new(Transport::default()),
+        };
         if config.pass_host_header == Some(false) {
             return Err(not_built("pass_host_header: false"));
         }
@@ -165,12 +173,34 @@ impl LoadBalancer {
             .iter()
             .map(parse_server)
             .collect::<Result<_, _>>()?;
+        if !servers.iter().all(|server| server.tls) && transport.has_tls_settings() {
+            return Err(Invalid::new(
+                "invalid_service",
+                "the transport sets TLS options and a server is plain http://",
+            ));
+        }
+        // The proxy picks a server by address: one address cannot be both TLS and plain.
+        for (index, server) in servers.iter().enumerate() {
+            if servers[..index]
+                .iter()
+                .any(|earlier| earlier.addr == server.addr && earlier.tls != server.tls)
+            {
+                return Err(Invalid::new(
+                    "invalid_service",
+                    format!(
+                        "server {}: the address is also a server with another scheme",
+                        server.url
+                    ),
+                ));
+            }
+        }
         let balancer = Balancer::compile(config.algorithm.as_deref(), &servers)?;
         Ok(Self {
             servers,
             balancer,
             shared: Arc::default(),
             fingerprint: state::fingerprint(declared),
+            transport,
         })
     }
 
@@ -184,6 +214,23 @@ impl LoadBalancer {
     #[must_use]
     pub fn algorithm(&self) -> &'static str {
         self.balancer.name()
+    }
+
+    /// The server at `addr` and the transport that reaches it, or `None` when the service has no
+    /// such server.
+    #[must_use]
+    pub fn upstream(&self, addr: SocketAddr) -> Option<Upstream<'_>> {
+        let server = self.servers.iter().find(|server| server.addr == addr)?;
+        Some(Upstream {
+            server,
+            transport: &self.transport,
+        })
+    }
+
+    /// Whether some `https://` server skips certificate verification.
+    #[must_use]
+    pub fn skips_tls_verification(&self) -> bool {
+        self.transport.insecure_skip_verify() && self.servers.iter().any(|server| server.tls)
     }
 
     /// The address of the server a new request goes to, with the [`Lease`] that counts the
@@ -213,7 +260,7 @@ mod test {
 
     fn compile(value: Value) -> Result<LoadBalancer, Invalid> {
         let declared: Declared = serde_json::from_value(value).expect("declared");
-        LoadBalancer::compile(&declared)
+        LoadBalancer::compile(&declared, &[])
     }
 
     fn code(value: Value) -> &'static str {
@@ -237,10 +284,33 @@ mod test {
     }
 
     #[test]
+    fn https_servers_compile_and_summarize_their_transport() {
+        let balancer = compile(lb(&json!([{ "url": "https://127.0.0.1:1" }]))).expect("https");
+        assert!(balancer.servers()[0].tls);
+        let upstream = balancer
+            .upstream("127.0.0.1:1".parse().expect("addr"))
+            .expect("known");
+        assert!(upstream.summary().is_some());
+        assert!(
+            balancer
+                .upstream("127.0.0.1:2".parse().expect("addr"))
+                .is_none()
+        );
+        let plain = compile(lb(&json!([{ "url": "http://127.0.0.1:1" }]))).expect("http");
+        let upstream = plain
+            .upstream("127.0.0.1:1".parse().expect("addr"))
+            .expect("known");
+        assert!(upstream.summary().is_none());
+    }
+
+    #[test]
     fn planned_and_malformed_settings_are_refused_with_their_codes() {
         assert_eq!(
-            code(lb(&json!([{ "url": "https://127.0.0.1:1" }]))),
-            "service_not_built"
+            code(lb(&json!([
+                { "url": "https://127.0.0.1:1" },
+                { "url": "http://127.0.0.1:1" },
+            ]))),
+            "invalid_service"
         );
         assert_eq!(
             code(lb(&json!([{ "url": "h2c://127.0.0.1:1" }]))),

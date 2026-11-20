@@ -213,6 +213,7 @@ mod test_support {
             .map(|(weight, port)| Server {
                 url: format!("http://127.0.0.1:{port}").into(),
                 addr: ([127, 0, 0, 1], port).into(),
+                tls: false,
                 weight: *weight,
                 state: Arc::new(ServerState::default()),
             })

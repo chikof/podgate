@@ -31,6 +31,9 @@ pub mod kind {
     pub const DOMAIN_FRONTING_ENABLED: &str = "domain_fronting_enabled";
     /// Certificates for the host are now issued at the first handshake instead of in advance.
     pub const ON_DEMAND_TLS_ENABLED: &str = "on_demand_tls_enabled";
+    /// An `https://` upstream is now reached without verifying its certificate
+    /// (`insecure_skip_verify` of a `servers_transport`).
+    pub const UPSTREAM_TLS_VERIFICATION_DISABLED: &str = "upstream_tls_verification_disabled";
 }
 
 /// What stands in the `host` of a [`PostureChange`] that is about an entry point, followed by its
@@ -98,6 +101,14 @@ fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str>
     }
     if candidate.tls().mode == TlsMode::OnDemand && live.tls().mode != TlsMode::OnDemand {
         kinds.push(kind::ON_DEMAND_TLS_ENABLED);
+    }
+    let unverified = live.unverified_services();
+    if candidate
+        .unverified_services()
+        .iter()
+        .any(|name| !unverified.contains(name))
+    {
+        kinds.push(kind::UPSTREAM_TLS_VERIFICATION_DISABLED);
     }
     let used_now = used_stages(candidate);
     for index in used_stages(live) {
