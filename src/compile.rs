@@ -241,12 +241,14 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             context.upstream_policy(),
             &transports,
             snapshot.skew_secret.as_ref(),
-            context.static_roots().of(&app.tenant),
-            snapshot
-                .tenants
-                .iter()
-                .find(|tenant| tenant.id == app.tenant)
-                .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
+            StaticCx {
+                roots: context.static_roots().of(&app.tenant),
+                max_buffer_bytes: snapshot
+                    .tenants
+                    .iter()
+                    .find(|tenant| tenant.id == app.tenant)
+                    .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
+            },
             &mut rejected,
         );
         parts.push((stages, services));
@@ -724,6 +726,15 @@ fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<NamedTransport>
         .collect()
 }
 
+/// What `static` services need to know about their app's tenant.
+#[derive(Clone, Copy)]
+struct StaticCx<'a> {
+    /// The roots the operator declared for the tenant.
+    roots: Option<&'a TenantRoots>,
+    /// The tenant's `max_buffer_bytes`.
+    max_buffer_bytes: u64,
+}
+
 /// Compiles the services of `app` and of each of its revisions, and finds every router's
 /// service in every revision. The literal server addresses of every service must pass `policy`.
 fn services_of(
@@ -732,15 +743,14 @@ fn services_of(
     policy: &UpstreamPolicy,
     transports: &[NamedTransport],
     skew_secret: Option<&SkewSecret>,
-    static_roots: Option<&TenantRoots>,
-    max_buffer_bytes: u64,
+    statics: StaticCx<'_>,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
         |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
             declared,
             transports,
-            static_roots,
+            statics.roots,
         )
         .and_then(|mut service| {
             service.bind_sticky(skew_secret, &app.id, &declared.name)?;
@@ -748,7 +758,7 @@ fn services_of(
         }) {
             Ok(service) => {
                 if let Some(site) = service.as_static()
-                    && let Err(invalid) = site.check_budget(&app.tenant, max_buffer_bytes)
+                    && let Err(invalid) = site.check_budget(&app.tenant, statics.max_buffer_bytes)
                 {
                     rejected.push(Rejected::new(app, at.as_str(), invalid));
                 }

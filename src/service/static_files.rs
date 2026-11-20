@@ -401,6 +401,10 @@ mod test {
             json!({ "root": "site", "cache_control": { "nope": "x" } }),
             json!({ "root": "site", "precompressed": ["zstd"] }),
             json!({ "root": "site", "max_file_bytes": 0 }),
+            // There is no server to pin a client to, and nothing to dial or probe.
+            json!({ "root": "site", "sticky": { "cookie": {} } }),
+            json!({ "root": "site", "health_check": { "path": "/" } }),
+            json!({ "root": "site", "servers": [{ "url": "http://127.0.0.1:1" }] }),
             json!({ "index": ["index.html"] }),
         ] {
             assert_eq!(code(config.clone()), "invalid_service", "{config}");

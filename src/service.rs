@@ -64,7 +64,7 @@ const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
 #[derive(Debug)]
 pub enum Service {
     /// `loadbalancer`: a set of servers and an algorithm.
-    LoadBalancer(LoadBalancer),
+    LoadBalancer(Box<LoadBalancer>),
     /// `static`: files from an operator-declared directory. Has no server.
     Static(Arc<StaticSite>),
 }
@@ -93,7 +93,8 @@ impl Service {
         static_roots: Option<&TenantRoots>,
     ) -> Result<Self, Invalid> {
         match &*declared.kind {
-            "loadbalancer" => LoadBalancer::compile(declared, transports).map(Self::LoadBalancer),
+            "loadbalancer" => LoadBalancer::compile(declared, transports)
+                .map(|balancer| Self::LoadBalancer(Box::new(balancer))),
             "static" => {
                 StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
             }

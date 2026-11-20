@@ -11,8 +11,8 @@ use crate::acme;
 use crate::entry::{self, EntryPoint};
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
-use crate::service::health;
 use crate::service::StaticRoots;
+use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
 
