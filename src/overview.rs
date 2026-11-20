@@ -371,6 +371,9 @@ struct CertificateView<'a> {
     not_after: Option<i64>,
     /// `acme` when the issuer renews it, `snapshot` when the control plane supplies it.
     source: &'static str,
+    /// Served for names no certificate covers; absent otherwise.
+    #[serde(skip_serializing_if = "is_false")]
+    default: bool,
 }
 
 fn certificates(
@@ -403,6 +406,7 @@ fn certificates(
             hosts: &cert.hosts,
             issuer: cert.issuer.as_deref(),
             not_after: cert.not_after,
+            default: cert.default,
             source: if table
                 .acme()
                 .certs()
