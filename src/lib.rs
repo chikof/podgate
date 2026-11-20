@@ -161,6 +161,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let server_conf = ServerConf {
         threads: std::thread::available_parallelism().map_or(1, usize::from),
         grace_period_seconds: Some(timeout.as_secs()),
+        upstream_keepalive_pool_size: config.upstream_pool_size.get(),
         ..ServerConf::default()
     };
     let mut server = Server::new_with_opt_and_conf(None::<Opt>, server_conf);

@@ -52,7 +52,7 @@ use pingora::Error;
 use pingora::ErrorSource;
 use pingora::ErrorType::{ConnectionClosed, HTTPStatus, InternalError, ReadError, WriteError};
 use pingora::http::{RequestHeader, ResponseHeader};
-use pingora::protocols::Digest;
+use pingora::protocols::{ALPN, Digest};
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
@@ -838,10 +838,12 @@ impl ProxyHttp for Gateway {
     }
 
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
-        // Pingora's own choice of status, so a page replaces exactly the answer it would send.
+        // Pingora's own choice of status, so a page replaces exactly the answer it would send,
+        // but for an upstream timeout, which is a `504`.
         let code = match e.etype() {
             HTTPStatus(code) => *code,
             _ => match e.esource() {
+                ErrorSource::Upstream if crate::service::timed_out(e) => 504,
                 ErrorSource::Upstream => 502,
                 ErrorSource::Downstream => match e.etype() {
                     WriteError | ReadError | ConnectionClosed => 0,
@@ -911,10 +913,12 @@ impl ProxyHttp for Gateway {
             .and_then(|app| app.service(selected.revision, selected.router))
             .and_then(|service| service.upstream(selected.upstream))
             .ok_or_else(outside)?;
-        let mut peer = upstream.peer();
-        peer.options.connection_timeout = Some(self.upstream_timeout);
-        peer.options.read_timeout = Some(self.upstream_timeout);
-        peer.options.write_timeout = Some(self.upstream_timeout);
+        let mut peer = upstream.http_peer(self.upstream_timeout);
+        // Pingora's HTTP/2 client has no Upgrade: a WebSocket request asks the TLS server for
+        // HTTP/1.1 even when the transport offers h2.
+        if session.is_upgrade_req() && matches!(peer.options.alpn, ALPN::H2H1) {
+            peer.options.alpn = ALPN::H1;
+        }
         let identity =
             pool::Identity::of(&ctx.table, &selected, upstream.pool_key()).ok_or_else(outside)?;
         pool::observe(&mut ctx.pool, session.req_header());

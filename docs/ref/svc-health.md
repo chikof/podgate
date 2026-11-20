@@ -42,6 +42,7 @@ A field that is missing, unknown or out of range is `invalid_service`, and the w
 - Only the declared servers: the IP of the server, on `port` when the check sets one. Nothing from a request, a response header or a `Location` is ever dialled; a redirect is read and not followed.
 - Every probe calls the upstream address policy (`docs/ref/upstream-policy.md`) with the tenant and the exact IP it is about to dial. A refusal fails the probe and counts in `podgate_upstream_refused_total{tenant}`.
 - Probes connect through Pingora's `TransportConnector`, the connect path of the proxy. The peer comes from the service's transport (`Check::peer`, via `Upstream::peer`), so an `https://` server is probed with the trust anchors, SNI and client certificate of its requests, and the dialled IP is still checked against the policy.
+- A probe is HTTP/1.1 by hand: it asks a TLS server for ALPN `http/1.1`, so a server that offers `h2` to proxied requests is still probed in HTTP/1.1. An `h2c://` server cannot answer it, so a service with an `h2c://` server and a `health_check` is refused (`service_not_built`). See `docs/ref/transports.md`.
 
 ## Bounds
 

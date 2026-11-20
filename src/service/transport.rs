@@ -1,11 +1,14 @@
 //! Upstream transports: `servers_transport` objects that a `loadbalancer` names with
-//! `transport`. They decide how podgate talks TLS to the servers of that service.
+//! `transport`. They decide how podgate talks to the servers of that service: TLS, HTTP/2,
+//! timeouts.
 //!
 //! ```json
 //! { "name": "internal", "type": "servers_transport",
 //!   "server_name": "backend.internal", "ca_pem": "-----BEGIN CERTIFICATE-----...",
 //!   "client_cert": { "cert_pem": "...", "key_pem": "..." },
-//!   "insecure_skip_verify": false, "min_tls_version": "1.2" }
+//!   "insecure_skip_verify": false, "min_tls_version": "1.2",
+//!   "http2": true, "dial_timeout_secs": 5, "read_timeout_secs": 30,
+//!   "write_timeout_secs": 30, "idle_timeout_secs": 90 }
 //! ```
 //!
 //! | Field | Meaning |
@@ -15,11 +18,17 @@
 //! | `client_cert` | `cert_pem` (leaf first) and `key_pem` presented to a server that asks for one. Redacted in `Debug` and explain. |
 //! | `insecure_skip_verify` | Do not verify the server's certificate or name. Allowed, and a posture change in a plan (`upstream_tls_verification_disabled`). |
 //! | `min_tls_version` | `"1.2"`, the floor Pingora's rustls connector always applies. `"1.3"` has no knob there and is refused with `unsupported_setting`. |
+//! | `http2` | Default `true`: an `https://` server is offered `h2` and `http/1.1` by ALPN and gets whatever it picks. `false`: HTTP/1.1 only. An `h2c://` server needs HTTP/2, so `false` with one is `invalid_transport`. |
+//! | `dial_timeout_secs` | TCP connect and TLS handshake together, 1..=3600. A timeout answers `504`. Default: `REQUEST_TIMEOUT_SECS`. |
+//! | `read_timeout_secs` | Wait for the response head, then for each read of the body, 1..=3600. A timeout answers `504` before a response started. Default: `REQUEST_TIMEOUT_SECS`. |
+//! | `write_timeout_secs` | Each write of the request, 1..=3600. Default: `REQUEST_TIMEOUT_SECS`. |
+//! | `idle_timeout_secs` | How long an unused pooled connection is kept, 1..=3600. Default: until the server closes it or the pool evicts it. |
+//! | `max_idle_per_host` | Always `unsupported_setting`: Pingora's pool is one LRU for the whole process, see `UPSTREAM_POOL_SIZE`. |
 //!
 //! A `https://` server with no transport uses [`Transport::default`]: platform roots, URL host as
-//! SNI. A transport with TLS fields named by a service with an `http://` server is refused
-//! (`invalid_service`), so a setting never goes unused without notice. Timeouts, HTTP/2 and the
-//! idle pool size are a later spec's fields; until then they are unknown fields (`invalid_transport`).
+//! SNI, `h2` offered. A transport with TLS fields named by a service with an `http://` or
+//! `h2c://` server is refused (`invalid_service`, `invalid_transport` for `h2c://`), so a setting
+//! never goes unused without notice.
 //!
 //! # Security
 //!
@@ -28,13 +37,17 @@
 //! empty: an empty `server_name` is refused, and an IP literal URL passes its address as the
 //! name, which rustls verifies against the SAN of the certificate without sending SNI.
 //!
-//! [`Transport::fingerprint`] hashes every field, the client certificate and key included. The
-//! connection pool keys on it ([`crate::pool`]), so two transports never share a connection:
-//! Pingora's own reuse hash identifies a client certificate by its serial number only.
+//! [`Transport::fingerprint`] hashes every field, the client certificate and key included, and
+//! the HTTP version and timeouts. [`Upstream::pool_key`] adds whether the server is TLS or `h2c`.
+//! The connection pool keys on both ([`crate::pool`]), so two transports never share a
+//! connection: Pingora's own reuse hash identifies a client certificate by its serial number
+//! only and knows nothing of timeouts.
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
+use pingora::protocols::ALPN;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::utils::tls::{CertKey, WrappedX509, parse_x509};
 use rustls::RootCertStore;
@@ -54,6 +67,13 @@ pub(super) const KIND: &str = "servers_transport";
 /// What `min_tls_version: "1.2"` means: Pingora's rustls connector offers TLS 1.2 and 1.3 only.
 const MIN_TLS: &str = "1.2";
 
+/// The longest timeout a transport may set, the bound `REQUEST_TIMEOUT_SECS` has too.
+const MAX_TIMEOUT_SECS: u64 = 3600;
+
+/// Concurrent HTTP/2 streams podgate opens on one upstream connection. The server's own
+/// `SETTINGS_MAX_CONCURRENT_STREAMS` still applies when it is lower: Pingora takes the smaller.
+const H2_MAX_STREAMS: usize = 100;
+
 /// What explain shows in place of the client certificate.
 const REDACTED: &str = "[redacted]";
 
@@ -70,6 +90,41 @@ pub(super) struct Config {
     insecure_skip_verify: bool,
     #[serde(default)]
     min_tls_version: Option<String>,
+    /// Offer `h2` to an `https://` server by ALPN (default true); false offers only HTTP/1.1.
+    #[serde(default)]
+    http2: Option<bool>,
+    /// TCP connect and TLS handshake, in seconds.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 3600))]
+    dial_timeout_secs: Option<u64>,
+    /// Wait for the response head, then for each read of the body, in seconds.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 3600))]
+    read_timeout_secs: Option<u64>,
+    /// Each write of the request, in seconds.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 3600))]
+    write_timeout_secs: Option<u64>,
+    /// How long an unused pooled connection is kept, in seconds.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 3600))]
+    idle_timeout_secs: Option<u64>,
+    /// Always refused with `unsupported_setting`: Pingora's pool has no per-host cap, see the
+    /// `UPSTREAM_POOL_SIZE` setting.
+    #[serde(default)]
+    max_idle_per_host: Option<Value>,
+}
+
+/// What a transport sets about the connection rather than its TLS: the HTTP version and the
+/// timeouts. `None` means the setting is not made, so the process default applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wire {
+    /// `None` when the transport does not say, which is `true` for an `https://` server.
+    http2: Option<bool>,
+    dial: Option<Duration>,
+    read: Option<Duration>,
+    write: Option<Duration>,
+    idle: Option<Duration>,
 }
 
 /// The JSON Schema of a `servers_transport`: [`Config`] plus `client_cert`, which is read by hand
@@ -98,6 +153,7 @@ pub struct Transport {
     client_cert: Option<Arc<CertKey>>,
     insecure_skip_verify: bool,
     min_tls_version: Option<&'static str>,
+    wire: Wire,
     fingerprint: u64,
 }
 
@@ -126,6 +182,21 @@ pub struct Summary<'a> {
     /// The TLS version floor, when the transport sets one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_tls_version: Option<&'static str>,
+    /// What the server is spoken to in: `http/1.1`, `h2,http/1.1` (both offered by ALPN) or
+    /// `h2c`.
+    pub protocol: &'static str,
+    /// The dial timeout, when the transport sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dial_timeout_secs: Option<u64>,
+    /// The read timeout, when the transport sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_timeout_secs: Option<u64>,
+    /// The write timeout, when the transport sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_timeout_secs: Option<u64>,
+    /// The idle pool timeout, when the transport sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// One server of a service together with the transport that reaches it.
@@ -143,8 +214,9 @@ impl Transport {
     /// # Errors
     ///
     /// `invalid_transport` for an unknown type or field, a certificate, CA or key that does not
-    /// parse or that rustls refuses, an empty or malformed `server_name`, or `ca_pem` combined
-    /// with `insecure_skip_verify`; `unsupported_setting` for `min_tls_version: "1.3"`.
+    /// parse or that rustls refuses, an empty or malformed `server_name`, `ca_pem` combined
+    /// with `insecure_skip_verify`, or a timeout outside 1..=3600 seconds;
+    /// `unsupported_setting` for `min_tls_version: "1.3"` and for `max_idle_per_host`.
     pub fn compile(declared: &Declared) -> Result<Self, Invalid> {
         let invalid = |message: String| Invalid::new("invalid_transport", message);
         if &*declared.kind != KIND {
@@ -157,6 +229,18 @@ impl Transport {
         let client = fields.remove("client_cert");
         let config: Config = serde_json::from_value(Value::Object(fields))
             .map_err(|err| invalid(err.to_string()))?;
+        if config
+            .max_idle_per_host
+            .as_ref()
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(Invalid::new(
+                "unsupported_setting",
+                "max_idle_per_host: Pingora keeps one connection pool for the whole process and \
+                 has no per-host cap; size the pool with the UPSTREAM_POOL_SIZE environment \
+                 variable",
+            ));
+        }
 
         let server_name = match config.server_name {
             None => None,
@@ -191,6 +275,13 @@ impl Transport {
                 "ca_pem has no effect with insecure_skip_verify, drop one of them".to_owned(),
             ));
         }
+        let wire = Wire {
+            http2: config.http2,
+            dial: seconds("dial_timeout_secs", config.dial_timeout_secs)?,
+            read: seconds("read_timeout_secs", config.read_timeout_secs)?,
+            write: seconds("write_timeout_secs", config.write_timeout_secs)?,
+            idle: seconds("idle_timeout_secs", config.idle_timeout_secs)?,
+        };
         let ca = config
             .ca_pem
             .as_deref()
@@ -209,6 +300,7 @@ impl Transport {
                 .map(|(cert, key)| (cert.as_str(), key.as_str())),
             config.insecure_skip_verify,
             min_tls_version,
+            wire,
         );
         let client_cert = pems
             .map(|(cert, key)| load_client_cert(&cert, &key))
@@ -220,6 +312,7 @@ impl Transport {
             client_cert,
             insecure_skip_verify: config.insecure_skip_verify,
             min_tls_version,
+            wire,
             fingerprint,
         })
     }
@@ -247,29 +340,63 @@ impl Transport {
         self.insecure_skip_verify
     }
 
-    /// What explain shows.
+    /// Whether the transport sets `http2: false`, which an `h2c://` server cannot have.
     #[must_use]
-    pub fn summary(&self) -> Summary<'_> {
+    pub fn disables_http2(&self) -> bool {
+        self.wire.http2 == Some(false)
+    }
+
+    /// What explain shows for `server`, which this transport reaches.
+    #[must_use]
+    pub fn summary(&self, server: &Server) -> Summary<'_> {
+        let secs = |timeout: Option<Duration>| timeout.map(|timeout| timeout.as_secs());
         Summary {
             server_name: self.server_name.as_deref(),
             ca: self.ca.is_some(),
             client_cert: self.client_cert.as_ref().map(|_| REDACTED),
             insecure_skip_verify: self.insecure_skip_verify,
             min_tls_version: self.min_tls_version,
+            protocol: if server.h2c {
+                "h2c"
+            } else if server.tls && self.wire.http2 != Some(false) {
+                "h2,http/1.1"
+            } else {
+                "http/1.1"
+            },
+            dial_timeout_secs: secs(self.wire.dial),
+            read_timeout_secs: secs(self.wire.read),
+            write_timeout_secs: secs(self.wire.write),
+            idle_timeout_secs: secs(self.wire.idle),
         }
+    }
+
+    /// Whether the transport sets a timeout, which explain shows even for a plain server.
+    #[must_use]
+    pub fn sets_timeouts(&self) -> bool {
+        let wire = &self.wire;
+        wire.dial.is_some() || wire.read.is_some() || wire.write.is_some() || wire.idle.is_some()
     }
 }
 
 impl Default for Transport {
-    /// The transport of a server that names none: platform roots, the URL host as SNI.
+    /// The transport of a server that names none: platform roots, the URL host as SNI, `h2`
+    /// offered over TLS, the process timeouts.
     fn default() -> Self {
+        let wire = Wire {
+            http2: None,
+            dial: None,
+            read: None,
+            write: None,
+            idle: None,
+        };
         Self {
             server_name: None,
             ca: None,
             client_cert: None,
             insecure_skip_verify: false,
             min_tls_version: None,
-            fingerprint: fingerprint(None, None, None, false, None),
+            wire,
+            fingerprint: fingerprint(None, None, None, false, None, wire),
         }
     }
 }
@@ -282,14 +409,18 @@ impl fmt::Debug for Transport {
             .field("client_cert", &self.client_cert.as_ref().map(|_| REDACTED))
             .field("insecure_skip_verify", &self.insecure_skip_verify)
             .field("min_tls_version", &self.min_tls_version)
+            .field("wire", &self.wire)
             .field("fingerprint", &self.fingerprint)
             .finish()
     }
 }
 
 impl Upstream<'_> {
-    /// A peer for the server: TLS when the server is `https://`, with the transport's name, trust
-    /// anchors and client certificate. The caller sets timeouts and the pool partition.
+    /// A peer for a client that writes HTTP/1.1 by hand over the stream the connector hands it
+    /// (health probes, error page fetches): TLS when the server is `https://`, with the
+    /// transport's name, trust anchors and client certificate, and ALPN `http/1.1` so the server
+    /// never switches to HTTP/2. No timeouts and no pool partition: the caller sets them. For
+    /// proxied requests use [`Upstream::http_peer`].
     #[must_use]
     pub fn peer(self) -> HttpPeer {
         let server = self.server;
@@ -313,19 +444,58 @@ impl Upstream<'_> {
         peer
     }
 
-    /// What the connection pool keys on besides who asks: the transport and whether the
-    /// connection is TLS, so TLS and plain connections never mix.
+    /// The ALPN of a proxied request: `h2` for an `h2c://` server (cleartext, prior knowledge),
+    /// `h2` and `http/1.1` for an `https://` server unless the transport says `http2: false`,
+    /// and `http/1.1` for everything else. A plain `http://` server is never spoken h2 to and a
+    /// TLS server is never spoken cleartext to.
+    fn alpn(self) -> ALPN {
+        if self.server.h2c {
+            ALPN::H2
+        } else if self.server.tls && self.transport.wire.http2 != Some(false) {
+            ALPN::H2H1
+        } else {
+            ALPN::H1
+        }
+    }
+
+    /// A peer for proxied requests (and the replay of one): [`Upstream::peer`] plus the HTTP
+    /// version and the transport's timeouts. A timeout the transport does not set is
+    /// `default_timeout`. TCP connect and TLS handshake share the dial timeout; the read and
+    /// write timeouts are Pingora's `read_timeout` and `write_timeout`; `idle_timeout_secs` is
+    /// the idle timeout of the pooled connection. The caller sets the pool partition.
+    #[must_use]
+    pub fn http_peer(self, default_timeout: Duration) -> HttpPeer {
+        let mut peer = self.peer();
+        let wire = self.transport.wire;
+        peer.options.alpn = self.alpn();
+        if !matches!(peer.options.alpn, ALPN::H1) {
+            peer.options.max_h2_streams = H2_MAX_STREAMS;
+        }
+        let dial = wire.dial.unwrap_or(default_timeout);
+        peer.options.connection_timeout = Some(dial);
+        peer.options.total_connection_timeout = Some(dial);
+        peer.options.read_timeout = Some(wire.read.unwrap_or(default_timeout));
+        peer.options.write_timeout = Some(wire.write.unwrap_or(default_timeout));
+        peer.options.idle_timeout = wire.idle;
+        peer
+    }
+
+    /// What the connection pool keys on besides who asks: the transport, and whether the
+    /// connection is TLS or `h2c`, so plain, TLS and HTTP/2 prior-knowledge connections never
+    /// mix.
     #[must_use]
     pub fn pool_key(self) -> u64 {
-        crate::compile::hash_of(&(self.transport.fingerprint, self.server.tls))
+        crate::compile::hash_of(&(self.transport.fingerprint, self.server.tls, self.server.h2c))
     }
 }
 
 impl<'a> Upstream<'a> {
-    /// What explain shows: the transport of a TLS server, nothing for a plain one.
+    /// What explain shows: the transport of a TLS or `h2c://` server, and of a plain one whose
+    /// transport sets a timeout.
     #[must_use]
     pub fn summary(self) -> Option<Summary<'a>> {
-        self.server.tls.then(|| self.transport.summary())
+        (self.server.tls || self.server.h2c || self.transport.sets_timeouts())
+            .then(|| self.transport.summary(self.server))
     }
 }
 
@@ -399,14 +569,38 @@ fn load_client_cert(cert_pem: &str, key_pem: &str) -> Result<Arc<CertKey>, Strin
     )))
 }
 
+/// Whether `error` is an upstream timeout: the dial, the TLS handshake, or a read or write that
+/// outlasted the transport's timeout. The proxy answers these `504`, not `502`.
+#[must_use]
+pub fn timed_out(error: &pingora::Error) -> bool {
+    use pingora::ErrorType::{ConnectTimedout, ReadTimedout, TLSHandshakeTimedout, WriteTimedout};
+    matches!(
+        error.etype(),
+        ConnectTimedout | TLSHandshakeTimedout | ReadTimedout | WriteTimedout
+    )
+}
+
+/// A timeout field: whole seconds in `1..=3600`, or not set.
+fn seconds(name: &str, value: Option<u64>) -> Result<Option<Duration>, Invalid> {
+    match value {
+        None => Ok(None),
+        Some(secs @ 1..=MAX_TIMEOUT_SECS) => Ok(Some(Duration::from_secs(secs))),
+        Some(_) => Err(Invalid::new(
+            "invalid_transport",
+            format!("{name} must be between 1 and {MAX_TIMEOUT_SECS} seconds"),
+        )),
+    }
+}
+
 /// Hashes every field, each with a presence flag and a length, so no two configurations collide
-/// by moving bytes between fields.
+/// by moving bytes between fields. An unset `http2` hashes as `true`, what it means.
 fn fingerprint(
     server_name: Option<&str>,
     ca_pem: Option<&str>,
     client: Option<(&str, &str)>,
     insecure_skip_verify: bool,
     min_tls_version: Option<&str>,
+    wire: Wire,
 ) -> u64 {
     let mut hash = Sha256::new();
     let mut field = |value: Option<&str>| match value {
@@ -423,6 +617,14 @@ fn fingerprint(
     field(client.map(|(_, key)| key));
     field(Some(if insecure_skip_verify { "1" } else { "0" }));
     field(min_tls_version);
+    field(Some(if wire.http2 == Some(false) { "0" } else { "1" }));
+    for timeout in [wire.dial, wire.read, wire.write, wire.idle] {
+        field(
+            timeout
+                .map(|timeout| timeout.as_secs().to_string())
+                .as_deref(),
+        );
+    }
     let digest = hash.finalize();
     let mut head = [0_u8; 8];
     head.copy_from_slice(&digest[..8]);
@@ -526,7 +728,21 @@ mod test {
             code(&json!({ "min_tls_version": "1.3" })),
             "unsupported_setting"
         );
-        assert_eq!(code(&json!({ "http2": true })), "invalid_transport");
+        assert_eq!(code(&json!({ "http2": "yes" })), "invalid_transport");
+        assert_eq!(
+            code(&json!({ "max_idle_per_host": 4 })),
+            "unsupported_setting"
+        );
+        for field in [
+            "dial_timeout_secs",
+            "read_timeout_secs",
+            "write_timeout_secs",
+            "idle_timeout_secs",
+        ] {
+            for bad in [json!(0), json!(3601), json!(-1), json!("5")] {
+                assert_eq!(code(&json!({ field: bad })), "invalid_transport", "{field}");
+            }
+        }
         assert_eq!(code(&cert(&p.cert, "garbage")), "invalid_transport");
         assert_eq!(code(&cert(&p.cert, &pems(2).key)), "invalid_transport");
         assert_eq!(code(&cert("garbage", &p.key)), "invalid_transport");
@@ -570,6 +786,11 @@ mod test {
             ),
             with(json!({ "insecure_skip_verify": true })),
             with(json!({})),
+            with(json!({ "http2": false })),
+            with(json!({ "dial_timeout_secs": 5 })),
+            with(json!({ "read_timeout_secs": 5 })),
+            with(json!({ "write_timeout_secs": 5 })),
+            with(json!({ "idle_timeout_secs": 5 })),
         ];
         for (index, other) in others.iter().enumerate() {
             assert_ne!(base, *other, "variant {index}");
@@ -577,6 +798,11 @@ mod test {
                 assert_ne!(other, later);
             }
         }
+        assert_eq!(
+            with(json!({ "http2": true })),
+            with(json!({})),
+            "an unset http2 means true"
+        );
     }
 
     #[test]
@@ -586,13 +812,21 @@ mod test {
             "client_cert": { "cert_pem": p.cert, "key_pem": p.key },
         }))
         .expect("compiles");
-        let shown = format!("{transport:?} {:?}", transport.summary());
+        let shown = format!(
+            "{transport:?} {:?}",
+            transport.summary(&server("https://127.0.0.1:9000", true))
+        );
         let body = p.key.lines().nth(1).expect("key body");
         assert!(
             !shown.contains(body) && !shown.contains("PRIVATE KEY"),
             "{shown}"
         );
-        assert_eq!(transport.summary().client_cert, Some("[redacted]"));
+        assert_eq!(
+            transport
+                .summary(&server("https://127.0.0.1:9000", true))
+                .client_cert,
+            Some("[redacted]")
+        );
     }
 
     fn server(url: &str, tls: bool) -> Server {
@@ -600,6 +834,7 @@ mod test {
             url: url.into(),
             addr: "127.0.0.1:9000".parse().expect("addr"),
             tls,
+            h2c: false,
             weight: 1,
             state: Arc::default(),
         }
@@ -656,5 +891,141 @@ mod test {
         }
         .peer();
         assert!(!peer.is_tls() && peer.sni.is_empty());
+    }
+
+    fn h2c_server() -> Server {
+        Server {
+            h2c: true,
+            ..server("h2c://127.0.0.1:9000", false)
+        }
+    }
+
+    fn alpn(server: &Server, transport: &Transport) -> String {
+        Upstream { server, transport }
+            .http_peer(Duration::from_secs(30))
+            .options
+            .alpn
+            .to_string()
+    }
+
+    #[test]
+    fn alpn_follows_the_scheme_and_http2_and_never_upgrades_a_plain_server() {
+        let (plain, tls) = (
+            server("http://127.0.0.1:9000", false),
+            server("https://127.0.0.1:9000", true),
+        );
+        let off = compile(&json!({ "http2": false })).expect("compiles");
+        let on = compile(&json!({ "http2": true })).expect("compiles");
+        let default = Transport::default();
+        for transport in [&default, &on, &off] {
+            assert_eq!(alpn(&plain, transport), "H1", "http:// is HTTP/1.1 only");
+        }
+        assert_eq!(alpn(&tls, &default), "H2H1");
+        assert_eq!(alpn(&tls, &on), "H2H1");
+        assert_eq!(alpn(&tls, &off), "H1");
+        assert_eq!(alpn(&h2c_server(), &default), "H2");
+        assert_eq!(alpn(&h2c_server(), &on), "H2");
+
+        let peer = Upstream {
+            server: &h2c_server(),
+            transport: &default,
+        }
+        .http_peer(Duration::from_secs(30));
+        assert!(!peer.is_tls(), "h2c is cleartext and never wraps in TLS");
+        assert!(peer.options.max_h2_streams > 1);
+        let peer = Upstream {
+            server: &plain,
+            transport: &default,
+        }
+        .http_peer(Duration::from_secs(30));
+        assert_eq!(peer.options.max_h2_streams, 1);
+
+        // The hand-written HTTP/1.1 clients (probes, error pages) always get ALPN http/1.1.
+        for (server, transport) in [(&tls, &default), (&tls, &on), (&h2c_server(), &default)] {
+            let peer = Upstream { server, transport }.peer();
+            assert_eq!(peer.options.alpn.to_string(), "H1");
+        }
+    }
+
+    #[test]
+    fn timeouts_default_to_the_caller_and_the_transport_overrides_them() {
+        let tls = server("https://127.0.0.1:9000", true);
+        let secs = |peer: &HttpPeer| {
+            let options = &peer.options;
+            (
+                options.connection_timeout,
+                options.total_connection_timeout,
+                options.read_timeout,
+                options.write_timeout,
+                options.idle_timeout,
+            )
+        };
+        let default = Upstream {
+            server: &tls,
+            transport: &Transport::default(),
+        }
+        .http_peer(Duration::from_secs(30));
+        let thirty = Some(Duration::from_secs(30));
+        assert_eq!(secs(&default), (thirty, thirty, thirty, thirty, None));
+
+        let set = compile(&json!({
+            "dial_timeout_secs": 2, "read_timeout_secs": 3,
+            "write_timeout_secs": 4, "idle_timeout_secs": 5,
+        }))
+        .expect("compiles");
+        let peer = Upstream {
+            server: &tls,
+            transport: &set,
+        }
+        .http_peer(Duration::from_secs(30));
+        let s = |secs| Some(Duration::from_secs(secs));
+        assert_eq!(secs(&peer), (s(2), s(2), s(3), s(4), s(5)));
+    }
+
+    #[test]
+    fn pool_key_separates_h2c_from_plain_and_every_wire_setting() {
+        let key =
+            |server: &Server, transport: &Transport| Upstream { server, transport }.pool_key();
+        let plain = server("http://127.0.0.1:9000", false);
+        let default = Transport::default();
+        assert_ne!(key(&plain, &default), key(&h2c_server(), &default));
+        for fields in [
+            json!({ "http2": false }),
+            json!({ "dial_timeout_secs": 5 }),
+            json!({ "read_timeout_secs": 5 }),
+            json!({ "write_timeout_secs": 5 }),
+            json!({ "idle_timeout_secs": 5 }),
+        ] {
+            let other = compile(&fields).expect("compiles");
+            assert_ne!(key(&plain, &default), key(&plain, &other), "{fields}");
+        }
+    }
+
+    #[test]
+    fn explain_shows_the_protocol_and_the_timeouts_it_was_set_to() {
+        let set = compile(&json!({ "http2": false, "read_timeout_secs": 3 })).expect("compiles");
+        let tls = server("https://127.0.0.1:9000", true);
+        let summary = Upstream {
+            server: &tls,
+            transport: &set,
+        }
+        .summary()
+        .expect("a TLS server has a summary");
+        assert_eq!(summary.protocol, "http/1.1");
+        assert_eq!(summary.read_timeout_secs, Some(3));
+        assert_eq!(summary.dial_timeout_secs, None);
+
+        let default = Transport::default();
+        let shown = |server: &Server| {
+            Upstream {
+                server,
+                transport: &default,
+            }
+            .summary()
+            .map(|summary| summary.protocol)
+        };
+        assert_eq!(shown(&tls), Some("h2,http/1.1"));
+        assert_eq!(shown(&h2c_server()), Some("h2c"));
+        assert_eq!(shown(&server("http://127.0.0.1:9000", false)), None);
     }
 }

@@ -6,18 +6,20 @@
 //! ```
 //!
 //! `servers` may be empty: the service then has no server, and a `scale_to_zero` app wakes on
-//! the first request. Built today: `http://ip:port` and `https://ip:port` servers and the
+//! the first request. Built today: `http://ip:port`, `https://ip:port` and `h2c://ip:port`
+//! (cleartext HTTP/2 by prior knowledge, for gRPC) servers and the
 //! algorithms `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma`, `random`,
 //! `ip_hash`, `uri_hash`, `header_hash` and `hrw` (see [`super::lb`]); `algorithm` is a name or
 //! an object such as `{"type": "header_hash", "header": "x-tenant"}`. Only
 //! `weighted_round_robin` and the hashing algorithms take server weights, and a weight of `0`
-//! there means the server receives nothing. An `https://` server is reached through the service's
-//! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
+//! there means the server receives nothing. A server is reached through the service's
+//! `transport` (`transport.rs`): TLS settings for `https://`, HTTP/2 and timeouts for all.
 //! `health_check` probes the servers ([`super::health`]), `passive` ejects servers that fail real
 //! requests ([`super::outlier`]), `sticky` pins a client to one server by cookie
 //! ([`super::sticky`]), and a service declares at most 256 servers. Planned fields (a `false`
-//! `pass_host_header`) and `h2c://` servers are refused with
-//! `service_not_built`; a server named by host name is `dns_upstream_not_built`.
+//! `pass_host_header`) are refused with `service_not_built`, and so is an HTTP `health_check` on
+//! a service with an `h2c://` server (the probe speaks HTTP/1.1); a server named by host name is
+//! `dns_upstream_not_built`.
 //!
 //! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
 //! the service (its turn counter) is in [`super::state`], outside the table, so a push that
@@ -80,6 +82,9 @@ pub struct Server {
     pub addr: SocketAddr,
     /// Whether the server is reached over TLS (`https://`).
     pub tls: bool,
+    /// Whether the server is reached by cleartext HTTP/2 with prior knowledge (`h2c://`). Never
+    /// together with `tls`.
+    pub h2c: bool,
     /// The relative weight, `1` by default; only `weighted_round_robin` uses it, and there `0`
     /// means no requests.
     pub weight: u32,
@@ -116,15 +121,17 @@ fn not_built(what: &str) -> Invalid {
     )
 }
 
-/// Parses `http://ip:port` and `https://ip:port`.
+const EXPECTED: &str = "expected http://ip:port, https://ip:port or h2c://ip:port";
+
+/// Parses `http://ip:port`, `https://ip:port` and `h2c://ip:port`.
 fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
     let url = config.url.as_str();
     let invalid = |why: &str| Invalid::new("invalid_service", format!("server {url}: {why}"));
-    let (rest, tls) = match url.split_once("://") {
-        Some(("http", rest)) => (rest, false),
-        Some(("https", rest)) => (rest, true),
-        Some(("h2c", _)) => return Err(not_built("h2c servers (h2c://)")),
-        _ => return Err(invalid("expected http://ip:port or https://ip:port")),
+    let (rest, tls, h2c) = match url.split_once("://") {
+        Some(("http", rest)) => (rest, false, false),
+        Some(("https", rest)) => (rest, true, false),
+        Some(("h2c", rest)) => (rest, false, true),
+        _ => return Err(invalid(EXPECTED)),
     };
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     let addr: SocketAddr = match rest.parse() {
@@ -145,7 +152,7 @@ fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
                     ),
                 )
             } else {
-                invalid("expected http://ip:port or https://ip:port")
+                invalid(EXPECTED)
             });
         }
     };
@@ -153,6 +160,7 @@ fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
         url: url.into(),
         addr,
         tls,
+        h2c,
         weight: config.weight.unwrap_or(1),
         state: Arc::default(),
     })
@@ -194,18 +202,36 @@ impl LoadBalancer {
             .iter()
             .map(parse_server)
             .collect::<Result<_, _>>()?;
-        if !servers.iter().all(|server| server.tls) && transport.has_tls_settings() {
+        if servers.iter().any(|server| server.h2c) {
+            if health.is_some() {
+                return Err(not_built(
+                    "health_check on an h2c:// server (the probe speaks HTTP/1.1)",
+                ));
+            }
+            if transport.has_tls_settings() {
+                return Err(Invalid::new(
+                    "invalid_transport",
+                    "the transport sets TLS options and a server is h2c:// (cleartext)",
+                ));
+            }
+            if transport.disables_http2() {
+                return Err(Invalid::new(
+                    "invalid_transport",
+                    "the transport sets http2: false and a server is h2c:// (HTTP/2 only)",
+                ));
+            }
+        } else if !servers.iter().all(|server| server.tls) && transport.has_tls_settings() {
             return Err(Invalid::new(
                 "invalid_service",
                 "the transport sets TLS options and a server is plain http://",
             ));
         }
-        // The proxy picks a server by address: one address cannot be both TLS and plain.
+        // The proxy picks a server by address: one address has one scheme.
         for (index, server) in servers.iter().enumerate() {
-            if servers[..index]
-                .iter()
-                .any(|earlier| earlier.addr == server.addr && earlier.tls != server.tls)
-            {
+            if servers[..index].iter().any(|earlier| {
+                earlier.addr == server.addr
+                    && (earlier.tls != server.tls || earlier.h2c != server.h2c)
+            }) {
                 return Err(Invalid::new(
                     "invalid_service",
                     format!(
@@ -372,6 +398,36 @@ mod test {
     }
 
     #[test]
+    fn h2c_servers_compile_and_never_carry_tls_or_http1_only_transports() {
+        let balancer = compile(lb(&json!([{ "url": "h2c://127.0.0.1:1" }]))).expect("h2c");
+        let server = &balancer.servers()[0];
+        assert!(server.h2c && !server.tls);
+        let upstream = balancer.upstream(server.addr).expect("known");
+        assert_eq!(upstream.summary().expect("shown").protocol, "h2c");
+        let transported = |fields: Value| {
+            let mut declared = fields;
+            declared["name"] = json!("t");
+            declared["type"] = json!("servers_transport");
+            let declared: Declared = serde_json::from_value(declared).expect("declared");
+            let named = transport::Named {
+                name: "t".into(),
+                transport: Arc::new(Transport::compile(&declared).expect("transport")),
+            };
+            let mut service = lb(&json!([{ "url": "h2c://127.0.0.1:1" }]));
+            service["transport"] = json!("t");
+            let declared: Declared = serde_json::from_value(service).expect("declared");
+            LoadBalancer::compile(&declared, &[named])
+                .expect_err("refused")
+                .code
+        };
+        assert_eq!(
+            transported(json!({ "server_name": "x.test" })),
+            "invalid_transport"
+        );
+        assert_eq!(transported(json!({ "http2": false })), "invalid_transport");
+    }
+
+    #[test]
     fn planned_and_malformed_settings_are_refused_with_their_codes() {
         assert_eq!(
             code(lb(&json!([
@@ -381,9 +437,21 @@ mod test {
             "invalid_service"
         );
         assert_eq!(
-            code(lb(&json!([{ "url": "h2c://127.0.0.1:1" }]))),
-            "service_not_built"
+            code(lb(&json!([{ "url": "h2c://app.internal:80" }]))),
+            "dns_upstream_not_built"
         );
+        assert_eq!(
+            code(lb(&json!([
+                { "url": "h2c://127.0.0.1:1" },
+                { "url": "http://127.0.0.1:1" },
+            ]))),
+            "invalid_service",
+            "one address has one scheme"
+        );
+        let mut probed = lb(&json!([{ "url": "h2c://127.0.0.1:1" }]));
+        probed["health_check"] =
+            json!({ "path": "/healthz", "interval_secs": 1, "timeout_secs": 1 });
+        assert_eq!(code(probed), "service_not_built");
         assert_eq!(
             code(lb(&json!([{ "url": "http://app.internal:80" }]))),
             "dns_upstream_not_built"

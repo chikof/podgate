@@ -31,7 +31,7 @@ Replaces an error response with a page served by another service of the same app
 A response that passes through the middleware on its way out and has a listed status:
 
 - a response the upstream sent, whatever its body (even none);
-- an error podgate made after it chose a revision and a server (`502` when the connection is refused, reset or times out, the policy refuses the address, ...).
+- an error podgate made after it chose a revision and a server: `502` when the connection is refused or reset or the policy refuses the address, `504` when the dial, a read or a write times out (since change 0040 a timeout is `504`, not `502`; a `status` list that should cover a slow upstream names `504`, or `"500-599"`).
 
 Not replaced: an answer an earlier middleware gave (a `basic_auth` `401`, an `ip_allow_list` `403`, a `respond`), anything podgate answers before a revision is chosen (no route, no serving revision, tenant and backend admission refusals) and every `HEAD` response. When two `errors` stages are in a chain, the one nearest the end of the chain is asked first, and only one page is fetched per request.
 
@@ -49,6 +49,8 @@ Accept: <the client's Accept, else */*>
 ```
 
 and nothing else: no `Authorization`, `Cookie`, forwarding header or any other header of the client's request, and no part of its path or query. The client's `Accept` is passed only when it is at most 256 printable ASCII bytes. Traefik's error service receives the request's original headers; podgate's does not, so a tenant's page server never sees credentials.
+
+The page is requested in HTTP/1.1 even from a TLS server that offers `h2` (ALPN `http/1.1`). A service with an `h2c://` server cannot answer it, so an `errors` middleware naming such a service is refused (`invalid_middleware`). See `docs/ref/transports.md`.
 
 The answer is used only when it is `200..=299` (not `204` or `205`), has a body of at least one byte and at most `max_body_bytes`, is not content-encoded and is well formed HTTP/1.x with `Content-Length`, chunked or close-delimited framing. Anything else (a connection error, a timeout, `404`, `500`, a redirect, an over-cap body) leaves the original response as it was. A failed fetch is not retried and not logged above debug level.
 

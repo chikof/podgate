@@ -37,6 +37,13 @@ const _: () = assert!(std::mem::size_of::<LogFormat>() == 1);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Option<LogFormat>>() == std::mem::size_of::<LogFormat>());
 
+/// Idle upstream connections one worker thread's share of the pool holds unless `UPSTREAM_POOL_SIZE`
+/// says otherwise: Pingora's own default.
+const DEFAULT_UPSTREAM_POOL: NonZeroUsize = NonZeroUsize::MIN.saturating_add(127);
+
+/// The largest `UPSTREAM_POOL_SIZE`.
+const UPSTREAM_POOL_MAX: usize = 65_536;
+
 /// A bad environment variable. The message names the variable.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("invalid {var}: {reason}")]
@@ -85,6 +92,7 @@ const _: () =
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 /// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
+/// | `UPSTREAM_POOL_SIZE` | `128` | Idle upstream connections kept for reuse, per worker thread (one thread per core): Pingora keeps one LRU for the whole process, so the pool holds this times the thread count and evicts the least recently used past it. 1..=65536. A transport's `max_idle_per_host` is refused for the same reason. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -144,6 +152,8 @@ pub struct Config {
     /// Percent of a tenant's `max_buffer_bytes` its response cache may hold at most
     /// (`CACHE_TENANT_MAX_PERCENT`), 1..=100.
     pub cache_tenant_max_percent: u8,
+    /// Idle upstream connections the pool keeps per worker thread.
+    pub upstream_pool_size: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -171,6 +181,7 @@ impl Default for Config {
             static_roots_file: None,
             static_max_concurrent_reads: default_static_reads(),
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
+            upstream_pool_size: DEFAULT_UPSTREAM_POOL,
         }
     }
 }
@@ -420,6 +431,20 @@ impl Config {
                     reason: format!("{raw:?} is not a whole number in 1..=100").into(),
                 })?;
         }
+        if let Some(raw) = lookup("UPSTREAM_POOL_SIZE") {
+            let size: NonZeroUsize = raw.trim().parse().map_err(|err| ConfigError {
+                var: "UPSTREAM_POOL_SIZE",
+                reason: format!("{raw:?} is not a whole number in 1..={UPSTREAM_POOL_MAX} ({err})")
+                    .into(),
+            })?;
+            if size.get() > UPSTREAM_POOL_MAX {
+                return Err(ConfigError {
+                    var: "UPSTREAM_POOL_SIZE",
+                    reason: format!("{size} is outside 1..={UPSTREAM_POOL_MAX}").into(),
+                });
+            }
+            config.upstream_pool_size = size;
+        }
         let non_empty = |var: &'static str| match lookup(var) {
             Some(raw) if raw.trim().is_empty() => Err(ConfigError {
                 var,
@@ -505,6 +530,7 @@ mod test {
             ("BASIC_AUTH_MAX_CONCURRENT", "3"),
             ("HEALTH_MAX_CONCURRENT", "8"),
             ("STATIC_MAX_CONCURRENT_READS", "5"),
+            ("UPSTREAM_POOL_SIZE", "64"),
             ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
@@ -532,6 +558,7 @@ mod test {
                 basic_auth_max_concurrent: NonZeroUsize::new(3).expect("3 is not zero"),
                 health_max_concurrent: NonZeroUsize::new(8).expect("8 is not zero"),
                 static_max_concurrent_reads: NonZeroUsize::new(5).expect("5 is not zero"),
+                upstream_pool_size: NonZeroUsize::new(64).expect("64 is not zero"),
                 static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
@@ -572,6 +599,9 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "lots"),
             ("STATIC_MAX_CONCURRENT_READS", "0"),
             ("STATIC_MAX_CONCURRENT_READS", "257"),
+            ("UPSTREAM_POOL_SIZE", "0"),
+            ("UPSTREAM_POOL_SIZE", "65537"),
+            ("UPSTREAM_POOL_SIZE", "many"),
             ("STATIC_ROOTS_FILE", " "),
             ("CACHE_TENANT_MAX_PERCENT", "0"),
             ("CACHE_TENANT_MAX_PERCENT", "101"),

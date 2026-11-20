@@ -339,6 +339,7 @@ mod test {
                     1 + u16::try_from(index).unwrap_or(0),
                 )),
                 tls: false,
+                h2c: false,
                 weight: 1,
                 state: Arc::default(),
             })

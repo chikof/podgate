@@ -56,7 +56,9 @@ pub use static_files::{
     StaticRoots, StaticSite, TenantRoots,
 };
 pub use sticky::Sticky;
-pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transport, Upstream};
+pub use transport::{
+    Named as NamedTransport, Summary as TransportSummary, Transport, Upstream, timed_out,
+};
 
 /// Service types that are planned and not built yet.
 pub const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];

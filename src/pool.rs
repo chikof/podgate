@@ -163,7 +163,12 @@ pub fn restore(state: &mut State, previous: Box<dyn Any + Send + Sync>) {
 /// setting, before returning the peer.
 pub fn isolate(peer: &mut HttpPeer, identity: Identity<'_>, state: State, session: &Session) {
     let pin = if state.pinned {
-        peer.options.idle_timeout = Some(PINNED_IDLE_TIMEOUT);
+        // A transport's shorter idle timeout still wins.
+        peer.options.idle_timeout = Some(
+            peer.options
+                .idle_timeout
+                .map_or(PINNED_IDLE_TIMEOUT, |idle| idle.min(PINNED_IDLE_TIMEOUT)),
+        );
         pin_for(session)
     } else {
         Pin::Shared

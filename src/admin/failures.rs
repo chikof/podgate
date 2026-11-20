@@ -52,7 +52,8 @@ struct ReplayQuery {
 /// - `400`: `revision` is missing or `force` is not a boolean.
 /// - `404`: unknown app, record or revision.
 /// - `409`: the method is not `GET` or `HEAD` and `force=true` is not given. Replaying a `POST`
-///   can repeat its side effects, so it is the caller's explicit choice.
+///   can repeat its side effects, so it is the caller's explicit choice. Also when the first
+///   server is `h2c://`: the replay is written in HTTP/1.1, which such a server cannot answer.
 /// - `502`: the upstream could not be reached or answered something that is not HTTP/1.1.
 /// - `503`: the revision has no upstream.
 async fn replay(
@@ -88,6 +89,13 @@ async fn replay(
     let upstream = compiled
         .first_upstream(revision)
         .ok_or_else(|| AppError::Unavailable("revision has no upstream".into()))?;
+    if upstream.server.h2c {
+        return Err(AppError::Conflict(
+            "the first server of the revision is h2c://: a replay is written in HTTP/1.1, which \
+             it cannot answer"
+                .into(),
+        ));
+    }
     match failures::replay(&failed, upstream.peer()).await {
         Ok(replayed) => Ok(Json(replayed.to_json()).into_response()),
         Err(err) => Ok((

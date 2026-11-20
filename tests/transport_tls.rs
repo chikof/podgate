@@ -639,7 +639,10 @@ async fn client_cert_key_never_leaks() {
     );
     assert_eq!(
         explained.json()["revisions"][0]["servers"][0]["transport"],
-        json!({ "ca": true, "client_cert": "[redacted]", "insecure_skip_verify": false })
+        json!({
+            "ca": true, "client_cert": "[redacted]", "insecure_skip_verify": false,
+            "protocol": "h2,http/1.1",
+        })
     );
 
     // A malformed client_cert is refused without quoting what was sent.

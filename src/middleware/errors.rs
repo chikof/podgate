@@ -231,10 +231,49 @@ fn defines(services: &[Declared], name: &str) -> bool {
     services.iter().any(|declared| &*declared.name == name)
 }
 
+/// Whether the service `declared` has an `h2c://` server. A page is fetched by writing HTTP/1.1
+/// over the connection, which such a server cannot answer.
+fn has_h2c_server(declared: &Declared) -> bool {
+    declared
+        .config
+        .get("servers")
+        .and_then(Value::as_array)
+        .is_some_and(|servers| {
+            servers.iter().any(|server| {
+                server
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.starts_with("h2c://"))
+            })
+        })
+}
+
 /// Checks that `target` names a service the app declares, the way a router's service is checked:
 /// every revision that takes or may still take requests defines it itself or inherits it from the
 /// app, and a `name@revision` names a revision that has it.
 fn check_target(app: &App, target: &Target) -> Result<(), Invalid> {
+    let named = |services: &[Declared]| {
+        services
+            .iter()
+            .any(|declared| *declared.name == *target.name && has_h2c_server(declared))
+    };
+    let h2c = named(&app.services)
+        || app
+            .revisions
+            .iter()
+            .filter(|revision| {
+                target
+                    .revision
+                    .as_deref()
+                    .is_none_or(|wanted| wanted == &*revision.id)
+            })
+            .any(|revision| named(&revision.services));
+    if h2c {
+        return Err(invalid(format!(
+            "service {} has an h2c:// server: pages are fetched over HTTP/1.1, which it cannot answer",
+            target.name
+        )));
+    }
     let shared = defines(&app.services, &target.name);
     if let Some(wanted) = &target.revision {
         let found = app

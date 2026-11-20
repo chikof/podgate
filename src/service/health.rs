@@ -427,6 +427,7 @@ impl Check {
             url: Box::default(),
             addr: self.target(server.addr),
             tls: self.tls.unwrap_or(server.tls),
+            h2c: false,
             weight: server.weight,
             state: Arc::clone(&server.state),
         };

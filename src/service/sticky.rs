@@ -382,6 +382,7 @@ mod test {
                 .parse()
                 .expect("socket address"),
             tls: false,
+            h2c: false,
             weight: 1,
             state: Arc::new(ServerState::default()),
         }

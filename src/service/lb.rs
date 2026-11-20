@@ -350,6 +350,7 @@ mod test_support {
                 url: format!("http://127.0.0.1:{port}").into(),
                 addr: ([127, 0, 0, 1], port).into(),
                 tls: false,
+                h2c: false,
                 weight: *weight,
                 state: Arc::new(ServerState::default()),
             })

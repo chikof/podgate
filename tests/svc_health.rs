@@ -579,6 +579,7 @@ fn probe_of(addr: SocketAddr, extra: &Value, policy: UpstreamPolicy) -> HttpProb
         url: Box::default(),
         addr,
         tls: false,
+        h2c: false,
         weight: 1,
         state: Arc::default(),
     };
