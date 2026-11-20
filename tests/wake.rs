@@ -183,7 +183,13 @@ async fn app_idle_event() {
     let explained = podgate.admin_get("/v1/explain?url=http://a.test/").await;
     assert_eq!(
         explained.json()["middleware"],
-        json!(["route", "wake_hold", "inflight_admit", "tenant_admit"])
+        json!([
+            "route",
+            "wake_hold",
+            "inflight_admit",
+            "tenant_admit",
+            "failure_capture"
+        ])
     );
     let served = podgate.get("a.test", "/").await;
     assert_eq!(served.status, 200, "{served:?}");
