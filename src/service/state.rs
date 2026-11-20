@@ -117,8 +117,11 @@ pub struct ServiceState {
     key: RandomState,
     /// The state of each address of each server named by DNS, by the server's URL: they are not
     /// in the registry's server keys, which name one state per URL.
-    named: Mutex<HashMap<(Box<str>, SocketAddr), Arc<ServerState>>>,
+    named: Mutex<HashMap<NamedKey, Arc<ServerState>>>,
 }
+
+/// A server named by DNS: its URL and one of the addresses the name resolved to.
+type NamedKey = (Box<str>, SocketAddr);
 
 impl ServiceState {
     /// A state whose counter starts at `seed`, for tests that need a known sequence.
