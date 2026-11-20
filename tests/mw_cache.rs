@@ -1694,3 +1694,167 @@ async fn cache_hit_never_skips_an_earlier_request_hook() {
         0
     );
 }
+
+/// `[headers, cache]` over `upstream`: the stage before the cache must still run on a hit.
+fn headers_then_cache(upstream: SocketAddr, headers: Value) -> Value {
+    common::with_chain(
+        app("a", &["a.test"], &[serving("r1", upstream)]),
+        &[
+            common::middleware("h", "headers", headers),
+            common::middleware("c", "cache", json!({})),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn cache_hit_runs_earlier_security_headers() {
+    let backend = Backend::start(|_, _| Reply::ok("page").fresh(3600)).await;
+    let podgate = Podgate::start().await;
+    let cert = common::TestCert::new(&["a.test"]);
+    let declared = headers_then_cache(
+        backend.addr,
+        json!({ "response": { "security": {
+            "hsts": { "max_age_secs": 31_536_000 },
+            "csp": "default-src 'self'",
+            "frame_options": "DENY",
+            "content_type_nosniff": true,
+        } } }),
+    );
+    let mut pushed = snapshot(1, &[declared]);
+    pushed["certificates"] = json!([cert.entry(&["a.test"])]);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    // Plain HTTP: no HSTS, everything else on the miss and on the hit.
+    for expected in ["miss", "hit"] {
+        let got = get(&podgate, "/p").await;
+        assert_eq!(got.result(), expected);
+        assert_eq!(
+            got.header("content-security-policy"),
+            Some("default-src 'self'"),
+            "{expected}: {got:?}"
+        );
+        assert_eq!(got.header("x-frame-options"), Some("DENY"), "{expected}");
+        assert_eq!(
+            got.header("x-content-type-options"),
+            Some("nosniff"),
+            "{expected}"
+        );
+        assert_eq!(got.header("strict-transport-security"), None, "{expected}");
+    }
+    // TLS: HSTS as well, on the miss and on the hit.
+    for expected in ["miss", "hit"] {
+        let got = podgate.https_get("a.test", "a.test", "/p", &cert).await;
+        assert_eq!(
+            got.header("cache-status"),
+            Some(format!("podgate; {expected}").as_str())
+        );
+        assert_eq!(
+            got.header("strict-transport-security"),
+            Some("max-age=31536000"),
+            "{expected}: {got:?}"
+        );
+        assert_eq!(got.header("x-frame-options"), Some("DENY"), "{expected}");
+    }
+    assert_eq!(
+        backend.count(),
+        2,
+        "one fetch per scheme, the rest are hits"
+    );
+}
+
+#[tokio::test]
+async fn cache_hit_cors_follows_each_origin() {
+    let backend = Backend::start(|_, _| Reply::ok("page").fresh(3600)).await;
+    let podgate = Podgate::start().await;
+    let declared = headers_then_cache(
+        backend.addr,
+        json!({ "cors": { "allow_origins": ["https://a.example", "https://b.example"] } }),
+    );
+    assert_eq!(
+        podgate
+            .push_snapshot(&snapshot(1, &[declared]))
+            .await
+            .status,
+        200
+    );
+    let fetch = |origin: Option<&'static str>| {
+        let podgate = &podgate;
+        async move {
+            match origin {
+                Some(origin) => get_with(podgate, "/p", &[("Origin", origin)]).await,
+                None => get(podgate, "/p").await,
+            }
+        }
+    };
+    let first = fetch(Some("https://a.example")).await;
+    assert_eq!(first.result(), "miss");
+    assert_eq!(
+        first.header("access-control-allow-origin"),
+        Some("https://a.example")
+    );
+    // Hits: each request gets its own answer, never the one that filled the entry.
+    let second = fetch(Some("https://b.example")).await;
+    assert_eq!(second.result(), "hit");
+    assert_eq!(
+        second.header("access-control-allow-origin"),
+        Some("https://b.example")
+    );
+    let again = fetch(Some("https://a.example")).await;
+    assert_eq!(
+        again.header("access-control-allow-origin"),
+        Some("https://a.example")
+    );
+    for none in [None, Some("https://evil.example")] {
+        let got = fetch(none).await;
+        assert_eq!(got.result(), "hit");
+        assert_eq!(
+            got.header("access-control-allow-origin"),
+            None,
+            "the stored head has no CORS header, so a hit for {none:?} carries none: {got:?}"
+        );
+        assert!(
+            got.header("vary")
+                .is_some_and(|vary| vary.to_ascii_lowercase().contains("origin"))
+        );
+    }
+    assert_eq!(backend.count(), 1);
+}
+
+#[tokio::test]
+async fn cache_chain_order_that_would_skip_a_stage_is_refused() {
+    let backend = Backend::start(|_, _| Reply::ok("x")).await;
+    let podgate = Podgate::start().await;
+    let cors = json!({ "cors": { "allow_origins": ["https://a.example"] } });
+    let limit = json!({ "max_response_body_bytes": 1_000_000, "buffer_response": true });
+    let chain = |first: Value, second: Value| {
+        common::with_chain(
+            app("a", &["a.test"], &[serving("r1", backend.addr)]),
+            &[first, second],
+        )
+    };
+    let headers = || common::middleware("h", "headers", cors.clone());
+    let buffering = || common::middleware("b", "buffering", limit.clone());
+    let cache = || common::middleware("c", "cache", json!({}));
+    for (version, declared, names) in [
+        (1, chain(cache(), headers()), "h"),
+        (2, chain(buffering(), cache()), "b"),
+    ] {
+        let response = podgate.push_snapshot(&snapshot(version, &[declared])).await;
+        assert_eq!(response.status, 422, "{}", response.body);
+        let rejection = &response.json()["conflicts"][0];
+        assert_eq!(rejection["code"], "invalid_middleware", "{rejection}");
+        assert!(
+            rejection["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(&format!("middleware {names} "))),
+            "names the stage: {rejection}"
+        );
+    }
+    // The other orders compile.
+    for (version, declared) in [
+        (3, chain(headers(), cache())),
+        (4, chain(cache(), buffering())),
+    ] {
+        let response = podgate.push_snapshot(&snapshot(version, &[declared])).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+    }
+}

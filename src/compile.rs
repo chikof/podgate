@@ -687,6 +687,14 @@ fn stages_of(
         match expand(&router.chain) {
             Ok(own) => {
                 let chain: Vec<usize> = default.iter().copied().chain(own).collect();
+                if let Err(invalid) = middleware::check_cache_order(&stages, &chain) {
+                    rejected.push(Rejected::new(
+                        app,
+                        format!("router {}", router.name),
+                        invalid,
+                    ));
+                    continue;
+                }
                 let digest = router::digest(
                     chain
                         .iter()

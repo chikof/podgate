@@ -37,7 +37,9 @@ Every field is optional. Unknown fields are `invalid_middleware`.
 
 Place `cache` after authentication. A hit is answered from the chain's `routed` hook: after every request hook of the chain has run (so after `basic_auth`, a redirect or an IP filter), and after the revision and the server were chosen, but before the tenant's in-flight slot and the backend's admission. A hit therefore costs the tenant no slot and the backend no connection, and the revision is known for the key.
 
-A hit does not run the response hooks of the stages that come *before* `cache` in the chain. The response hooks of the stages after it, and compression, have already run on what was stored. To apply a `headers` middleware to hits, put it after `cache`.
+**Stages before the cache run on a hit.** The response hooks of every stage declared *before* `cache` (`headers`: HSTS, CSP, frame options, CORS) run on a hit against the current request, last stage first and after the stored head is built, exactly as on a miss. The stored head never holds what they add: the cache stores the head as it is when its own response hook runs, which on a miss is before the earlier stages' hooks (response hooks run in reverse chain order). So `Access-Control-Allow-Origin`, which depends on each request's `Origin`, is decided for every hit by the `headers` stage and never comes from the stored copy. The response hooks of stages declared after the cache, and compression, did run before storing and are part of the stored head.
+
+Two chain shapes are refused at compile (`422`, `invalid_middleware`, naming the stage) instead of being skipped on a hit: a `buffering` with `max_response_body_bytes` before the cache (it holds and counts the body as it streams, which a hit does not do: declare it after), and a `headers` with `cors` after the cache (the stored copy would carry the first client's `Access-Control-Allow-Origin`: declare it before).
 
 ## What is stored, and as what
 

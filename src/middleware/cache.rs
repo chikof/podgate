@@ -40,7 +40,7 @@ use pingora::http::{Method, RequestHeader, ResponseHeader};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{CompileCx, FinishCx, Flow, Kind, ResponseCx, RoutedCx};
+use super::{CompileCx, Earlier, FinishCx, Flow, Kind, ResponseCx, RoutedCx};
 use crate::budget::TenantBudget;
 use crate::cache::fill::{Fill, Finished};
 use crate::cache::key::{Parts, ResourceKey};
@@ -299,7 +299,12 @@ impl Kind for Cache {
         })
     }
 
-    async fn routed(&self, cx: &mut RoutedCx<'_>, state: &mut State) -> pingora::Result<Flow> {
+    async fn routed(
+        &self,
+        cx: &mut RoutedCx<'_>,
+        earlier: &mut Earlier<'_>,
+        state: &mut State,
+    ) -> pingora::Result<Flow> {
         *state = State::default();
         if refresh::of(cx.session).is_some() {
             self.begin_refresh(cx, state);
@@ -335,31 +340,32 @@ impl Kind for Cache {
                 }
                 Lookup::Miss => {
                     return self
-                        .miss(cx, state, &key, store, tenant, mode, waited)
+                        .miss(cx, earlier, state, &key, store, tenant, mode, waited)
                         .await;
                 }
             };
             let standing = entry.standing();
             if standing.fresh {
                 cx.cache.count(app, token);
-                self.serve(cx, &entry, standing, token).await?;
+                self.serve(cx, earlier, &entry, standing, token).await?;
                 return Ok(Flow::Respond);
             }
             if standing.revalidate_in_background && mode == Mode::Normal {
                 cx.cache.count(app, "stale");
-                self.serve(cx, &entry, standing, "stale").await?;
+                self.serve(cx, earlier, &entry, standing, "stale").await?;
                 Self::refresh_in_background(cx, &key, &entry);
                 return Ok(Flow::Respond);
             }
             if waited || !(entry.has_validator() || standing.usable_on_error) {
                 return self
-                    .miss(cx, state, &key, store, tenant, mode, waited)
+                    .miss(cx, earlier, state, &key, store, tenant, mode, waited)
                     .await;
             }
             match self.revalidate(cx, &key, &entry).await {
                 Revalidated::Serve(result) => {
                     cx.cache.count(app, result);
-                    self.serve(cx, &entry, entry.standing(), result).await?;
+                    self.serve(cx, earlier, &entry, entry.standing(), result)
+                        .await?;
                     return Ok(Flow::Respond);
                 }
                 Revalidated::Again => {
@@ -367,7 +373,9 @@ impl Kind for Cache {
                     token = "miss";
                 }
                 Revalidated::Forward => {
-                    return self.miss(cx, state, &key, store, tenant, mode, true).await;
+                    return self
+                        .miss(cx, earlier, state, &key, store, tenant, mode, true)
+                        .await;
                 }
             }
         }
@@ -628,6 +636,7 @@ impl Cache {
     async fn miss(
         &self,
         cx: &mut RoutedCx<'_>,
+        earlier: &mut Earlier<'_>,
         state: &mut State,
         key: &ResourceKey,
         store: Arc<TenantCache>,
@@ -666,7 +675,8 @@ impl Cache {
                     && let Lookup::Hit(entry) = store.lookup(key, &cx.session.req_header().headers)
                 {
                     cx.cache.count(app, "hit");
-                    self.serve(cx, &entry, entry.standing(), "hit").await?;
+                    self.serve(cx, earlier, &entry, entry.standing(), "hit")
+                        .await?;
                     return Ok(Flow::Respond);
                 }
                 cx.cache.count(app, "miss");
@@ -863,6 +873,7 @@ impl Cache {
     async fn serve(
         &self,
         cx: &mut RoutedCx<'_>,
+        earlier: &mut Earlier<'_>,
         entry: &Entry,
         standing: Standing,
         result: &'static str,
@@ -888,6 +899,9 @@ impl Cache {
         head.insert_header("age", standing.age.to_string())?;
         head.append_header("cache-status", format!("podgate; {result}"))?;
         skew::set_cookie(cx.session, cx.table, Some(cx.selected), &mut head)?;
+        // As on a miss, the stages before the cache add their headers last: the stored copy
+        // never held them, so HSTS, CSP, frame options and CORS follow this request.
+        earlier.response(&mut head)?;
         let bodyless = not_modified || head_only || entry.body.is_empty();
         cx.session
             .write_response_header(Box::new(head), bodyless)

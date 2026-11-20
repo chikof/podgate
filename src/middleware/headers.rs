@@ -509,6 +509,14 @@ fn vary(response: &mut ResponseHeader, token: &'static str) -> pingora::Result<(
     Ok(())
 }
 
+impl Headers {
+    /// Whether the middleware answers CORS: its `Access-Control-Allow-Origin` depends on each
+    /// request's `Origin`.
+    pub(crate) fn has_cors(&self) -> bool {
+        self.rest.cors.is_some()
+    }
+}
+
 impl Kind for Headers {
     type State = State;
 

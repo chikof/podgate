@@ -106,6 +106,35 @@ pub struct RequestCx<'a> {
     pub hashing: &'a basic_auth::Pool,
 }
 
+/// The stages of the chain that come before the one running a routed hook, with their per-request
+/// state. A hook that answers the request from its own store calls [`Self::response`], so the
+/// answer passes the response hooks of those stages exactly as a response from the upstream
+/// does: security headers, CORS and the like are never skipped.
+pub struct Earlier<'a> {
+    stages: &'a [Named],
+    chain: &'a [usize],
+    states: &'a mut [StageState],
+}
+
+impl Earlier<'_> {
+    /// Runs the response hooks of the earlier stages on `head`, last stage first, against the
+    /// current request (their request hooks have already run, so their state is this request's).
+    ///
+    /// # Errors
+    ///
+    /// The first error a hook returns.
+    pub fn response(&mut self, head: &mut ResponseHeader) -> pingora::Result<()> {
+        for (position, index) in self.chain.iter().enumerate().rev() {
+            if let (Some(named), Some(slot)) =
+                (self.stages.get(*index), self.states.get_mut(position))
+            {
+                named.stage.response(head, slot)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What a routed hook sees: the request after the middleware chain's request hooks, with its
 /// revision and server chosen and no admission taken yet.
 pub struct RoutedCx<'a> {
@@ -214,6 +243,7 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     fn routed(
         &self,
         _cx: &mut RoutedCx<'_>,
+        _earlier: &mut Earlier<'_>,
         _state: &mut Self::State,
     ) -> impl Future<Output = pingora::Result<Flow>> + Send {
         std::future::ready(Ok(Flow::Continue))
@@ -433,12 +463,13 @@ macro_rules! kinds {
             async fn routed(
                 &self,
                 cx: &mut $crate::middleware::RoutedCx<'_>,
+                earlier: &mut $crate::middleware::Earlier<'_>,
                 state: &mut StageState,
             ) -> pingora::Result<$crate::middleware::Flow> {
                 match (self, state) {
                     $(
                         (Self::$variant(kind), StageState::$variant(state)) => {
-                            $crate::middleware::Kind::routed(kind, cx, state).await
+                            $crate::middleware::Kind::routed(kind, cx, earlier, state).await
                         }
                     )*
                     _ => Ok($crate::middleware::Flow::Continue),
@@ -713,6 +744,51 @@ pub async fn run_request(
     Ok(Flow::Continue)
 }
 
+/// Checks the order of a `cache` stage in `chain`, which compiles into a router.
+///
+/// A hit is answered from the cache's own store, so a stage declared before the cache runs only
+/// its response hooks on it ([`Earlier::response`]). Some stages cannot do that, and the chain
+/// is refused rather than letting the hit skip them:
+///
+/// - A `buffering` before the cache with a response limit holds and counts the body as it
+///   streams from the upstream, which a hit does not do.
+/// - A `headers` with CORS after the cache: the stored copy would carry the
+///   `Access-Control-Allow-Origin` the first client's `Origin` earned. Declare it before the
+///   cache, which runs its response hook on every hit.
+///
+/// # Errors
+///
+/// `invalid_middleware` naming the stage.
+pub(crate) fn check_cache_order(stages: &[Named], chain: &[usize]) -> Result<(), Invalid> {
+    let Some(cache) = chain.iter().position(|index| {
+        matches!(
+            stages.get(*index).map(|named| &named.stage),
+            Some(Stage::Cache(_))
+        )
+    }) else {
+        return Ok(());
+    };
+    for (position, index) in chain.iter().enumerate() {
+        let Some(named) = stages.get(*index) else {
+            continue;
+        };
+        let reason = match &named.stage {
+            Stage::Buffering(buffering) if position < cache && buffering.limits_response() => {
+                "limits the response body, which a cache hit does not stream: declare it after the cache"
+            }
+            Stage::Headers(headers) if position > cache && headers.has_cors() => {
+                "answers CORS after the cache, so the stored copy would carry the first client's Access-Control-Allow-Origin: declare it before the cache"
+            }
+            _ => continue,
+        };
+        return Err(Invalid::new(
+            "invalid_middleware",
+            format!("middleware {} {reason}", named.name),
+        ));
+    }
+    Ok(())
+}
+
 /// Whether any stage of `chain` has a routed hook: only those kinds are listed here, so a
 /// request through a chain without one pays nothing for the hook.
 #[must_use]
@@ -742,10 +818,19 @@ pub async fn run_routed(
     cx.original = state.original.take();
     let mut flow = Flow::Continue;
     for (position, index) in chain.iter().enumerate() {
-        let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) else {
+        let Some(named) = stages.get(*index) else {
             continue;
         };
-        if named.stage.routed(cx, slot).await? == Flow::Respond {
+        let (before, rest) = state.stages.split_at_mut(position);
+        let Some(slot) = rest.first_mut() else {
+            continue;
+        };
+        let mut earlier = Earlier {
+            stages,
+            chain: chain.get(..position).unwrap_or_default(),
+            states: before,
+        };
+        if named.stage.routed(cx, &mut earlier, slot).await? == Flow::Respond {
             flow = Flow::Respond;
             break;
         }

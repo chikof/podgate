@@ -227,6 +227,12 @@ async fn read_body(session: &mut Session, max: u64) -> pingora::Result<Result<()
 }
 
 impl Buffering {
+    /// Whether the middleware holds or limits response bodies (its response hooks run on the
+    /// upstream's response as it streams).
+    pub(crate) fn limits_response(&self) -> bool {
+        self.config.max_response_body_bytes.is_some()
+    }
+
     /// Holds the request body: charge, read it all, check the replay buffer took it.
     async fn hold_request(
         &self,
