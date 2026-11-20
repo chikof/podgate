@@ -252,6 +252,22 @@ pub struct TlsPolicy {
     /// Absent: the header is never sent.
     #[serde(default)]
     pub pass_client_cert: bool,
+    /// How the issuer proves the app's hosts to the CA. Absent: `http-01`.
+    #[serde(default)]
+    pub challenge: ChallengeKind,
+}
+
+/// The ACME challenge the issuer answers for an `acme` app's hosts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChallengeKind {
+    /// Answered over plain HTTP by every node; cannot prove a wildcard.
+    #[default]
+    #[serde(rename = "http-01")]
+    Http01,
+    /// Answered with a TXT record the control plane publishes; proves wildcards and hosts
+    /// that cannot serve plain HTTP.
+    #[serde(rename = "dns-01")]
+    Dns01,
 }
 
 /// Certificate source for an app.
@@ -339,6 +355,23 @@ pub struct Acme {
     /// `certificate_requested` events it approved. Only hosts of `on_demand` apps count.
     #[serde(default)]
     pub requested_hosts: Vec<Box<str>>,
+    /// DNS-01 TXT records the control plane has published and sees on the zone's authoritative
+    /// servers, pushed back after `acme_challenge` events of type `dns-01`. The
+    /// issuer tells the CA to validate a challenge only once it is listed here.
+    #[serde(default)]
+    pub dns_ready: Vec<DnsReady>,
+}
+
+/// One published DNS-01 TXT record. Carries no credential: it names a record that is already
+/// public.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsReady {
+    /// The record's name, `_acme-challenge.<domain>`.
+    pub name: Box<str>,
+    /// The record's value: base64url of the SHA-256 of the key authorization. It tells apart
+    /// the challenges of an apex and its wildcard, which share one name.
+    pub value: Box<str>,
 }
 
 /// External account binding credentials, as a CA hands them out.
@@ -372,6 +405,7 @@ impl fmt::Debug for Acme {
             )
             .field("challenges", &self.challenges)
             .field("requested_hosts", &self.requested_hosts)
+            .field("dns_ready", &self.dns_ready)
             .finish()
     }
 }
@@ -427,7 +461,7 @@ mod test {
                 "id": "shop",
                 "tenant": "acme",
                 "declared_by": "podkit/agent",
-                "tls": {"mode": "on_demand", "client_ca_pem": "ca", "pass_client_cert": true},
+                "tls": {"mode": "on_demand", "client_ca_pem": "ca", "pass_client_cert": true, "challenge": "dns-01"},
                 "routers": [{
                     "name": "web",
                     "entry_points": ["websecure"],
@@ -469,7 +503,8 @@ mod test {
                 "eab": {"key_id": "kid", "hmac_key": "hmac"},
                 "account_key_pem": "key",
                 "challenges": [{"token": "t", "key_authorization": "t.k"}],
-                "requested_hosts": ["x.shop.test"]
+                "requested_hosts": ["x.shop.test"],
+                "dns_ready": [{"name": "_acme-challenge.shop.test", "value": "v"}]
             },
             "entry_points": [{
                 "name": "websecure",

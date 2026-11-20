@@ -118,6 +118,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
+            .with_acme_dns_zones(config.acme_dns_zones.iter().map(AsRef::as_ref))
             .with_upstream_policy(upstream_policy.clone()),
     );
     let events = EventFeed::new();

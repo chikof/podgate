@@ -191,7 +191,7 @@ impl Podgate {
                 .filter(|_| attempt == 0)
                 .map(|proxy| (proxy, free_port()))
                 .unwrap_or_else(|| (free_port(), free_port()));
-            match Self::try_start(extra_env, ports, &[]).await {
+            match Self::try_start(extra_env, ports, &[], false).await {
                 Ok(podgate) => return podgate,
                 Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
             }
@@ -210,12 +210,33 @@ impl Podgate {
     ) -> Self {
         let mut failures = Vec::new();
         for attempt in 0..START_ATTEMPTS {
-            match Self::try_start(extra_env, (0, 0), entries).await {
+            match Self::try_start(extra_env, (0, 0), entries, false).await {
                 Ok(podgate) => return podgate,
                 Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
             }
         }
         panic!("podgate did not start:\n{}", failures.join("\n"));
+    }
+
+    /// [`Self::start_with_env`] with the process's output kept in a file, which [`Self::log`]
+    /// reads; pass `RUST_LOG` in `extra_env` to log more than warnings. For tests that assert
+    /// on what podgate logs.
+    pub async fn start_logged(extra_env: &[(&str, &str)]) -> Self {
+        let mut failures = Vec::new();
+        for attempt in 0..START_ATTEMPTS {
+            let ports = (free_port(), free_port());
+            match Self::try_start(extra_env, ports, &[], true).await {
+                Ok(podgate) => return podgate,
+                Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
+            }
+        }
+        panic!("podgate did not start:\n{}", failures.join("\n"));
+    }
+
+    /// Everything the process has written to stdout and stderr so far; empty unless it was
+    /// started with [`Self::start_logged`].
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("podgate.log")).unwrap_or_default()
     }
 
     /// The address of the entry point called `name`.
@@ -239,6 +260,7 @@ impl Podgate {
         extra_env: &[(&str, &str)],
         ports: (u16, u16),
         entries: &[(&str, &str)],
+        capture_log: bool,
     ) -> Result<Self, String> {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -286,6 +308,12 @@ impl Podgate {
         };
         let proxy_addr = first_of("http").unwrap_or(listeners[0].1);
         let tls_addr = first_of("https").unwrap_or(listeners[listeners.len() - 1].1);
+        if capture_log {
+            let log = std::fs::File::create(dir.join("podgate.log")).expect("create the log file");
+            command
+                .stdout(Stdio::from(log.try_clone().expect("clone the log file")))
+                .stderr(Stdio::from(log));
+        }
         let child = command
             .env("ADMIN_SOCKET", &admin_socket)
             .env("UPSTREAM_POLICY_FILE", &policy_file)

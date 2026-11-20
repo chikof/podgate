@@ -18,7 +18,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::acme::Plan;
+use crate::acme::{Plan, dns01};
 use crate::canary;
 use crate::client_ip::Trust;
 use crate::clientauth::ClientAuth;
@@ -237,6 +237,10 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         .iter()
         .map(|list| list.iter().flat_map(|r| r.patterns().cloned()).collect())
         .collect();
+    let rejected = dns01::reject(snapshot, &claims, context);
+    if !rejected.is_empty() {
+        return Err(CompileError::Rejected(rejected));
+    }
     let apps = snapshot
         .apps
         .iter()

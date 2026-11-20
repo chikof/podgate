@@ -22,12 +22,18 @@
 //!    listing the host in `acme.requested_hosts`, and only then does the issuer order it. A
 //!    client can therefore never make podgate spend the CA's rate limits. A host of no app never
 //!    waits and never gets a certificate.
+//! 5. **DNS-01**. An `acme` app whose `tls.challenge` is `dns-01` gets certificates
+//!    for its wildcard hosts too. The issuer emits `acme_challenge {type: "dns-01", name,
+//!    value}` and waits until the snapshot lists the record in `acme.dns_ready`; only then does
+//!    it tell the CA to validate, and it emits `acme_challenge_done` afterwards. podgate holds
+//!    no DNS credential: the control plane publishes the record (see `dns01`).
 //!
 //! Pingora's rustls backend has no async certificate callback (`certificate_callback` is
 //! OpenSSL-only) and rustls' `ResolvesServerCert` is synchronous, so the wait happens before
 //! the handshake starts: [`Acme`] is installed as Pingora's pre-TLS hook, reads the ClientHello
 //! to learn the SNI, waits, and hands the bytes back to the handshake.
 
+pub(crate) mod dns01;
 mod handshake;
 mod http01;
 mod issuer;
@@ -47,7 +53,7 @@ use crate::table::TableHandle;
 use podgate_model as snapshot;
 
 pub use http01::serve_challenge;
-pub use plan::{CertInfo, Plan, PlanError};
+pub use plan::{CertInfo, Plan, PlanError, Renewal, Wanted};
 
 /// How long an on-demand handshake waits for a certificate before it fails.
 const ON_DEMAND_WAIT: Duration = Duration::from_secs(30);
@@ -87,6 +93,8 @@ struct Shared {
     /// Hosts whose `certificate_requested` is pending, and when it was emitted.
     announced: Mutex<HashMap<Box<str>, Instant>>,
     waiters: Semaphore,
+    /// Pending DNS-01 challenges of this node's orders.
+    dns_pending: Arc<dns01::Ledger>,
 }
 
 /// The ACME machinery of one node. Cheap to clone; every clone is the same node.
@@ -117,6 +125,7 @@ impl Acme {
                 ca_file,
                 announced: Mutex::new(HashMap::new()),
                 waiters: Semaphore::new(MAX_WAITERS),
+                dns_pending: Arc::default(),
             }),
         }
     }

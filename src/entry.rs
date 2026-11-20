@@ -227,6 +227,7 @@ fn parse_entry(entry: &str) -> Result<EntryPoint, ParseError> {
 pub struct CompileContext {
     bound: Vec<(Box<str>, Protocol)>,
     catch_all_tenants: Vec<Box<str>>,
+    acme_dns_zones: Vec<Box<str>>,
     upstream_policy: UpstreamPolicy,
 }
 
@@ -247,6 +248,7 @@ impl CompileContext {
                 .map(|(name, protocol)| (Box::from(name), protocol))
                 .collect(),
             catch_all_tenants: Vec::new(),
+            acme_dns_zones: Vec::new(),
             upstream_policy: UpstreamPolicy::allow_all(),
         }
     }
@@ -267,6 +269,20 @@ impl CompileContext {
     ) -> Self {
         self.catch_all_tenants = tenants.into_iter().map(Box::from).collect();
         self
+    }
+
+    /// Lets apps use the `dns-01` challenge for hosts in or under `zones`. Only the operator
+    /// calls this (`ACME_DNS_ZONES`); a snapshot never can. Without zones `dns-01` is off.
+    #[must_use]
+    pub fn with_acme_dns_zones<'a>(mut self, zones: impl IntoIterator<Item = &'a str>) -> Self {
+        self.acme_dns_zones = zones.into_iter().map(Box::from).collect();
+        self
+    }
+
+    /// The zones `dns-01` may be used for; empty means it is off.
+    #[must_use]
+    pub fn acme_dns_zones(&self) -> &[Box<str>] {
+        &self.acme_dns_zones
     }
 
     /// Checks the literal server addresses of every service against `policy` (`upstream_forbidden`).

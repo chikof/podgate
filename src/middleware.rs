@@ -696,6 +696,7 @@ mod test {
                     mode: podgate_model::TlsMode::Acme,
                     client_ca_pem: None,
                     pass_client_cert: false,
+                    challenge: podgate_model::ChallengeKind::default(),
                 },
                 routers: Vec::new(),
                 middlewares: Vec::new(),

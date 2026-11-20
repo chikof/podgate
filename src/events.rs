@@ -78,13 +78,19 @@ pub enum EventKind {
         /// Its `5xx` per thousand requests over the judged window.
         error_permille: u64,
     },
-    /// The issuer node needs this HTTP-01 answer served: push it back in the snapshot's
-    /// `acme.challenges`.
+    /// The issuer node needs a challenge answered: for HTTP-01 push the answer back in the
+    /// snapshot's `acme.challenges`, for DNS-01 publish the TXT record and push the
+    /// confirmation back in `acme.dns_ready`.
     AcmeChallenge {
-        /// The challenge token.
-        token: Box<str>,
-        /// The key authorization the token must answer with.
-        key_authorization: Box<str>,
+        /// What to publish.
+        #[serde(flatten)]
+        proof: ChallengeProof,
+    },
+    /// A DNS-01 challenge is over, validated or not: remove its TXT record.
+    AcmeChallengeDone {
+        /// The record that can go.
+        #[serde(flatten)]
+        proof: ChallengeProof,
     },
     /// The issuer node obtained a certificate: store it and push it back in the snapshot's
     /// `certificates`.
@@ -117,6 +123,31 @@ pub enum EventKind {
     CertificateRequested {
         /// The host named by the handshake's SNI.
         host: Box<str>,
+    },
+}
+
+/// What an ACME challenge asks the control plane to publish. Serialized inline in the event,
+/// next to `kind`, as `{"type": "http-01", ...}` or `{"type": "dns-01", ...}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum ChallengeProof {
+    /// Serve `key_authorization` at `/.well-known/acme-challenge/<token>`.
+    #[serde(rename = "http-01")]
+    Http01 {
+        /// The challenge token.
+        token: Box<str>,
+        /// The key authorization the token must answer with.
+        key_authorization: Box<str>,
+    },
+    /// Publish the TXT record `value` at `name`. Two challenges of one order can share a name
+    /// (an apex and its wildcard); the values differ, and both records must exist.
+    #[serde(rename = "dns-01")]
+    Dns01 {
+        /// `_acme-challenge.<domain>`.
+        name: Box<str>,
+        /// base64url of the SHA-256 of the key authorization.
+        value: Box<str>,
     },
 }
 
@@ -297,6 +328,36 @@ mod test {
             })
         );
         assert!(feed.poll(0, Duration::ZERO).await.is_err());
+    }
+
+    #[test]
+    fn acme_challenge_events_carry_their_type_inline() {
+        let http = EventKind::AcmeChallenge {
+            proof: ChallengeProof::Http01 {
+                token: "tok".into(),
+                key_authorization: "tok.thumb".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&http).expect("serializes"),
+            serde_json::json!({
+                "kind": "acme_challenge", "type": "http-01",
+                "token": "tok", "key_authorization": "tok.thumb"
+            })
+        );
+        let done = EventKind::AcmeChallengeDone {
+            proof: ChallengeProof::Dns01 {
+                name: "_acme-challenge.a.test".into(),
+                value: "v".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&done).expect("serializes"),
+            serde_json::json!({
+                "kind": "acme_challenge_done", "type": "dns-01",
+                "name": "_acme-challenge.a.test", "value": "v"
+            })
+        );
     }
 
     #[tokio::test]

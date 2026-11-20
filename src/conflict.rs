@@ -19,7 +19,8 @@
 //! - A claim under another tenant's wildcard: [`Conflict::CrossTenantWildcard`].
 //! - A claim under a wildcard of the same tenant, in another app, or a pattern two apps of one
 //!   tenant share, with a different `tls.client_ca_pem` (compared as written, `None` against
-//!   `Some` included): [`Conflict::TlsPolicy`]. TLS is decided per host at the handshake, before
+//!   `Some` included; a pattern two apps share must also agree on `tls.challenge`):
+//!   [`Conflict::TlsPolicy`]. TLS is decided per host at the handshake, before
 //!   any path is known, and exact beats wildcard when routing, so without this rule an app could
 //!   drop or swap the client-certificate requirement of its neighbour.
 //! - Routers with no literal host (a `host_regexp`, or no host constraint) of two tenants on a
@@ -359,7 +360,8 @@ pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Confl
                 } else if a.app != b.app
                     && settled.insert((a.app.min(b.app), a.app.max(b.app)))
                     && let (Some(one), Some(two)) = (world.app(a.app), world.app(b.app))
-                    && one.tls.client_ca_pem != two.tls.client_ca_pem
+                    && (one.tls.client_ca_pem != two.tls.client_ca_pem
+                        || one.tls.challenge != two.tls.challenge)
                 {
                     found.push(Conflict::TlsPolicy {
                         host: host.clone(),

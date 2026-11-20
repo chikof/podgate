@@ -5,7 +5,7 @@
 //! read one immutable answer. Without `Snapshot.acme` the plan is empty and every query says
 //! "nothing to do".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -15,8 +15,9 @@ use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
+use super::dns01;
 use crate::host::{HostMap, HostPattern};
-use podgate_model::{Acme, Snapshot, TlsMode};
+use podgate_model::{Acme, ChallengeKind, Snapshot, TlsMode};
 
 /// A snapshot's ACME settings or certificates that cannot be used.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -113,10 +114,41 @@ impl CertInfo {
     }
 }
 
-/// An app whose certificates the issuer orders for its exact hosts.
+/// An app whose certificates the issuer orders: its exact hosts for HTTP-01, all its hosts,
+/// wildcards included, for DNS-01.
 #[derive(Debug)]
 struct AcmeApp {
+    id: Box<str>,
+    challenge: ChallengeKind,
     hosts: Vec<Box<str>>,
+}
+
+/// What the app that claims a host says about its certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Claim {
+    app: Box<str>,
+    mode: TlsMode,
+    challenge: ChallengeKind,
+}
+
+/// How to renew a certificate: the challenge, and the app whose hosts it covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renewal {
+    /// How the CA is answered.
+    pub challenge: ChallengeKind,
+    /// The app that claims the certificate's hosts.
+    pub app: Box<str>,
+}
+
+/// One certificate the issuer should order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wanted {
+    /// The app whose hosts these are.
+    pub app: Box<str>,
+    /// How the CA is answered.
+    pub challenge: ChallengeKind,
+    /// The hosts, exact names or `*.` wildcards, in declaration order.
+    pub hosts: Vec<Box<str>>,
 }
 
 /// The ACME part of a [`crate::RoutingTable`].
@@ -124,7 +156,8 @@ struct AcmeApp {
 pub struct Plan {
     settings: Option<Acme>,
     challenges: HashMap<Box<str>, Box<str>>,
-    claimed: HostMap<TlsMode>,
+    claimed: HostMap<Claim>,
+    dns_ready: HashSet<(Box<str>, Box<str>)>,
     on_demand: bool,
     acme_apps: Vec<AcmeApp>,
     certs: Vec<CertInfo>,
@@ -150,20 +183,42 @@ impl Plan {
                 .iter()
                 .map(|challenge| (challenge.token.clone(), challenge.key_authorization.clone()))
                 .collect(),
+            dns_ready: acme
+                .dns_ready
+                .iter()
+                .map(|ready| (dns01::normalize_name(&ready.name), ready.value.clone()))
+                .collect(),
             settings: Some(acme.clone()),
             ..Self::default()
         };
         for (app, patterns) in snapshot.apps.iter().zip(claims) {
-            let mut exact = Vec::new();
+            let challenge = app.tls.challenge;
+            let mut hosts: Vec<Box<str>> = Vec::new();
             for pattern in patterns {
-                if let HostPattern::Exact(name) = pattern {
-                    exact.push(name.clone());
+                let (shown, orderable): (Box<str>, bool) = match pattern {
+                    HostPattern::Exact(name) => (name.clone(), true),
+                    HostPattern::Wildcard(base) => (
+                        format!("*.{base}").into(),
+                        challenge == ChallengeKind::Dns01,
+                    ),
+                };
+                if orderable && !hosts.contains(&shown) {
+                    hosts.push(shown);
                 }
-                plan.claimed.insert(pattern.clone(), app.tls.mode);
+                let claim = Claim {
+                    app: app.id.clone(),
+                    mode: app.tls.mode,
+                    challenge,
+                };
+                plan.claimed.insert(pattern.clone(), claim);
             }
             plan.on_demand |= app.tls.mode == TlsMode::OnDemand;
-            if app.tls.mode == TlsMode::Acme && !exact.is_empty() {
-                plan.acme_apps.push(AcmeApp { hosts: exact });
+            if app.tls.mode == TlsMode::Acme && !hosts.is_empty() {
+                plan.acme_apps.push(AcmeApp {
+                    id: app.id.clone(),
+                    challenge,
+                    hosts,
+                });
             }
         }
         for certificate in &snapshot.certificates {
@@ -207,7 +262,11 @@ impl Plan {
     /// wait for a certificate. A host that routes to an `acme` app or to no app is not.
     #[must_use]
     pub fn is_on_demand(&self, host: &str) -> bool {
-        self.settings.is_some() && self.claimed.lookup(host) == Some(&TlsMode::OnDemand)
+        self.settings.is_some()
+            && self
+                .claimed
+                .lookup(host)
+                .is_some_and(|claim| claim.mode == TlsMode::OnDemand)
     }
 
     /// The certificate of the snapshot that answers for `host` (normalized).
@@ -224,31 +283,61 @@ impl Plan {
         &self.certs
     }
 
-    /// The host sets to order for `acme` apps: per app, its exact hosts that no certificate of
-    /// the snapshot answers for. Wildcard hosts are skipped; HTTP-01 cannot prove them.
+    /// The certificates to order for `acme` apps: per app, its hosts that no certificate of the
+    /// snapshot answers for. An `http-01` app contributes its exact hosts only (HTTP-01 cannot
+    /// prove a wildcard); a `dns-01` app all of them.
     #[must_use]
-    pub fn missing(&self) -> Vec<Vec<Box<str>>> {
+    pub fn missing(&self) -> Vec<Wanted> {
         self.acme_apps
             .iter()
-            .map(|app| {
-                app.hosts
+            .map(|app| Wanted {
+                app: app.id.clone(),
+                challenge: app.challenge,
+                hosts: app
+                    .hosts
                     .iter()
                     .filter(|host| self.cert_for(host).is_none())
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect(),
             })
-            .filter(|hosts| !hosts.is_empty())
+            .filter(|wanted| !wanted.hosts.is_empty())
             .collect()
     }
 
-    /// Whether the issuer may renew `cert`: every host is exact (HTTP-01 cannot prove a
-    /// wildcard) and still claimed by an app, so a certificate of a removed app lapses.
+    /// Whether the control plane confirmed the DNS-01 TXT record `value` at `name`.
+    /// The issuer tells the CA to validate a DNS-01 challenge only when this is true.
+    #[must_use]
+    pub fn dns_ready(&self, name: &str, value: &str) -> bool {
+        self.dns_ready
+            .contains(&(dns01::normalize_name(name), Box::from(value)))
+    }
+
+    /// How the issuer renews `cert`, or `None` when it must not: every host is still claimed by
+    /// an app (so a certificate of a removed app lapses), all those apps use one challenge, and
+    /// a wildcard host belongs to a `dns-01` app (HTTP-01 cannot prove it).
+    #[must_use]
+    pub fn renewal(&self, cert: &CertInfo) -> Option<Renewal> {
+        let mut found: Option<&Claim> = None;
+        for host in &cert.hosts {
+            let wildcard = matches!(HostPattern::parse(host), Ok(HostPattern::Wildcard(_)));
+            let claim = self.claimed.lookup(host)?;
+            if wildcard && claim.challenge != ChallengeKind::Dns01 {
+                return None;
+            }
+            if found.get_or_insert(claim).challenge != claim.challenge {
+                return None;
+            }
+        }
+        found.map(|claim| Renewal {
+            challenge: claim.challenge,
+            app: claim.app.clone(),
+        })
+    }
+
+    /// Whether the issuer may renew `cert`; see [`Self::renewal`].
     #[must_use]
     pub fn renewable(&self, cert: &CertInfo) -> bool {
-        cert.hosts.iter().all(|host| {
-            matches!(HostPattern::parse(host), Ok(HostPattern::Exact(_)))
-                && self.claimed.lookup(host).is_some()
-        })
+        self.renewal(cert).is_some()
     }
 }
 
@@ -314,6 +403,17 @@ fn validate(acme: &Acme) -> Result<(), PlanError> {
                 format!("{raw:?} is not an exact host name"),
             ));
         }
+    }
+    for ready in &acme.dns_ready {
+        if let Err(reason) = dns01::check_record(&ready.name, &ready.value) {
+            return Err(invalid("dns_ready", reason));
+        }
+    }
+    if acme.dns_ready.len() > dns01::MAX_DNS_READY {
+        return Err(invalid(
+            "dns_ready",
+            format!("lists more than {} records", dns01::MAX_DNS_READY),
+        ));
     }
     Ok(())
 }
@@ -389,9 +489,17 @@ mod test {
         ]
         .join(",");
         let plan = compiled(&snapshot(ACME, &apps, "")).expect("compiles");
+        let wanted: Vec<_> = plan
+            .missing()
+            .into_iter()
+            .map(|w| (w.app, w.hosts))
+            .collect();
         assert_eq!(
-            plan.missing(),
-            vec![vec![Box::<str>::from("a.test"), "b.test".into()]]
+            wanted,
+            vec![(
+                Box::<str>::from("a"),
+                vec![Box::<str>::from("a.test"), "b.test".into()]
+            )]
         );
         assert!(plan.on_demand_enabled());
         assert!(plan.is_on_demand("x.p.test"));
@@ -407,7 +515,8 @@ mod test {
         });
         let apps = app("a", "acme", r#""a.test", "b.test""#);
         let plan = compiled(&snapshot(ACME, &apps, &certificate.to_string())).expect("compiles");
-        assert_eq!(plan.missing(), vec![vec![Box::<str>::from("b.test")]]);
+        let wanted: Vec<_> = plan.missing().into_iter().map(|w| w.hosts).collect();
+        assert_eq!(wanted, vec![vec![Box::<str>::from("b.test")]]);
         assert!(plan.cert_for("a.test").is_some());
         assert!(plan.renewable(plan.cert_for("a.test").expect("covered")));
     }
@@ -421,6 +530,87 @@ mod test {
         let certs = format!("{wildcard},{gone}");
         let plan = compiled(&snapshot(ACME, &apps, &certs)).expect("compiles");
         assert!(plan.certs().iter().all(|cert| !plan.renewable(cert)));
+    }
+
+    fn dns_app(id: &str, hosts: &str) -> String {
+        app(id, "acme", hosts).replace(
+            r#""mode": "acme""#,
+            r#""mode": "acme", "challenge": "dns-01""#,
+        )
+    }
+
+    #[test]
+    fn dns01_plan_orders_apex_and_wildcard_together() {
+        let apps = dns_app("a", r#""a.test", "*.a.test""#);
+        let plan = compiled(&snapshot(ACME, &apps, "")).expect("compiles");
+        let wanted = plan.missing();
+        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted[0].challenge, ChallengeKind::Dns01);
+        assert_eq!(
+            wanted[0].hosts,
+            [Box::<str>::from("a.test"), "*.a.test".into()]
+        );
+    }
+
+    #[test]
+    fn dns01_plan_renews_wildcards_only_for_dns01_apps() {
+        let pem = cert_pem(&["a.test"]);
+        let certificate = serde_json::json!({
+            "hosts": ["*.a.test", "a.test"], "cert_pem": pem, "key_pem": "k"
+        })
+        .to_string();
+        let dns = compiled(&snapshot(
+            ACME,
+            &dns_app("a", r#""a.test", "*.a.test""#),
+            &certificate,
+        ))
+        .expect("compiles");
+        let renewal = dns
+            .renewal(&dns.certs()[0])
+            .expect("a dns-01 app renews it");
+        assert_eq!(renewal.challenge, ChallengeKind::Dns01);
+        assert_eq!(&*renewal.app, "a");
+        let http = compiled(&snapshot(
+            ACME,
+            &app("a", "acme", r#""a.test", "*.a.test""#),
+            &certificate,
+        ))
+        .expect("compiles");
+        assert_eq!(http.renewal(&http.certs()[0]), None);
+    }
+
+    #[test]
+    fn dns01_plan_knows_confirmed_records_by_name_and_value() {
+        let acme = r#"{"issuer_node": "n1", "directory_url": "https://ca.test/dir",
+            "dns_ready": [{"name": "_ACME-challenge.A.test.", "value": "v1"}]}"#;
+        let plan = Plan::compile(&snapshot(acme, "", ""), &[]).expect("compiles");
+        assert!(plan.dns_ready("_acme-challenge.a.test", "v1"));
+        assert!(!plan.dns_ready("_acme-challenge.a.test", "v2"));
+        assert!(!plan.dns_ready("_acme-challenge.b.test", "v1"));
+    }
+
+    #[test]
+    fn dns01_plan_rejects_unusable_records() {
+        for ready in [
+            r#"{"name": "a.test", "value": "v"}"#,
+            r#"{"name": "_acme-challenge.a.test", "value": ""}"#,
+            r#"{"name": "_acme-challenge.*.a.test", "value": "v"}"#,
+        ] {
+            let acme = format!(
+                r#"{{"issuer_node": "n1", "directory_url": "https://ca.test/dir", "dns_ready": [{ready}]}}"#
+            );
+            let err = Plan::compile(&snapshot(&acme, "", ""), &[]).expect_err("rejected");
+            assert!(
+                matches!(
+                    err,
+                    PlanError::Invalid {
+                        field: "dns_ready",
+                        ..
+                    }
+                ),
+                "{ready}: {err}"
+            );
+        }
     }
 
     #[test]

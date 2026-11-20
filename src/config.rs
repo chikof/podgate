@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::acme;
 use crate::entry::{self, EntryPoint};
 use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
@@ -60,6 +61,7 @@ const _: () =
 /// | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
 /// | `NODE_NAME` | unset | Name of this node; the node whose name equals the snapshot's `acme.issuer_node` orders certificates. |
 /// | `ACME_CA_FILE` | unset | PEM file with the root certificate to trust for the ACME server instead of the platform's roots (private or test CAs). |
+/// | `ACME_DNS_ZONES` | unset | Comma-separated DNS zones an app may use the `dns-01` challenge for. Unset: `dns-01` is off and an app asking for it is rejected. |
 /// | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
@@ -97,6 +99,9 @@ pub struct Config {
     pub node_name: Option<Box<str>>,
     /// PEM file with the root certificate trusted for the ACME server. Absent: platform roots.
     pub acme_ca_file: Option<PathBuf>,
+    /// Zones the operator lets apps prove with the `dns-01` challenge (`ACME_DNS_ZONES`); a host
+    /// is allowed when it is a zone or lies under one. Empty: `dns-01` is off.
+    pub acme_dns_zones: Vec<Box<str>>,
     /// Tenants the operator lets declare catch-all routers (a `host_regexp` or host-free router)
     /// on a shared entry point, so they can receive hosts nobody claims. Empty: none can.
     pub catch_all_tenants: Vec<Box<str>>,
@@ -121,6 +126,7 @@ impl Default for Config {
                 .saturating_add(health::DEFAULT_MAX_CONCURRENT - 1),
             node_name: None,
             acme_ca_file: None,
+            acme_dns_zones: Vec::new(),
             catch_all_tenants: Vec::new(),
             upstream_policy_file: None,
             access_log_file: None,
@@ -332,6 +338,13 @@ impl Config {
         };
         config.node_name = non_empty("NODE_NAME")?.map(String::into_boxed_str);
         config.acme_ca_file = non_empty("ACME_CA_FILE")?.map(PathBuf::from);
+        if let Some(raw) = lookup("ACME_DNS_ZONES") {
+            config.acme_dns_zones =
+                acme::dns01::parse_zones(&raw).map_err(|reason| ConfigError {
+                    var: "ACME_DNS_ZONES",
+                    reason: reason.into(),
+                })?;
+        }
         config.upstream_policy_file = non_empty("UPSTREAM_POLICY_FILE")?.map(PathBuf::from);
         config.access_log_file = non_empty("ACCESS_LOG_FILE")?.map(PathBuf::from);
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
@@ -377,6 +390,7 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "8"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
+            ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
@@ -397,6 +411,7 @@ mod test {
                 health_max_concurrent: NonZeroUsize::new(8).expect("8 is not zero"),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
+                acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
@@ -428,6 +443,9 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "lots"),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
+            ("ACME_DNS_ZONES", " "),
+            ("ACME_DNS_ZONES", "*.example.com"),
+            ("ACME_DNS_ZONES", "a b"),
             ("UPSTREAM_POLICY_FILE", " "),
             ("ACCESS_LOG_FILE", " "),
         ] {

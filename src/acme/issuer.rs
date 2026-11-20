@@ -15,6 +15,7 @@ use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -30,11 +31,12 @@ use thiserror::Error;
 use tokio::task::{Id, JoinSet};
 use tokio::time::{MissedTickBehavior, sleep, timeout};
 
+use super::dns01::{self, NotReady, Round};
 use super::plan::{CertInfo, Plan, decode_hmac_key};
 use super::{Acme, PrivateKeyPem};
-use crate::events::{EventFeed, EventKind};
+use crate::events::{ChallengeProof, EventFeed, EventKind};
 use crate::table::TableHandle;
-use podgate_model::{self as snapshot, ExternalAccount};
+use podgate_model::{self as snapshot, ChallengeKind, ExternalAccount};
 
 /// How often the loop looks at the table.
 const TICK: Duration = Duration::from_secs(1);
@@ -42,8 +44,11 @@ const TICK: Duration = Duration::from_secs(1);
 const MAX_ORDERS: usize = 8;
 /// How long an order waits for the control plane to publish its challenges.
 const CHALLENGE_WAIT: Duration = Duration::from_secs(300);
-/// An order's whole budget, including [`CHALLENGE_WAIT`].
+/// An HTTP-01 order's whole budget, including [`CHALLENGE_WAIT`].
 const ORDER_DEADLINE: Duration = Duration::from_secs(600);
+/// What an order has left once the control plane answered its challenges: validation, finalizing
+/// and download.
+const ORDER_AFTER_WAIT: Duration = Duration::from_secs(300);
 /// How long account creation may take.
 const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Wait before trying to create the account again.
@@ -71,12 +76,16 @@ enum IssueError {
     Acme(#[from] AcmeError),
     #[error("account key: {0}")]
     AccountKey(Box<str>),
-    #[error("the server offers no http-01 challenge")]
-    NoHttp01,
+    #[error("the server offers no {0:?} challenge")]
+    NoChallenge(ChallengeKind),
     #[error("authorization is {0}")]
     Authorization(Box<str>),
     #[error("the control plane did not publish the challenge in time")]
     ChallengeNotPublished,
+    #[error("the control plane did not confirm the DNS record in time")]
+    DnsNotConfirmed,
+    #[error("too many DNS-01 challenges are pending for this app or node")]
+    TooManyPending,
     #[error("the snapshot no longer has acme settings")]
     Cancelled,
     #[error("the order ended {0:?} instead of ready")]
@@ -96,10 +105,14 @@ struct JobKey {
 struct Job {
     key: JobKey,
     replaces: Option<CertificateIdentifier<'static>>,
+    challenge: ChallengeKind,
+    /// The app whose hosts these are; bounds its pending DNS-01 challenges. Empty for on-demand
+    /// hosts, which never use DNS-01.
+    app: Box<str>,
 }
 
 impl Job {
-    fn issue(hosts: &[Box<str>]) -> Self {
+    fn issue(hosts: &[Box<str>], challenge: ChallengeKind, app: &str) -> Self {
         let mut hosts = hosts.to_vec();
         hosts.sort_unstable();
         Self {
@@ -108,15 +121,26 @@ impl Job {
                 replaces: None,
             },
             replaces: None,
+            challenge,
+            app: app.into(),
         }
     }
 
-    fn renew(cert: &CertInfo, ari: bool) -> Self {
-        let mut job = Self::issue(&cert.hosts);
+    fn renew(cert: &CertInfo, ari: bool, challenge: ChallengeKind, app: &str) -> Self {
+        let mut job = Self::issue(&cert.hosts, challenge, app);
         // The CA only accepts `replaces` when it offers ARI.
         job.replaces = cert.id.clone().filter(|_| ari);
         job.key.replaces = cert.id.as_ref().map(|id| id.to_string().into());
         job
+    }
+
+    /// How long the whole order may take. A DNS-01 order also waits for the control plane to
+    /// publish a record, which takes longer than serving an HTTP-01 answer.
+    fn deadline(&self) -> Duration {
+        match self.challenge {
+            ChallengeKind::Http01 => ORDER_DEADLINE,
+            ChallengeKind::Dns01 => dns01::READY_WAIT + ORDER_AFTER_WAIT,
+        }
     }
 }
 
@@ -335,12 +359,12 @@ impl Acme {
         let mut jobs: Vec<Job> = plan
             .missing()
             .iter()
-            .map(|hosts| Job::issue(hosts))
+            .map(|wanted| Job::issue(&wanted.hosts, wanted.challenge, &wanted.app))
             .collect();
         jobs.extend(
             Self::requested_hosts(plan, settings)
                 .iter()
-                .map(|host| Job::issue(std::slice::from_ref(host))),
+                .map(|host| Job::issue(std::slice::from_ref(host), ChallengeKind::Http01, "")),
         );
         if jobs.is_empty() && plan.certs().is_empty() {
             return;
@@ -352,8 +376,10 @@ impl Acme {
         let wall = SystemTime::now();
         let ari = issuer.ari_supported == Some(true);
         for cert in plan.certs() {
-            if plan.renewable(cert) && issuer.due(cert, wall) {
-                jobs.push(Job::renew(cert, ari));
+            if let Some(renewal) = plan.renewal(cert)
+                && issuer.due(cert, wall)
+            {
+                jobs.push(Job::renew(cert, ari, renewal.challenge, &renewal.app));
             }
         }
         let now = Instant::now();
@@ -368,10 +394,11 @@ impl Acme {
                 account: account.clone(),
                 table: self.shared.table.clone(),
                 events: self.shared.events.clone(),
+                dns_pending: Arc::clone(&self.shared.dns_pending),
             };
             let key = job.key.clone();
             let handle = issuer.orders.spawn(async move {
-                timeout(ORDER_DEADLINE, order.run(&job))
+                timeout(job.deadline(), order.run(&job))
                     .await
                     .unwrap_or(Err(IssueError::Deadline))
             });
@@ -471,6 +498,14 @@ struct Order {
     account: Account,
     table: TableHandle,
     events: EventFeed,
+    dns_pending: Arc<dns01::Ledger>,
+}
+
+fn challenge_type(kind: ChallengeKind) -> ChallengeType {
+    match kind {
+        ChallengeKind::Http01 => ChallengeType::Http01,
+        ChallengeKind::Dns01 => ChallengeType::Dns01,
+    }
 }
 
 impl Order {
@@ -496,7 +531,15 @@ impl Order {
             None => self.account.new_order(&NewOrder::new(&identifiers)).await?,
         };
 
+        let kind = challenge_type(job.challenge);
         let mut tokens: Vec<Box<str>> = Vec::new();
+        // Emits `acme_challenge_done` for every DNS-01 record it announced, however this
+        // function ends: a record the control plane published must not outlive the order.
+        let mut dns = Round::new(
+            Arc::clone(&self.dns_pending),
+            self.events.clone(),
+            job.app.clone(),
+        );
         let mut authorizations = order.authorizations();
         while let Some(next) = authorizations.next().await {
             let mut authorization = next?;
@@ -505,17 +548,42 @@ impl Order {
                 AuthorizationStatus::Pending => {}
                 ref other => return Err(IssueError::Authorization(format!("{other:?}").into())),
             }
+            let domain = match authorization.identifier().identifier {
+                Identifier::Dns(name) => name.clone(),
+                other => return Err(IssueError::Authorization(format!("{other:?}").into())),
+            };
             let challenge = authorization
-                .challenge(ChallengeType::Http01)
-                .ok_or(IssueError::NoHttp01)?;
-            let token: Box<str> = challenge.token.as_str().into();
-            self.events.emit(EventKind::AcmeChallenge {
-                token: token.clone(),
-                key_authorization: challenge.key_authorization().as_str().into(),
-            });
-            tokens.push(token);
+                .challenge(kind.clone())
+                .ok_or(IssueError::NoChallenge(job.challenge))?;
+            match job.challenge {
+                ChallengeKind::Http01 => {
+                    let token: Box<str> = challenge.token.as_str().into();
+                    self.events.emit(EventKind::AcmeChallenge {
+                        proof: ChallengeProof::Http01 {
+                            token: token.clone(),
+                            key_authorization: challenge.key_authorization().as_str().into(),
+                        },
+                    });
+                    tokens.push(token);
+                }
+                ChallengeKind::Dns01 => {
+                    if !dns.announce(&domain, challenge.key_authorization().dns_value()) {
+                        return Err(IssueError::TooManyPending);
+                    }
+                }
+            }
         }
-        self.wait_for_challenges(&tokens).await?;
+        match job.challenge {
+            ChallengeKind::Http01 => self.wait_for_challenges(&tokens).await?,
+            ChallengeKind::Dns01 => {
+                dns01::await_ready(&self.table, dns.records(), dns01::READY_WAIT)
+                    .await
+                    .map_err(|why| match why {
+                        NotReady::Cancelled => IssueError::Cancelled,
+                        NotReady::Expired => IssueError::DnsNotConfirmed,
+                    })?;
+            }
+        }
         let mut authorizations = order.authorizations();
         while let Some(next) = authorizations.next().await {
             let mut authorization = next?;
@@ -523,14 +591,16 @@ impl Order {
                 continue;
             }
             authorization
-                .challenge(ChallengeType::Http01)
-                .ok_or(IssueError::NoHttp01)?
+                .challenge(kind.clone())
+                .ok_or(IssueError::NoChallenge(job.challenge))?
                 .set_ready()
                 .await?;
         }
 
         let retry = RetryPolicy::new().timeout(Duration::from_secs(90));
-        let status = order.poll_ready(&retry).await?;
+        let validated = order.poll_ready(&retry).await;
+        dns.finish();
+        let status = validated?;
         if status != OrderStatus::Ready {
             return Err(IssueError::NotReady(status));
         }
@@ -635,9 +705,31 @@ mod test {
 
     #[test]
     fn acme_jobs_have_the_same_key_whatever_the_host_order() {
-        let one = Job::issue(&["b.test".into(), "a.test".into()]);
-        let two = Job::issue(&["a.test".into(), "b.test".into()]);
+        let http = ChallengeKind::Http01;
+        let one = Job::issue(&["b.test".into(), "a.test".into()], http, "a");
+        let two = Job::issue(&["a.test".into(), "b.test".into()], http, "a");
         assert_eq!(one.key, two.key);
-        assert_ne!(one.key, Job::renew(&cert(Some("YWJj.ZGVm")), true).key);
+        let renewal = Job::renew(&cert(Some("YWJj.ZGVm")), true, http, "a");
+        assert_ne!(one.key, renewal.key);
+    }
+
+    #[tokio::test]
+    async fn dns01_unconfirmed_times_out_and_backs_off() {
+        let mut issuer = Issuer::default();
+        let key = Job::issue(&["*.a.test".into()], ChallengeKind::Dns01, "a").key;
+        let handle = issuer
+            .orders
+            .spawn(async { Err(IssueError::DnsNotConfirmed) });
+        issuer.running.insert(handle.id(), key.clone());
+        while !issuer.running.is_empty() {
+            tokio::task::yield_now().await;
+            issuer.reap();
+        }
+        let gate = issuer.gates.get(&key).expect("the failure is remembered");
+        assert_eq!(gate.failures, 1);
+        assert!(
+            issuer.blocked(&key, Instant::now()),
+            "the same job waits out its backoff before it is ordered again"
+        );
     }
 }
