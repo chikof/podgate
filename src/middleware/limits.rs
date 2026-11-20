@@ -94,7 +94,7 @@ const WAYS: usize = 8;
 const ABSENT: &[u8] = b"-";
 
 /// A `source.ip` as written in a snapshot: Traefik's `ipStrategy`, plus the IPv6 prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct IpSource {
     #[serde(default)]
@@ -107,7 +107,7 @@ pub(super) struct IpSource {
 }
 
 /// A `source` as written in a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SourceConfig {
     /// The client address under an `ipStrategy`.

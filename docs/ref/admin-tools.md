@@ -20,7 +20,7 @@ The schema checks shape, not meaning: a router naming a service that does not ex
 
 ### Adding a kind
 
-A new middleware or service type derives `schemars::JsonSchema` on its configuration struct and adds one line to `schemas!` (`src/middleware.rs`, `src/service.rs`); a new matcher key adds its entry to `src/router/matcher/schema.rs`. The test `every_built_kind_has_a_schema` fails when a built kind has no line: middlewares are compared with `Stage::BUILT`, service types and matcher keys with the arms of `Service::compile` and of the matcher parser.
+A new middleware or service type derives `schemars::JsonSchema` on its configuration struct and adds one line to `schemas!` (`src/middleware.rs`, `src/service.rs`); a new matcher key adds its entry to `src/router/matcher/schema.rs`. The test `every_built_kind_has_a_schema` fails when a built kind has no schema: the `$defs` are compared with `Stage::BUILT`, `service::BUILT` and `matcher::BUILT`. The last two are lists the code itself uses: `Service::compile` and the matcher parser refuse a name that is not listed before they look at their arms, and a unit test in each module compiles one declaration per listed name and checks that an unlisted name is refused, so a list cannot drift from its parser. A new service type or matcher key therefore also adds its name to `BUILT`.
 
 ## `POST /v1/snapshot/validate`
 

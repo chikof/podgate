@@ -585,6 +585,10 @@ schemas! {
 
     "ip_allow_list" => ip_allow_list::Config,
 
+    "rate_limit" => rate_limit::Config,
+
+    "in_flight_req" => in_flight_req::Config,
+
     "circuit_breaker" => circuit_breaker::Config,
 
     "buffering" => buffering::Config,

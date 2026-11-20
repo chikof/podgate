@@ -61,10 +61,15 @@ pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transp
 /// Service types that are planned and not built yet.
 pub const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
 
+/// Every service type `Service::compile` builds. `compile` refuses a type that is not listed here
+/// before it looks at its arms, so an arm for a new type is dead until its name is listed; the
+/// schema guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
+pub const BUILT: [&str; 2] = ["loadbalancer", "static"];
+
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built type, whose
 /// configuration struct derives `schemars::JsonSchema`. Keep one entry per line, a blank line
-/// between entries. The test `every_built_kind_has_a_schema` fails for a type that `Service::compile`
-/// builds and this list lacks.
+/// between entries. The test `every_built_kind_has_a_schema` fails for a type that [`BUILT`]
+/// lists and this list lacks.
 macro_rules! schemas {
     ($($ty:literal => $config:ty,)*) => {
         /// The JSON Schema of the configuration of every built service type, by type name.
@@ -120,15 +125,19 @@ impl Service {
         static_roots: Option<&TenantRoots>,
     ) -> Result<Self, Invalid> {
         match &*declared.kind {
+            other if !BUILT.contains(&other) && UNBUILT.contains(&other) => Err(Invalid::new(
+                "service_not_built",
+                format!("service type {other} is planned and not built yet"),
+            )),
+            other if !BUILT.contains(&other) => Err(Invalid::new(
+                "invalid_service",
+                format!("unknown service type {other}"),
+            )),
             "loadbalancer" => LoadBalancer::compile(declared, transports)
                 .map(|balancer| Self::LoadBalancer(Box::new(balancer))),
             "static" => {
                 StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
             }
-            other if UNBUILT.contains(&other) => Err(Invalid::new(
-                "service_not_built",
-                format!("service type {other} is planned and not built yet"),
-            )),
             other => Err(Invalid::new(
                 "invalid_service",
                 format!("unknown service type {other}"),
@@ -266,6 +275,41 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
             Self::Static(site) => Some((NO_SERVER, site.lease())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use serde_json::json;
+
+    use super::*;
+
+    fn declared(kind: &str) -> Declared {
+        serde_json::from_value(json!({ "name": "s", "type": kind })).expect("declared")
+    }
+
+    #[test]
+    fn built_lists_exactly_the_types_compile_builds() {
+        for kind in BUILT {
+            // An empty declaration is refused by the type itself, never as unknown or planned.
+            let err = Service::compile(&declared(kind), &[], None).expect_err(kind);
+            assert!(
+                !err.message.starts_with("unknown service type")
+                    && !err.message.contains("planned and not built"),
+                "{kind} is listed in BUILT and has no arm: {}",
+                err.message
+            );
+        }
+        let err = Service::compile(&declared("zzz_unlisted"), &[], None).expect_err("unlisted");
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            ("invalid_service", "unknown service type zzz_unlisted")
+        );
+        for kind in UNBUILT {
+            let err = Service::compile(&declared(kind), &[], None).expect_err(kind);
+            assert_eq!(err.code, "service_not_built", "{kind}");
+            assert!(!BUILT.contains(&kind));
         }
     }
 }

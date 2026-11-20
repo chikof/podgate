@@ -482,7 +482,7 @@ v1 ran `wasm_filters` after the admissions. It now runs in the chain, before the
 
 ### Extension contract
 
-The feature specs rely on this. Everything per kind lives in that kind's file.
+The feature specs rely on this. Everything per kind lives in that kind's file. A new kind also adds its schema: its configuration struct derives `schemars::JsonSchema` and one line goes into `schemas!` (`src/middleware.rs` or `src/service.rs`; a matcher key adds an entry in `src/router/matcher/schema.rs`). A new service type or matcher key is also listed in `service::BUILT` or `matcher::BUILT`, the lists their compile functions gate on. `every_built_kind_has_a_schema` fails when a built kind has no schema.
 
 ```rust
 /// Implemented by one type per file in `src/middleware/`.

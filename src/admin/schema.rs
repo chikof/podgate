@@ -157,63 +157,42 @@ mod test {
 
     use super::*;
 
-    /// The quoted keys at the start of the `match` arms in `source`, between `from` and `to`.
-    fn arms(source: &str, from: &str, to: &str, arrow: &str) -> BTreeSet<String> {
-        let start = source.find(from).expect("start marker");
-        let end = source[start..]
-            .find(to)
-            .map_or(source.len(), |at| start + at);
-        source[start..end]
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| line.starts_with('"'))
-            .filter_map(|line| {
-                let (key, rest) = line[1..].split_once('"')?;
-                rest.trim_start().starts_with(arrow).then(|| key.to_owned())
-            })
+    /// The type names `document()` has a `$defs` entry for, in `category`.
+    fn defined(document: &Value, category: &str) -> BTreeSet<String> {
+        let defs = document["$defs"].as_object().expect("$defs");
+        let prefix = format!("{category}.");
+        defs.keys()
+            .filter_map(|name| name.strip_prefix(&prefix))
+            .map(str::to_owned)
             .collect()
     }
 
-    fn keys(schemas: &[(&'static str, Value)]) -> BTreeSet<String> {
-        schemas.iter().map(|(key, _)| (*key).to_owned()).collect()
+    fn listed(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
     }
 
     #[test]
     fn every_built_kind_has_a_schema() {
-        let built: BTreeSet<String> = middleware::Stage::BUILT
-            .iter()
-            .map(|kind| (*kind).to_owned())
-            .collect();
+        let document = document();
         assert_eq!(
-            keys(&middleware::schemas()),
-            built,
-            "a middleware kind is built without a line in `schemas!` (src/middleware.rs), or listed there without being built"
-        );
-
-        let compiled = arms(
-            include_str!("../service.rs"),
-            "pub fn compile(",
-            "pub fn kind(",
-            "=>",
+            defined(&document, "middleware"),
+            listed(middleware::Stage::BUILT),
+            "a middleware kind is built without a line in `schemas!` (src/middleware.rs), or has one without being built"
         );
         assert_eq!(
-            keys(&service::schemas()),
-            compiled,
-            "a service type is built without a line in `schemas!` (src/service.rs), or listed there without being built"
-        );
-
-        let parsed = arms(
-            include_str!("../router/matcher.rs"),
-            "pub(super) fn parse_at(",
-            "/// Compiles `pattern`",
-            "=> Matcher::",
+            defined(&document, "service"),
+            listed(&service::BUILT),
+            "a service type is built without a line in `schemas!` (src/service.rs), or has one without being built"
         );
         assert_eq!(
-            keys(&matcher::schemas()),
-            parsed,
-            "a matcher key is built without an entry in src/router/matcher/schema.rs, or listed there without being built"
+            defined(&document, "matcher"),
+            listed(&matcher::BUILT),
+            "a matcher key is built without an entry in src/router/matcher/schema.rs, or has one without being built"
         );
-        assert!(!parsed.is_empty() && !compiled.is_empty());
+        assert_eq!(
+            defined(&document, "transport"),
+            listed(&[service::transport_schema().0])
+        );
     }
 
     #[test]

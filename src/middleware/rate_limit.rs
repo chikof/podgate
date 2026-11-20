@@ -52,9 +52,9 @@ pub mod kind {
 }
 
 /// The configuration of a `rate_limit` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     average: u32,
     #[serde(default)]
     period_secs: Option<u32>,

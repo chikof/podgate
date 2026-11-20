@@ -42,9 +42,9 @@ pub mod kind {
 }
 
 /// The configuration of an `in_flight_req` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     amount: u32,
     source: SourceConfig,
     #[serde(default)]

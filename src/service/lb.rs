@@ -155,7 +155,7 @@ fn pair(cx: PickCx<'_>, servers: &[Server], shared: &ServiceState) -> Option<(us
 
 /// The object form of `algorithm`: the name as `type`, and the options of the algorithms that
 /// have any.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Object {
     #[serde(rename = "type")]
@@ -164,6 +164,21 @@ struct Object {
     header: Option<String>,
     #[serde(default)]
     include_query: Option<bool>,
+}
+
+/// The schema of `algorithm`: one of the names, or the object form.
+pub(super) fn algorithm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    use schemars::JsonSchema as _;
+    schemars::json_schema!({
+        "description": "The balancing algorithm: a name, or an object `{\"type\": name, ...options}`. Absent: `round_robin`.",
+        "oneOf": [
+            { "enum": [
+                "round_robin", "weighted_round_robin", "least_conn", "p2c_ewma", "random",
+                "ip_hash", "uri_hash", "header_hash", "hrw"
+            ] },
+            Object::json_schema(generator)
+        ]
+    })
 }
 
 impl Balancer {

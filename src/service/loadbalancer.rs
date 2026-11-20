@@ -45,6 +45,7 @@ use podgate_model::{Declared, SkewSecret};
 pub(super) struct Config {
     servers: Vec<ServerConfig>,
     #[serde(default)]
+    #[schemars(schema_with = "super::lb::algorithm_schema")]
     algorithm: Option<Value>,
     #[serde(default)]
     #[schemars(with = "Option<super::health::Config>")]

@@ -54,6 +54,26 @@ pub const MAX_DEPTH: usize = 8;
 /// Compiled size limit of one regular expression, in bytes.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
+/// Every key `parse_at` builds. `parse_at` refuses a key that is not listed here before it
+/// looks at its arms, so an arm for a new leaf is dead until its key is listed; the schema
+/// guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
+pub const BUILT: [&str; 14] = [
+    "host",
+    "host_regexp",
+    "path",
+    "path_prefix",
+    "path_regexp",
+    "method",
+    "client_ip",
+    "header",
+    "header_regexp",
+    "query",
+    "query_regexp",
+    "all",
+    "any",
+    "not",
+];
+
 /// Leaves that are planned and not built: refused with `matcher_not_built`.
 pub const UNBUILT: [&str; 0] = [];
 
@@ -213,6 +233,15 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
         ));
     };
     Ok(match key.as_str() {
+        other if !BUILT.contains(&other) && UNBUILT.contains(&other) => {
+            return Err(Error {
+                code: "matcher_not_built",
+                message: format!("matcher {other} is planned and not built yet"),
+            });
+        }
+        other if !BUILT.contains(&other) => {
+            return Err(Error::invalid(format!("unknown matcher {other}")));
+        }
         "host" => Matcher::Host(Host::parse(argument)?),
         "host_regexp" => Matcher::HostRegexp(HostRegexp::parse(argument)?),
         "path" => Matcher::Path(Path::parse(argument)?),
@@ -227,12 +256,6 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
         "all" => Matcher::All(combinator::parse_list(key, argument, depth)?),
         "any" => Matcher::Any(combinator::parse_list(key, argument, depth)?),
         "not" => Matcher::Not(Box::new(parse_at(argument, depth + 1)?)),
-        other if UNBUILT.contains(&other) => {
-            return Err(Error {
-                code: "matcher_not_built",
-                message: format!("matcher {other} is planned and not built yet"),
-            });
-        }
         other => return Err(Error::invalid(format!("unknown matcher {other}"))),
     })
 }
@@ -456,6 +479,21 @@ mod test {
             let err = parse(&json!({ key: "x" })).expect_err(key);
             assert_eq!(err.code, "matcher_not_built", "{key}");
         }
+    }
+
+    #[test]
+    fn built_lists_exactly_the_keys_the_parser_builds() {
+        for key in BUILT {
+            let err = parse(&json!({ key: null })).expect_err(key);
+            assert_ne!(err.code, "matcher_not_built", "{key}");
+            assert!(
+                !err.message.starts_with("unknown matcher"),
+                "{key} is listed in BUILT and has no arm: {err}"
+            );
+        }
+        let err = parse(&json!({ "zzz_unlisted": "x" })).expect_err("unlisted");
+        assert_eq!(err.message, "unknown matcher zzz_unlisted");
+        assert!(UNBUILT.iter().all(|key| !BUILT.contains(key)));
     }
 
     #[test]
