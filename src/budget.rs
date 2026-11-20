@@ -34,6 +34,7 @@ pub struct TenantBudget {
     rejected: AtomicU64,
     degraded: AtomicU64,
     filter_refused: AtomicU64,
+    buffering_refused: AtomicU64,
 }
 
 impl TenantBudget {
@@ -47,6 +48,7 @@ impl TenantBudget {
             rejected: AtomicU64::new(0),
             degraded: AtomicU64::new(0),
             filter_refused: AtomicU64::new(0),
+            buffering_refused: AtomicU64::new(0),
         }
     }
 
@@ -94,6 +96,17 @@ impl TenantBudget {
         let guard = self.charge(bytes);
         if guard.is_none() {
             self.filter_refused.fetch_add(1, Ordering::Relaxed);
+        }
+        guard
+    }
+
+    /// [`Self::reserve`] for the `buffering` middleware (see [`crate::middleware::buffering`]):
+    /// the same charge, but a refusal counts as a refused buffer, not as skipped compression.
+    #[must_use]
+    pub fn reserve_buffering(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
+        let guard = self.charge(bytes);
+        if guard.is_none() {
+            self.buffering_refused.fetch_add(1, Ordering::Relaxed);
         }
         guard
     }
@@ -250,6 +263,12 @@ impl Budgets {
                 kind: "counter",
                 help: "WASM filter runs refused with 503 because the buffer budget could not take the filter's memory.",
                 value: |tenant| tenant.filter_refused.load(Ordering::Relaxed),
+            },
+            Family {
+                name: "podgate_tenant_buffering_refused_total",
+                kind: "counter",
+                help: "Requests and responses refused because the buffer budget could not take the body a buffering middleware holds.",
+                value: |tenant| tenant.buffering_refused.load(Ordering::Relaxed),
             },
         ];
         for Family {

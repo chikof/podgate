@@ -29,12 +29,14 @@ use crate::budget::TenantBudget;
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
 use crate::events::EventFeed;
+use crate::error::AppError;
 use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
 pub mod circuit_breaker;
+pub mod buffering;
 pub mod content_type;
 pub mod headers;
 mod path_rewrite;
@@ -96,6 +98,16 @@ pub struct FinishCx<'a> {
     /// The request failed on the upstream side before an answer arrived (refused, reset, timed
     /// out).
     pub upstream_error: bool,
+}
+
+/// What a response-head hook sees.
+pub struct ResponseCx<'a> {
+    /// The request the response answers.
+    pub request: &'a RequestHeader,
+    /// The upstream's response head, before any hook of the chain has changed it.
+    pub response: &'a ResponseHeader,
+    /// The tenant's budget, to charge memory before allocating.
+    pub tenant: Option<&'a Arc<TenantBudget>>,
 }
 
 /// A middleware type. Every hook has a default that does nothing.
@@ -170,6 +182,33 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     /// including those a request never reached (an earlier stage answered it): a stage keeps
     /// in its [`Self::State`] whether it ran.
     fn finished(&self, _cx: &FinishCx<'_>, _state: &mut Self::State) {}
+
+    /// Runs on every chunk of the request body the proxy reads from the client, before it goes
+    /// to the upstream. `bytes_read` is everything read from the client so far, counted by
+    /// Pingora, so a replay of a buffered body to a second upstream does not count twice. May
+    /// refuse the request; the refusal is written as the response when none was written yet.
+    ///
+    /// # Errors
+    ///
+    /// The [`AppError`] that ends the request.
+    fn request_body(&self, _bytes_read: u64, _state: &mut Self::State) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    /// Runs on the upstream's response head before the client has seen any of it, in reverse
+    /// chain order, ahead of [`Self::response`]. May refuse the response: the refusal is written
+    /// instead of it.
+    ///
+    /// # Errors
+    ///
+    /// The [`AppError`] that replaces the response.
+    fn response_head(
+        &self,
+        _cx: &ResponseCx<'_>,
+        _state: &mut Self::State,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
 
     /// The relaxations a plan must list when `new` replaces `self`, as stable `posture_changes`
     /// kinds; `None` means the stage is gone. Security kinds implement it; the default says
@@ -360,6 +399,36 @@ macro_rules! kinds {
                     _ => {}
                 }
             }
+
+            fn request_body(
+                &self,
+                bytes_read: u64,
+                state: &mut StageState,
+            ) -> Result<(), $crate::error::AppError> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::request_body(kind, bytes_read, state)
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
+
+            fn response_head(
+                &self,
+                cx: &$crate::middleware::ResponseCx<'_>,
+                state: &mut StageState,
+            ) -> Result<(), $crate::error::AppError> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_head(kind, cx, state)
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
         }
     };
     ($($body:tt)*) => {
@@ -404,7 +473,7 @@ kinds! {
 
     "retry" => unbuilt,
 
-    "buffering" => unbuilt,
+    "buffering" => Buffering(buffering::Buffering),
 
     "compress" => unbuilt,
 
@@ -529,6 +598,44 @@ pub fn run_finished(stages: &[Named], chain: &[usize], cx: &FinishCx<'_>, state:
             named.stage.finished(cx, slot);
         }
     }
+}
+
+/// Runs the request-body hooks of `chain` after the proxy read `bytes_read` bytes of the body.
+///
+/// # Errors
+///
+/// The first refusal a hook returns.
+pub fn run_request_body(
+    stages: &[Named],
+    chain: &[usize],
+    bytes_read: u64,
+    state: &mut State,
+) -> Result<(), AppError> {
+    for (position, index) in chain.iter().enumerate() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.request_body(bytes_read, slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs the response-head hooks of `chain` on the upstream's response head, last stage first.
+///
+/// # Errors
+///
+/// The first refusal a hook returns.
+pub fn run_response_head(
+    stages: &[Named],
+    chain: &[usize],
+    cx: &ResponseCx<'_>,
+    state: &mut State,
+) -> Result<(), AppError> {
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.response_head(cx, slot)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

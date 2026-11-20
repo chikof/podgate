@@ -97,7 +97,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | 0094 (Redis-compatible store, per-route `on_store_error: allow` with local fallback, or `deny`) |
 | In-flight request limit | `inFlightReq` | none | 0050 (per node), 0102 (cluster-wide with leases) |
 | Circuit breaker | `circuitBreaker` (expression) | none | built: `src/middleware/circuit_breaker.rs`; structured `trip_when`, no expression language; `min_requests` floor |
-| Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | 0052 (memory only, charged) |
+| Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | built: memory only, charged to `max_buffer_bytes` (no `mem_*`, no disk spill); `buffer_request` holds a body of at most 64 KiB before the upstream request starts; response limits need `buffer_response`; a chunked response over its limit is reset, not a `502` (Pingora sends the head first) |
 | Compression | `compress` (gzip, brotli, zstd) | `encode` | built (gzip, 0009), 0053 (brotli; zstd only if boundable in pure Rust) |
 | Custom error pages | `errors` | `handle_errors` | 0054 |
 | Fixed response | none | `respond`, `error`, `abort` | 0054 (`respond`) |

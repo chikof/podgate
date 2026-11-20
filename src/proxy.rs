@@ -24,8 +24,10 @@
 //! app woken, so unauthenticated or rate-limited traffic costs the tenant nothing. A request
 //! refused by admission is never recorded as a failure. `response_filter` and
 //! `response_body_filter` run the failure capture first, then compression, then the chain's
-//! response hooks in reverse order. `logging` records the failure first, then the outcome, then
-//! tells the chain's middlewares the request is over (`Kind::finished`), and then releases the
+//! response hooks in reverse order; the chain's `response_head` hooks run before compression, so
+//! a middleware can replace an oversized response with an error. `request_body_filter` counts the
+//! body through the chain's `request_body` hooks. `logging` records the failure first, then the
+//! outcome, then tells the chain's middlewares the request is over (`Kind::finished`), and then releases the
 //! tenant slot, so the recorder sees the final status the client got. The backend slot is
 //! released when the upstream response ends, before the client has read it all.
 
@@ -477,6 +479,20 @@ impl ProxyHttp for Gateway {
     ) -> pingora::Result<()> {
         ctx.failures.upstream_response(upstream_response);
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
+        // Before compression: the chain judges the response as the upstream sent it.
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            let cx = middleware::ResponseCx {
+                request: session.req_header(),
+                response: upstream_response,
+                tenant: ctx.tenant_slot.as_ref().map(TenantSlot::tenant),
+            };
+            let head =
+                middleware::run_response_head(app.stages(), router.chain(), &cx, &mut ctx.chain);
+            if let Err(err) = head {
+                ctx.capacity_refusal = err.is_capacity_refusal();
+                return Err(respond::abort(session, &err).await);
+            }
+        }
         if let Some(slot) = &ctx.tenant_slot {
             ctx.compression =
                 compress::start(session.req_header(), upstream_response, slot.tenant());
@@ -601,12 +617,20 @@ impl ProxyHttp for Gateway {
 
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         _end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         ctx.failures.request_chunk(body.as_ref());
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            let read = u64::try_from(session.body_bytes_read()).unwrap_or(u64::MAX);
+            let counted =
+                middleware::run_request_body(app.stages(), router.chain(), read, &mut ctx.chain);
+            if let Err(err) = counted {
+                return Err(respond::abort(session, &err).await);
+            }
+        }
         Ok(())
     }
 }

@@ -677,6 +677,14 @@ pub fn with_middleware(mut app: Value, name: &str, kind: &str, config: Value) ->
     app
 }
 
+/// `app` with one `buffering` middleware, `config` holding its fields, in the app's
+/// `default_chain`.
+pub fn with_buffering(mut app: Value, config: Value) -> Value {
+    app["middlewares"] = json!([middleware("buffer", "buffering", config)]);
+    app["default_chain"] = json!(["buffer"]);
+    app
+}
+
 /// A snapshot with tenant `t1`, the given apps and no certificates.
 pub fn snapshot(version: u64, apps: &[Value]) -> Value {
     json!({

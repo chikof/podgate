@@ -52,6 +52,23 @@ pub enum AppError {
     /// The tenant's buffer budget cannot take a filter's memory: `503`, retry in a second.
     #[error("wasm filter memory is over the tenant's budget")]
     FilterOverBudget,
+    /// The request body is over a `buffering` middleware's `max_request_body_bytes`: `413`.
+    #[error("request body too large")]
+    PayloadTooLarge,
+    /// An `Expect: 100-continue` request declares a body over `max_request_body_bytes`: `417`,
+    /// before the client sends it.
+    #[error("request body too large")]
+    ExpectationFailed,
+    /// The client did not send the whole body a `buffering` middleware holds in time: `408`.
+    #[error("request body timed out")]
+    RequestTimeout,
+    /// The upstream response is over a `buffering` middleware's `max_response_body_bytes`: `502`.
+    #[error("upstream response too large")]
+    UpstreamResponseTooLarge,
+    /// The tenant's buffer budget cannot take the body a `buffering` middleware holds: `503`,
+    /// retry in a second.
+    #[error("buffering is over the tenant's budget")]
+    BufferingOverBudget,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -77,7 +94,12 @@ impl AppError {
             | Self::Saturated
             | Self::WakeTimeout
             | Self::FilterBusy
-            | Self::FilterOverBudget => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::FilterOverBudget
+            | Self::BufferingOverBudget => StatusCode::SERVICE_UNAVAILABLE,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
+            Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+            Self::UpstreamResponseTooLarge => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -86,9 +108,11 @@ impl AppError {
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<u32> {
         match self {
-            Self::Overloaded | Self::Saturated | Self::FilterBusy | Self::FilterOverBudget => {
-                Some(1)
-            }
+            Self::Overloaded
+            | Self::Saturated
+            | Self::FilterBusy
+            | Self::FilterOverBudget
+            | Self::BufferingOverBudget => Some(1),
             Self::WakeTimeout => Some(5),
             _ => None,
         }
@@ -104,7 +128,11 @@ impl AppError {
     pub fn is_capacity_refusal(&self) -> bool {
         matches!(
             self,
-            Self::Overloaded | Self::Saturated | Self::WakeTimeout | Self::FilterBusy
+            Self::Overloaded
+                | Self::Saturated
+                | Self::WakeTimeout
+                | Self::FilterBusy
+                | Self::BufferingOverBudget
         )
     }
 
