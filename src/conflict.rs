@@ -247,6 +247,7 @@ mod test {
             revisions: Vec::new(),
             allow_domain_fronting: false,
             record_bodies: false,
+            scale_to_zero: None,
         }
     }
 

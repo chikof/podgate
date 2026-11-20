@@ -38,7 +38,7 @@ use pingora::http::ResponseHeader;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
-use crate::budget::{self, Budgets, TenantSlot};
+use crate::budget::{Budgets, TenantSlot};
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::failures::{self, Failures};
@@ -49,6 +49,7 @@ use crate::route::{self, RouteError, Selected};
 use crate::skew;
 use crate::sni;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
+use crate::wake::{self, Wake};
 
 /// Routing attempts before a request gives up; see `Gateway::request_filter`.
 const MAX_ROUTE_ATTEMPTS: u8 = 3;
@@ -65,6 +66,9 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
         chain.push("sni_check");
     }
     chain.push("route");
+    if app.scale_to_zero().is_some() {
+        chain.push("wake_hold");
+    }
     chain.push("inflight_admit");
     chain.push("tenant_admit");
     chain.push("failure_capture");
@@ -94,6 +98,8 @@ pub struct Ctx {
     pub pool: pool::State,
     /// Failed-request capture, begun by `request_filter` for a routed request.
     pub failures: failures::Capture,
+    /// Wake and idle state for apps that scale to zero.
+    pub wake: wake::State,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -104,6 +110,7 @@ pub struct Gateway {
     upstream_timeout: Duration,
     budgets: Budgets,
     failures: Failures,
+    wake: Wake,
 }
 
 impl Gateway {
@@ -118,6 +125,7 @@ impl Gateway {
             upstream_timeout,
             budgets: Budgets::new(),
             failures: Failures::new(),
+            wake: Wake::default(),
         }
     }
 
@@ -132,6 +140,13 @@ impl Gateway {
     #[must_use]
     pub fn with_failures(mut self, failures: Failures) -> Self {
         self.failures = failures;
+        self
+    }
+
+    /// Holds requests for sleeping apps with `wake`, the bookkeeping the idle sweep also reads.
+    #[must_use]
+    pub fn with_wake(mut self, wake: Wake) -> Self {
+        self.wake = wake;
         self
     }
 }
@@ -149,6 +164,7 @@ impl ProxyHttp for Gateway {
             compression: None,
             pool: pool::State::default(),
             failures: failures::Capture::default(),
+            wake: wake::State::default(),
         }
     }
 
@@ -162,13 +178,30 @@ impl ProxyHttp for Gateway {
         loop {
             let selected = match route::resolve(&ctx.table, session.req_header()) {
                 Ok(selected) => selected,
+                Err(RouteError::NoUpstream) => {
+                    let held = self.wake.hold(
+                        &mut ctx.wake,
+                        &mut ctx.table,
+                        &self.table,
+                        &self.budgets,
+                        session.req_header(),
+                    );
+                    if let Err(err) = held.await {
+                        respond::write_error(session, &err).await?;
+                        return Ok(true);
+                    }
+                    continue;
+                }
                 Err(err) => {
                     respond::write_error(session, &AppError::from(err)).await?;
                     return Ok(true);
                 }
             };
             if let Some(guard) = self.inflight.admit(&ctx.table, &selected) {
-                match budget::admit(&self.budgets, &ctx.table, selected.app) {
+                match self
+                    .wake
+                    .admit(&mut ctx.wake, &self.budgets, &ctx.table, selected.app)
+                {
                     Ok(slot) => ctx.tenant_slot = slot,
                     Err(err) => {
                         respond::write_error(session, &err).await?;

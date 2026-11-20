@@ -73,6 +73,24 @@ pub struct App {
     /// Absent: record headers only.
     #[serde(default)]
     pub record_bodies: bool,
+    /// Let the app sleep with no upstreams and wake on its first request. Absent:
+    /// a request to an app with no upstream gets `503`.
+    #[serde(default)]
+    pub scale_to_zero: Option<ScaleToZero>,
+}
+
+/// Scale-to-zero policy of an app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleToZero {
+    /// Seconds without a request after which the app is reported idle (`app_idle`).
+    pub idle_secs: u64,
+    /// Seconds a request waits for the app to wake before it gets `503`.
+    #[serde(default = "default_wake_timeout_secs")]
+    pub wake_timeout_secs: u64,
+}
+
+fn default_wake_timeout_secs() -> u64 {
+    30
 }
 
 /// How an app gets certificates, plus optional client authentication.

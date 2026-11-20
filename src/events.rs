@@ -36,6 +36,17 @@ pub enum EventKind {
         /// The drained revision.
         revision: Box<str>,
     },
+    /// A request reached an app that is asleep: start it. Emitted once per wake
+    /// cycle, however many requests wait.
+    WakeRequested {
+        /// The app to wake.
+        app: Box<str>,
+    },
+    /// An app with `scale_to_zero` had no request for `idle_secs`. Emitted once per idle period.
+    AppIdle {
+        /// The idle app.
+        app: Box<str>,
+    },
 }
 
 /// One entry of the feed: a sequence number and what happened.

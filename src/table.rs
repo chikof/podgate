@@ -12,11 +12,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
-use crate::snapshot::{App, Budget, Revision, RevisionState, Snapshot};
+use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot};
 use crate::tls::{CertError, CertStore};
 
 /// A snapshot the compiler refuses.
@@ -160,6 +161,7 @@ pub struct CompiledApp {
     declared_by: Box<str>,
     allow_domain_fronting: bool,
     record_bodies: bool,
+    scale_to_zero: Option<ScaleToZero>,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
 }
@@ -181,6 +183,7 @@ impl CompiledApp {
             declared_by: app.declared_by.clone(),
             allow_domain_fronting: app.allow_domain_fronting,
             record_bodies: app.record_bodies,
+            scale_to_zero: app.scale_to_zero,
             revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
             next_revision: AtomicU64::new(0),
         }
@@ -196,6 +199,12 @@ impl CompiledApp {
     #[must_use]
     pub fn record_bodies(&self) -> bool {
         self.record_bodies
+    }
+
+    /// The app's scale-to-zero policy; `None` when it never sleeps.
+    #[must_use]
+    pub fn scale_to_zero(&self) -> Option<ScaleToZero> {
+        self.scale_to_zero
     }
 
     /// The app id.
@@ -407,6 +416,8 @@ pub struct TableHandle {
     live: Arc<ArcSwap<RoutingTable>>,
     // Serializes `apply`, so the version check and the swap are one step.
     apply_lock: Arc<Mutex<()>>,
+    // Holds the version of the newest table; every swap sends, so waiters see each one.
+    swapped: Arc<watch::Sender<u64>>,
 }
 
 impl TableHandle {
@@ -446,8 +457,20 @@ impl TableHandle {
             apps = table.apps.len(),
             "snapshot applied"
         );
+        let version = table.version;
         self.live.store(Arc::new(table));
+        self.swapped.send_replace(version);
         Ok(())
+    }
+
+    /// A signal that fires after every swap of the live table, carrying the new table's
+    /// version. Any code that replaces the table does it through this handle, so a waiter never
+    /// misses a swap: it subscribes first, then [`Self::load`]s, then awaits
+    /// [`watch::Receiver::changed`]. A swap that lands in between makes `changed` return at
+    /// once; the received value is not needed, reload the table instead.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.swapped.subscribe()
     }
 }
 
@@ -478,6 +501,7 @@ mod test {
             revisions,
             allow_domain_fronting: false,
             record_bodies: false,
+            scale_to_zero: None,
         }
     }
 

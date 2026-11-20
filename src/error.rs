@@ -35,6 +35,9 @@ pub enum AppError {
     /// The tenant is at its in-flight limit: `503`, and the client should retry in a second.
     #[error("tenant is over its in-flight limit")]
     Overloaded,
+    /// A sleeping app did not wake within its `wake_timeout_secs`: `503`, retry in a few seconds.
+    #[error("app did not wake in time")]
+    WakeTimeout,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -50,7 +53,9 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Unavailable(_) | Self::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unavailable(_) | Self::Overloaded | Self::WakeTimeout => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -58,7 +63,11 @@ impl AppError {
     /// Seconds for the `retry-after` header, when the client should retry later.
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<u32> {
-        matches!(self, Self::Overloaded).then_some(1)
+        match self {
+            Self::Overloaded => Some(1),
+            Self::WakeTimeout => Some(5),
+            _ => None,
+        }
     }
 
     /// The JSON body: `{"error": "<message>"}`, plus `conflicts` for a rejected snapshot.

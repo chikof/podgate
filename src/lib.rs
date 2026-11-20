@@ -14,6 +14,7 @@
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
 //!   report drained revisions into it.
 //! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
+//! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
@@ -39,6 +40,7 @@ pub mod snapshot;
 pub mod sni;
 pub mod table;
 pub mod tls;
+pub mod wake;
 
 use anyhow::Context;
 use pingora::proxy::http_proxy_service;
@@ -58,6 +60,7 @@ pub use inflight::{Inflight, InflightGuard};
 pub use proxy::{Ctx, Gateway};
 pub use snapshot::Snapshot;
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
+pub use wake::{Wake, WakeService};
 
 /// Builds the Pingora server from `config` and runs it until SIGTERM, SIGINT or SIGQUIT.
 ///
@@ -75,6 +78,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
     let budgets = Budgets::new();
+    let wake = Wake::new(events.clone());
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -92,7 +96,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         &server.configuration,
         Gateway::new(table.clone(), inflight.clone(), timeout)
             .with_budgets(budgets.clone())
-            .with_failures(failures.clone()),
+            .with_failures(failures.clone())
+            .with_wake(wake.clone()),
     );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {
@@ -101,6 +106,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         proxy.add_tls_with_settings(&tls_addr.to_string(), None, settings);
     }
     server.add_service(proxy);
+    server.add_service(background_service(
+        "scale to zero",
+        WakeService::new(wake, table.clone()),
+    ));
     server.add_service(background_service(
         "admin API",
         AdminService::new(
