@@ -109,7 +109,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | 0090 (stateless encrypted cookie sessions; no refresh tokens) |
 | Response caching | Hub only | `cache` plugin | 0091 (memory only, charged to the tenant's `max_buffer_bytes`, capped share, purge API) |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
-| Static files: `file_server`, `try_files`, precompressed | none | yes | 0085 (operator-declared per-tenant roots, no symlink escape) |
+| Static files: `file_server`, `try_files`, precompressed | none | yes | built: operator-declared per-tenant roots opened as `cap-std` handles (`STATIC_ROOTS_FILE`), no `..` or symlink escape, no hidden files, `index`, `try_files`, status pages, validators, ranges, `br`/`gzip` sidecars, file buffers charged to `max_buffer_bytes`; see `docs/ref/svc-static.md` |
 | Directory listings (`browse`) | none | `file_server browse` | 0101 (opt-in by operator root and service, escaped names, no hidden files) |
 | `php_fastcgi` and FastCGI | none | `php_fastcgi` | 0100 (operator-declared pools and code roots, `.php` only, httpoxy and path-info defences) |
 | Rule strings in the configuration | the native syntax | none | 0106 (`rule` on a router, parsed by the 0071 crate at compile; same tenant and catch-all rules) |
