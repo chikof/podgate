@@ -51,7 +51,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Least connections | `leasttime`, p2c | `least_conn` | built (full scan up to 8 servers, then two random candidates) |
 | Power of two choices | `strategy: p2c` | `random_choose` | built (0031 `p2c_ewma`: latency-aware peak-EWMA, which neither has) |
 | Random | none | `random` | built |
-| Hash policies | `strategy: hrw` | `ip_hash`, `uri_hash`, `header`, `query`, `cookie` | 0032 (`ip_hash`, `uri_hash`, `header_hash`, `hrw`; `query` and `cookie` declined, sticky is 0036) |
+| Hash policies | `strategy: hrw` | `ip_hash`, `uri_hash`, `header`, `query`, `cookie` | built: `ip_hash`, `uri_hash`, `header_hash`, `hrw` (consistent hashing on a keyed ketama ring, rendezvous for `hrw`, client address resolved by 0026, random fallback without a key); `query` and `cookie` declined, sticky cookies are 0036 |
 | Active health checks | `healthCheck` | `health_uri` and friends | built (`health_check` with thresholds, status ranges, body regex, per-server jitter and a global probe cap; HTTPS probes use the service's transport: private CA, SNI, client certificate) |
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | built (`passive` on `loadbalancer`; connect failures, timeouts, 5xx and slow responses eject a server for a growing time, capped by a percentage and never the last available server; see `docs/ref/svc-outlier.md`) |
 | Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | 0035 (connect errors; idempotent replay only; no retry on a response status) |
