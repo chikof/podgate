@@ -31,6 +31,8 @@ use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
+pub mod content_type;
+pub mod headers;
 pub mod wasm;
 
 /// What a request hook decided.
@@ -332,9 +334,9 @@ kinds! {
 
     "redirect_regex" => unbuilt,
 
-    "headers" => unbuilt,
+    "headers" => Headers(headers::Headers),
 
-    "content_type" => unbuilt,
+    "content_type" => ContentType(content_type::ContentType),
 
     "basic_auth" => unbuilt,
 

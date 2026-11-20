@@ -86,9 +86,9 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 |---|---|---|---|
 | Add and strip prefix, replace path (and regexp) | `addPrefix`, `stripPrefix*`, `replacePath*` | `uri`, `rewrite`, `handle_path` | 0043 |
 | Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | 0044 |
-| Custom headers, security headers | `headers` | `header`, `request_header` | 0045 |
-| CORS | in `headers` | plugin | 0045 |
-| Content type sniffing | `contentType` | none | 0045 (never sniffs; `auto_detect: true` refused) |
+| Custom headers, security headers | `headers` | `header`, `request_header` | built: `src/middleware/headers.rs`; framing headers cannot be set; HSTS only over TLS |
+| CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |
+| Content type sniffing | `contentType` | none | built: never sniffs; `auto_detect: true` refused |
 | Basic auth | `basicAuth` (MD5, SHA1, bcrypt) | `basic_auth` | 0046 (bcrypt and argon2 only; bounded, charged cost) |
 | Digest auth | `digestAuth` | none | 0047 |
 | Forward auth | `forwardAuth` | `forward_auth` | 0048 (fail closed) |

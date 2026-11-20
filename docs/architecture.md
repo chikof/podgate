@@ -17,7 +17,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/route.rs` | Core routing: `matching(table, request, entry_point, tls) -> Option<Matched>` and `select(table, matched, request) -> Selected` (revision, skew pin, server). Pure; no Pingora session. |
 | `src/router.rs`, `src/router/*.rs` | Routers: `CompiledRouter`, the host `Index`, the order `Key` (priority, host rank, specificity, names), tenant isolation of fallback routers, path normalization (`path.rs`), the matcher tree (`matcher.rs`, one file per leaf in `matcher/`). |
 | `src/compile.rs` | The compile passes (`build`) and what they refuse with: `Invalid` (a kind's code and message) and `Rejected` (placed in the snapshot, listed in the `422`). |
-| `src/middleware.rs`, `src/middleware/*.rs` | The per-route middleware chain: the `Kind` trait, the `kinds!` registry that generates `Stage` and its dispatch, `run_request` and the response hooks; one file per kind (`wasm.rs` today). |
+| `src/middleware.rs`, `src/middleware/*.rs` | The per-route middleware chain: the `Kind` trait, the `kinds!` registry that generates `Stage` and its dispatch, `run_request` and the response hooks; one file per kind (`wasm.rs`, `headers.rs`, `content_type.rs` today). |
 | `src/service.rs`, `src/service/*.rs` | Services: `loadbalancer` with `round_robin` (`lb/`), `ServerState`; empty modules for health, outlier ejection, sticky, transports and DNS. |
 | `src/entry.rs`, `src/pipeline.rs`, `src/l4.rs`, `src/observe.rs` | Entry points (`CompileContext`, `normalize_request`), the platform stage list for explain, and the L4 and observability models with their `*_not_built` rejections. |
 | `src/events.rs` | `EventFeed` (bounded ring of 4096, `emit`, long-poll `poll`, per-process `boot_id`), `Event`, `EventKind`. Features emit into it. |
@@ -57,6 +57,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/pool.rs` | Pool isolation through the real binary with an upstream that numbers its connections: per tenant, app and revision, and NTLM/Negotiate pinning. |
 | `tests/failures.rs` | Failed-request ring, redaction, opt-in bodies, replay and the method guard, with an upstream that returns 5xx on demand. |
 | `tests/wasm.rs` | Filters written in WAT through the real binary: headers edited, fuel exhaustion and memory limit end in `500` while other requests are served, forbidden imports are `422`, local responses. |
+| `tests/mw_headers.rs` | The `headers` and `content_type` middlewares through the real binary: request and response edits, security headers, HSTS over TLS only, CORS preflight and origin matching, the refused headers and values, and the posture a plan lists. |
 | `tests/plan.rs` | `POST /v1/snapshot/plan`: the host diff, posture changes, and that nothing is applied. |
 | `tests/revert.rs` | Auto-revert through the real binary: a `5xx` spike reverts and emits `config_reverted`; an unrelated app's outage does not. |
 | `tests/budget.rs` | Tenant budgets through the real binary, observed on `GET /metrics`: the buffer budget holds under concurrent compressible responses, `max_inflight` answers `503`. |
@@ -354,8 +355,8 @@ The effective chain of a router is the app's `default_chain`, then the router's 
 |`replace_path`, `replace_path_regex`|`path`, or `regex` and `replacement`|`replace_path.rs`, `replace_path_regex.rs`|request|
 |`redirect_scheme`|`scheme`, `port?`, `permanent?`|`redirect_scheme.rs`|request, answers|
 |`redirect_regex`|`regex`, `replacement`, `permanent?`|`redirect_regex.rs`|request, answers|
-|`headers`|request and response `custom` and `remove`, security headers (HSTS, CSP, frame options, nosniff, referrer policy, permissions policy), CORS|`headers.rs`|request, response|
-|`content_type`|`auto_detect: false` (never sniff)|`content_type.rs`|response|
+|`headers`|`request {set, remove}`, `response {set, remove, security {hsts, csp, csp_report_only, frame_options, content_type_nosniff, referrer_policy, permissions_policy, cross_origin_opener_policy, cross_origin_resource_policy}}`, `cors {allow_origins, allow_origin_regexes, allow_methods, allow_headers, expose_headers, allow_credentials, max_age_secs, add_vary}`; reference: `docs/ref/mw-headers.md`|`headers.rs`|request (edits the request, answers an allowed CORS preflight with `204`), response|
+|`content_type`|`auto_detect: false` (never sniff; `true` is `unsupported_setting`)|`content_type.rs`|none: Pingora never sniffs|
 |`basic_auth`|`users` (htpasswd entries, bcrypt or argon2 only), `realm?`, `header_field?`, `remove_header?`|`basic_auth.rs`|request, answers|
 |`digest_auth`|`users`, `realm?`|`digest_auth.rs`|request, answers|
 |`forward_auth`|`address` (URL of the auth service), `trust_forward_header?`, `request_headers?`, `response_headers?`, `timeout_secs`, `transport?`|`forward_auth.rs`|request, async, answers|
