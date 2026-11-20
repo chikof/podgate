@@ -120,7 +120,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 |---|---|---|---|
 | Certificates from the control plane | `tls.certificates` | `tls cert key` | built (`certificates`) |
 | ACME HTTP-01 | `httpChallenge` | default | built (HA, ARI, on-demand) |
-| ACME TLS-ALPN-01 | `tlsChallenge` | default | 0084 (needs the `acme-tls/1` ALPN on Pingora's listener; rejected with the finding if impossible) |
+| ACME TLS-ALPN-01 | `tlsChallenge` | default | built (opt-in per app; answered by the pre-TLS hook because Pingora's listener cannot carry `acme-tls/1`, see `docs/ref/acme-alpn01.md`) |
 | ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 and 0083 add control-plane solvers); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
