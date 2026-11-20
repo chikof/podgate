@@ -409,6 +409,10 @@ async fn existing_series_unchanged() {
         .await;
     assert_eq!(pushed.status, 200);
     assert_eq!(podgate.get("a.test", "/").await.status, 200);
+    assert!(
+        wait_for_value(&podgate, "podgate_tenant_inflight{tenant=\"t1\"}", 0.0).await,
+        "the slot is released after the response"
+    );
 
     let admin = scrape(&podgate).await;
     for line in [
@@ -449,8 +453,21 @@ async fn existing_series_unchanged() {
         "the existing series come first: {admin}"
     );
 
-    let tcp = raw(addr, &request("GET", "/metrics")).await.expect("reply");
-    assert_eq!(tcp.body, admin, "both endpoints render the same text");
+    // A counter can move between the two scrapes, so retry the pair until it agrees.
+    let mut last = (String::new(), String::new());
+    for _ in 0..500 {
+        let admin = scrape(&podgate).await;
+        let tcp = raw(addr, &request("GET", "/metrics"))
+            .await
+            .expect("reply")
+            .body;
+        if admin == tcp {
+            return;
+        }
+        last = (admin, tcp);
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(last.1, last.0, "both endpoints render the same text");
 }
 
 // In process from here: a table with a registry whose cap and retention the test sets.
