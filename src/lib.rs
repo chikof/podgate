@@ -7,6 +7,7 @@
 //! - [`Config`]: settings read from environment variables.
 //! - [`Snapshot`]: the JSON model of a pushed snapshot.
 //! - [`wasm`]: WASM request filters (proxy-wasm subset) with fuel and memory limits.
+//! - [`acme`]: HA ACME issuance with ARI renewal, HTTP-01 answers and on-demand TLS.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
 //! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
@@ -24,6 +25,7 @@
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
+pub mod acme;
 pub mod admin;
 pub mod budget;
 pub mod canary;
@@ -51,6 +53,8 @@ pub mod tls;
 pub mod wake;
 pub mod wasm;
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use pingora::proxy::http_proxy_service;
 use pingora::server::configuration::{Opt, ServerConf};
@@ -58,6 +62,7 @@ use pingora::server::{RunArgs, Server};
 use pingora::services::background::background_service;
 use tracing_subscriber::EnvFilter;
 
+pub use acme::Acme;
 pub use admin::{AdminService, AppState};
 pub use budget::Budgets;
 pub use canary::CanaryService;
@@ -91,6 +96,12 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let budgets = Budgets::new();
     let wake = Wake::new(events.clone());
     let outcomes = Outcomes::new();
+    let acme = Acme::new(
+        table.clone(),
+        events.clone(),
+        config.node_name.clone(),
+        config.acme_ca_file.clone(),
+    );
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -121,8 +132,12 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         let settings = tls::listener_settings(table.clone())
             .map_err(|err| anyhow::anyhow!("cannot configure the TLS listener: {err}"))?;
         proxy.add_tls_with_settings(&tls_addr.to_string(), None, settings);
+        proxy
+            .endpoints()
+            .set_pre_tls_callback(Arc::new(acme.clone()));
     }
     server.add_service(proxy);
+    server.add_service(background_service("acme issuer", acme));
     server.add_service(background_service(
         "scale to zero",
         WakeService::new(wake, table.clone()),

@@ -19,25 +19,27 @@ crc32fast = "1.5.5"
 getrandom = "0.4.3"
 hmac = "0.13.0"
 http = "1.5.0"
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "time", "x509-parser", "rcgen"] }
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["net", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 wasmtime = { version = "50.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
+x509-parser = { version = "0.18.1", default-features = false }
 
 [dev-dependencies]
 # tests/common: raw HTTP/1.1 over TCP and unix sockets, plus a tiny upstream server.
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 h2 = "0.4.20"
 wat = "1.263.0"
 

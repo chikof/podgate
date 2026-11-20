@@ -23,6 +23,8 @@ allow = [
   "Zlib",
   "CC0-1.0",
   "MPL-2.0",
+  # webpki-root-certs (wasm32 branch of rustls-platform-verifier via instant-acme): Mozilla root data.
+  "CDLA-Permissive-2.0",
 ]
 
 # Workspace crates set `publish = false`, so they are not license-checked.

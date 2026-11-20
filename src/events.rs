@@ -20,6 +20,8 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::watch;
 
+use crate::acme::PrivateKeyPem;
+
 /// How many events the ring keeps.
 pub const RING_CAPACITY: usize = 4096;
 
@@ -75,6 +77,31 @@ pub enum EventKind {
         revision: Box<str>,
         /// Its `5xx` per thousand requests over the judged window.
         error_permille: u64,
+    },
+    /// The issuer node needs this HTTP-01 answer served: push it back in the snapshot's
+    /// `acme.challenges`.
+    AcmeChallenge {
+        /// The challenge token.
+        token: Box<str>,
+        /// The key authorization the token must answer with.
+        key_authorization: Box<str>,
+    },
+    /// The issuer node obtained a certificate: store it and push it back in the snapshot's
+    /// `certificates`.
+    CertificateIssued {
+        /// The names the certificate is valid for.
+        hosts: Box<[Box<str>]>,
+        /// The certificate chain, leaf first, PEM.
+        cert_pem: Box<str>,
+        /// The private key, PKCS#8 PEM.
+        key_pem: PrivateKeyPem,
+    },
+    /// A TLS handshake named an `on_demand` host without a certificate. Emitted once per host per
+    /// pending period, by any node. Approve it by listing the host in `acme.requested_hosts`
+    ///; the issuer orders nothing on demand until then.
+    CertificateRequested {
+        /// The host named by the handshake's SNI.
+        host: Box<str>,
     },
 }
 

@@ -129,6 +129,8 @@ fn rejection(err: &CompileError) -> Vec<Value> {
         CompileError::Canary(rejections) => {
             rejections.iter().map(canary::Rejection::to_json).collect()
         }
+
+        CompileError::Acme(_) => other("invalid_acme"),
     }
 }
 

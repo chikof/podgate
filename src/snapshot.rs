@@ -32,6 +32,10 @@ pub struct Snapshot {
     /// restores the previous snapshot. Absent: 60. `0`: never revert. Capped at 300.
     #[serde(default)]
     pub revert_window_secs: Option<u64>,
+    /// ACME issuance settings. Absent: no certificate is ordered; only
+    /// `certificates` are served.
+    #[serde(default)]
+    pub acme: Option<Acme>,
 }
 
 /// One tenant of the PaaS.
@@ -209,6 +213,71 @@ impl fmt::Debug for Certificate {
             .field("hosts", &self.hosts)
             .field("cert_pem", &format_args!("{} bytes", self.cert_pem.len()))
             .field("key_pem", &"[redacted]")
+            .finish()
+    }
+}
+
+/// How certificates are issued and which node issues them. `crate::acme` reads
+/// every field.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acme {
+    /// `NODE_NAME` of the one node that orders certificates. Every other node ignores the
+    /// ordering fields and only serves `challenges`.
+    pub issuer_node: Box<str>,
+    /// The ACME directory URL, `https://...`.
+    pub directory_url: String,
+    /// Contact URIs of the account, such as `mailto:ops@example.com`. Used when podgate creates
+    /// the account itself; ignored with `account_key_pem`.
+    #[serde(default)]
+    pub contact: Vec<String>,
+    /// External account binding for CAs that require one. Excludes `account_key_pem`.
+    #[serde(default)]
+    pub eab: Option<ExternalAccount>,
+    /// PKCS#8 PEM key of the ACME account, so every restart and every issuer node uses the same
+    /// account. Absent: the issuer creates a fresh account in memory.
+    #[serde(default)]
+    pub account_key_pem: Option<String>,
+    /// HTTP-01 answers the control plane pushes back after an `acme_challenge` event. Every
+    /// node serves them on the plain HTTP listener.
+    #[serde(default)]
+    pub challenges: Vec<Challenge>,
+    /// Hosts the control plane asks the issuer to get certificates for: the hosts of
+    /// `certificate_requested` events it approved. Only hosts of `on_demand` apps count.
+    #[serde(default)]
+    pub requested_hosts: Vec<Box<str>>,
+}
+
+/// External account binding credentials, as a CA hands them out.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalAccount {
+    /// The key identifier.
+    pub key_id: String,
+    /// The HMAC key, base64url.
+    pub hmac_key: String,
+}
+
+/// One HTTP-01 answer: `GET /.well-known/acme-challenge/<token>` returns `key_authorization`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Challenge {
+    /// The challenge token.
+    pub token: Box<str>,
+    /// The key authorization to answer with.
+    pub key_authorization: Box<str>,
+}
+
+impl fmt::Debug for Acme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Acme")
+            .field("issuer_node", &self.issuer_node)
+            .field("directory_url", &self.directory_url)
+            .field("contact", &self.contact)
+            .field("eab", &self.eab.as_ref().map(|_| "[redacted]"))
+            .field(
+                "account_key_pem",
+                &self.account_key_pem.as_ref().map(|_| "[redacted]"),
+            )
+            .field("challenges", &self.challenges)
+            .field("requested_hosts", &self.requested_hosts)
             .finish()
     }
 }

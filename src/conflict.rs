@@ -269,6 +269,7 @@ mod test {
             certificates: Vec::new(),
             skew_secret: None,
             revert_window_secs: None,
+            acme: None,
         };
         match RoutingTable::compile(&snapshot) {
             Ok(_) => Vec::new(),

@@ -30,6 +30,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/compress.rs` | Gzip response compression on `miniz_oxide` (pure Rust) with its memory charged up front: `start`, `filter`, `RESERVATION_BYTES`. |
 | `src/tls.rs` | `CertStore` (certificates of a snapshot) and the TLS listener settings that choose the certificate by SNI per handshake. |
 | `src/sni.rs` | The TLS check that a request's `Host` and `:authority` equal the connection's SNI: `CaptureServerName` (handshake hook that records the SNI on the connection) and `check`, called first in `request_filter`. |
+| `src/acme.rs`, `src/acme/*.rs` | HA ACME and on-demand TLS. `acme.rs`: `Acme` (the node's handle: a background service for the issuer loop and Pingora's pre-TLS hook) and `PrivateKeyPem`. `plan.rs`: `Plan`, the ACME view compiled with each snapshot (HTTP-01 answers, hosts lacking a certificate, certificates' validity). `issuer.rs`: the loop that orders and renews. `handshake.rs`: reads the ClientHello and waits for an on-demand certificate. `http01.rs`: `serve_challenge`, called first in `request_filter`. |
 | `src/pool.rs` | Upstream connection pool isolation: `isolate` sets the peer's `group_key` from `(tenant, app, revision)` (Pingora adds the upstream address), and pins connections that carried `Authorization: NTLM` or `Negotiate` to their downstream connection (`State`, carried across keepalive requests by `persist`/`restore`). Called from `upstream_peer`. |
 | `src/skew.rs` | Skew protection: `SkewSecret`, the signed `__podgate_rev` cookie, `pinned` (called by `route::resolve`) and `set_cookie` (called by `response_filter`). |
 | `src/wake.rs` | Scale to zero: `Wake` holds requests for an app with no upstream (`hold`, woken by `TableHandle::subscribe`), emits `wake_requested` once per wake cycle, hands the held tenant slot on in `admit`, and `sweep` emits `app_idle`; `WakeService` runs the sweep as a background service; `State` is the per-request field of `Ctx`. |
@@ -52,6 +53,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/plan.rs` | `POST /v1/snapshot/plan`: the host diff, posture changes, and that nothing is applied. |
 | `tests/revert.rs` | Auto-revert through the real binary: a `5xx` spike reverts and emits `config_reverted`; an unrelated app's outage does not. |
 | `tests/wasm_budget.rs` | Filter memory charged to the tenant (`503` over budget, peak and refusal metrics) and the bounded filter pool (queued filter runs refused, snapshot pushes and other tenants unaffected). |
+| `tests/acme.rs` | End-to-end against `pebble` (with `pebble-challtestsrv` as its DNS, so HTTP-01 is validated for real): the test plays the control plane. A missing `pebble` fails the tests. |
 | `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
 
 ### Adding a feature
@@ -104,6 +106,8 @@ The control plane sends `PUT /v1/snapshot` with a JSON snapshot. Entities:
 
 `App` also takes an optional `canary` (`revision`, `step_percent`, `interval_secs`, `max_error_permille`); see `### Canary`.
 
+`Snapshot` also takes an optional `acme` object (issuer node, directory URL, HTTP-01 answers, ...); see `## ACME and on-demand TLS`. Absent, podgate orders nothing and serves only `certificates`.
+
 ### Compile and swap
 
 The snapshot is compiled into an immutable routing table and swapped atomically. Requests in flight keep the table they started with. A rejected snapshot leaves the current one live.
@@ -130,6 +134,8 @@ The snapshot is compiled into an immutable routing table and swapped atomically.
 
 `config_reverted` carries `from_version` (the snapshot that was reverted; the live version stays at this number) and `to_version` (the version of the snapshot serving again). `config_revert_failed` carries `from_version`, `to_version` and `error`: a `5xx` spike called for a revert but the previous snapshot no longer compiles (a certificate that expired meanwhile, say); the current table stays live and the change is no longer watched.
 
+Change 0014 adds the payloads of `acme_challenge`, `certificate_issued` and a new `certificate_requested`; see `## ACME and on-demand TLS`.
+
 ### Error shape
 
 Admin API errors are `{"error": "<message>"}`, the same shape `AppError` renders today. A snapshot rejected by the compiler returns `422` with `{"error": "snapshot rejected", "conflicts": [...]}`.
@@ -139,6 +145,8 @@ Every entry of `conflicts` is an object with a stable `code` and a human `messag
 WASM filter failures use the codes `wasm_invalid` and `wasm_forbidden_import`; see `### WASM filters`.
 
 Canary policy failures use the codes `canary_revision_missing`, `canary_revision_not_serving`, `canary_step_invalid`, `canary_interval_invalid`, `canary_threshold_invalid` and `canary_no_baseline`; see `### Canary`.
+
+A bad `acme` object or an unreadable certificate validity is code `invalid_acme`.
 
 ### Snapshot conflicts
 
@@ -185,7 +193,7 @@ Only map type `0` (request headers) exists. The pseudo headers `:method`, `:path
 
 ### Not built yet
 
-Change 0001 built the planes (without ACME and the event feed); change 0004 built the feed with `revision_drained`, the other event kinds arrive with their specs, the snapshot model, compile and swap, revision states for new requests, and the error shape; `Snapshot.certificates` is an addition that lets HTTPS work before ACME. The rest of this section is the target; each part is described below.
+Change 0001 built the planes (without ACME and the event feed); change 0004 built the feed with `revision_drained`, the other event kinds arrive with their specs, the snapshot model, compile and swap, revision states for new requests, and the error shape; change 0014 built ACME issuance, renewal and on-demand TLS on top of `Snapshot.certificates` (`## ACME and on-demand TLS`). The rest of this section is the target; each part is described below.
 
 ## Run
 
@@ -210,6 +218,8 @@ All settings are environment variables, read once at startup by `Config::from_en
 | `ADMIN_SOCKET` | `/run/podgate/admin.sock` | Unix socket of the admin API. Created with mode `0600`; its directory is created if missing; a stale socket file is replaced. |
 | `REQUEST_TIMEOUT_SECS` | `30` | Whole seconds in 1..=3600. Admin requests longer than this get `408`. Connecting to, reading from and writing to an upstream each give up after it. It is also the shutdown grace period. |
 | `LOG_FORMAT` | `pretty` | `pretty` or `json`. Use `json` in production. |
+| `NODE_NAME` | unset | Name of this node. The node whose name equals the snapshot's `acme.issuer_node` orders certificates; unset never does. |
+| `ACME_CA_FILE` | unset | PEM file with the root certificate to trust for the ACME server, for a private or test CA. Unset: the platform's roots. Operator-provided, never read from a snapshot. |
 | `RUST_LOG` | `info` | Log filter, `tracing-subscriber` env-filter syntax (`info,podgate=debug`). Pingora's own `log` records are filtered by the same variable. |
 | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs that may execute at once across all tenants, 1..=256. Filters run through `spawn_blocking`, and this bounds how many threads of tokio's 512-thread blocking pool (which snapshot compiles also use) they can hold. |
 | `WASM_QUEUE_TIMEOUT_MS` | `1000` | Milliseconds a filter run waits for a free worker, 1..=60000. After that the request gets `503` with `retry-after: 1`. |
@@ -227,6 +237,7 @@ Proxy listeners (`PROXY_ADDR`, `PROXY_TLS_ADDR`): a request is routed by its `Ho
 | `503 {"error":"no upstream available"}` | the app has no `serving` revision with a positive weight and a backend |
 | `421 {"error":"misdirected request"}` | a TLS request names a host other than its SNI and the app it names does not set `allow_domain_fronting` |
 | `503 {"error":"tenant is over its in-flight limit"}` with `retry-after: 1` | the app's tenant already has `max_inflight` requests in flight |
+| `200` with the key authorization | a plain HTTP `GET /.well-known/acme-challenge/<token>` for a token in the snapshot's `acme.challenges`; any host, answered before routing |
 | Pingora's `502`/`504` | the upstream refuses, resets or times out |
 
 Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects):
@@ -246,6 +257,44 @@ Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects)
 | anything else | `404 {"error":"not found"}`. |
 
 Errors: handlers return `Result<_, AppError>`. `AppError` renders `{"error": "<message>"}` with the matching status. `Internal` logs the cause and sends only `internal error`. No `unwrap()` outside tests.
+
+## ACME and on-demand TLS
+
+podgate keeps no state on disk and never calls the control plane, so certificates travel through the snapshot and the event feed. The control plane is the shared store; the TLS listener reads certificates only from `Snapshot.certificates`. HTTP-01 only: DNS-01 would put DNS-provider credentials in the proxy, and a wildcard host of an `acme` app therefore gets no certificate (supply one in `certificates`).
+
+**Snapshot field `acme`** (optional; absent means no ordering):
+
+|Field|Meaning|
+|---|---|
+|`issuer_node`|`NODE_NAME` of the one node that orders. Every node serves answers; only this one talks to the CA.|
+|`directory_url`|ACME directory, `https://...`.|
+|`contact`|Contact URIs of the account (`mailto:...`). Used when podgate creates the account.|
+|`account_key_pem`|PKCS#8 PEM of the account key, so restarts and issuer changes keep one account. Absent: a fresh in-memory account per issuer start (mind the CA's account rate limit). Excludes `eab`.|
+|`eab`|`{key_id, hmac_key}` external account binding (base64url key) for CAs that require one. Excludes `account_key_pem`: a CA binds only at account creation.|
+|`challenges`|`[{token, key_authorization}]` the control plane pushes back after `acme_challenge` events. Every node serves them.|
+|`requested_hosts`|Exact hosts of `on_demand` apps the control plane approves for ordering (see below).|
+
+**Issuing.** For each `acme` app, the exact hosts that no certificate in the snapshot answers for are ordered together (one certificate). The issuer opens the order and emits `acme_challenge {token, key_authorization}` once per pending authorization. The control plane pushes a snapshot whose `acme.challenges` holds them. The issuer waits (up to 5 minutes) until its own table serves every token, tells the CA, finalizes and emits `certificate_issued {hosts, cert_pem, key_pem}`. The control plane stores `{hosts, cert_pem, key_pem}` under `certificates` and pushes it; a certificate for the same hosts replaces the old one. `key_pem` is a private key: the feed is reachable only through the `0600` admin socket, and `PrivateKeyPem` hides it from `Debug`.
+
+Push the challenge snapshot to every node, the issuer last: the issuer starts validation when its own table has the token, and the CA may reach any node. Until the control plane stores the certificate, the issuer does not repeat the job for 10 minutes. A failed order backs off from 1 minute, doubling to 1 hour, per job. At most 8 orders run at once.
+
+**HTTP-01.** `GET /.well-known/acme-challenge/<token>` on the plain HTTP listener returns the key authorization (`200`, `application/octet-stream`) when the live table holds the token. It runs first in `request_filter` and needs no route for the host. A token the table does not hold, a non-`GET` and a TLS connection are routed like any request, so an app keeps its own `/.well-known` paths.
+
+**Renewal and ARI.** For every served certificate whose hosts are all exact and still claimed by an app, the issuer asks the CA for its renewal window (RFC 9773 `renewalInfo`, identified by authority key identifier and serial). It picks one random time inside the window, never later than a tenth of the lifetime before expiry, and renews then with the new order's `replaces` set. It asks again after the CA's `Retry-After` (between 1 minute and 24 hours); a changed window gets a new pick. A window that is already in the past renews at once, which is how a revoked certificate is replaced. The CA without ARI, a certificate without an authority key identifier, and an ARI error all fall back to two thirds of the lifetime. A certificate whose ARI answer is still pending is never renewed on the fallback.
+
+**On-demand.** A host that routes to an `on_demand` app and has no certificate gets one at its first TLS handshake, once the control plane approves it. The handshake emits `certificate_requested {host}` (every node does, the issuer too; once per host per pending period, not per handshake) and waits up to 30 seconds for the certificate to appear in the live table, then fails like any handshake without a certificate. The control plane approves by listing the host in `acme.requested_hosts` of the snapshot it pushes to the issuer; that list is the only thing that makes the issuer order an on-demand host, so a client sending random SNIs cannot spend the CA's rate limits. A host that routes to no app, to an `acme` app, or lies two labels under a wildcard never waits and never gets a certificate. The control plane is the gate on every path: it decides which `acme_challenge` events it answers. At most 256 handshakes wait at once and at most 256 hosts are pending.
+
+Why before the handshake: Pingora's rustls backend has no async certificate callback (`certificate_callback` is OpenSSL only) and rustls' `ResolvesServerCert` is synchronous. `Acme` is Pingora's pre-TLS hook: when an `on_demand` app exists it reads the ClientHello (rustls' `Acceptor` parses it), looks at the SNI, waits if needed, and rewinds the bytes into the handshake. Without an `on_demand` app the hook reads nothing.
+
+**Events** (all in `GET /v1/events`):
+
+|Kind|Fields|Emitted by|
+|---|---|---|
+|`acme_challenge`|`token`, `key_authorization`|the issuer, per pending authorization|
+|`certificate_issued`|`hosts`, `cert_pem` (chain, leaf first), `key_pem` (PKCS#8)|the issuer|
+|`certificate_requested`|`host`|any node, on an on-demand handshake; once per host per pending period (until its certificate arrives, at most 10 minutes), not per handshake|
+
+Tests: `tests/acme.rs` against `pebble` with `pebble-challtestsrv` as its DNS (every name resolves to 127.0.0.1) and the issuer's HTTP port as its HTTP-01 port.
 
 ## Requests in flight and the table
 

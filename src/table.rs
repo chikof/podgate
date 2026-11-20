@@ -17,6 +17,8 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::canary::{self, Runtime};
+
+use crate::acme::{Plan, PlanError};
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
@@ -64,6 +66,10 @@ pub enum CompileError {
     /// A canary policy is unsound. Every rejected policy is listed.
     #[error("{}", canary::join(.0))]
     Canary(Vec<canary::Rejection>),
+
+    /// The ACME settings or a certificate's validity cannot be used.
+    #[error(transparent)]
+    Acme(#[from] PlanError),
 }
 
 /// Why a snapshot was not applied.
@@ -495,6 +501,7 @@ pub struct RoutingTable {
     apps: Box<[CompiledApp]>,
     hosts: HostMap<usize>,
     certificates: CertStore,
+    acme: Plan,
     budgets: HashMap<Box<str>, Budget>,
     skew_secret: Option<SkewSecret>,
 }
@@ -567,6 +574,7 @@ impl RoutingTable {
                 .collect(),
             hosts,
             certificates: CertStore::build(&snapshot.certificates)?,
+            acme: Plan::compile(snapshot)?,
             budgets: snapshot
                 .tenants
                 .iter()
@@ -631,6 +639,12 @@ impl RoutingTable {
     #[must_use]
     pub fn skew_secret(&self) -> Option<&SkewSecret> {
         self.skew_secret.as_ref()
+    }
+
+    /// The ACME view of the snapshot: HTTP-01 answers, missing and due certificates.
+    #[must_use]
+    pub fn acme(&self) -> &Plan {
+        &self.acme
     }
 }
 
@@ -810,6 +824,7 @@ mod test {
             certificates: Vec::new(),
             skew_secret: None,
             revert_window_secs: None,
+            acme: None,
         }
     }
 

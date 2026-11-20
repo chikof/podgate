@@ -38,6 +38,7 @@ use pingora::http::ResponseHeader;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
+use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
@@ -65,6 +66,9 @@ const MAX_ROUTE_ATTEMPTS: u8 = 3;
 #[must_use]
 pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     let mut chain = Vec::new();
+    if !tls {
+        chain.push("acme_http01");
+    }
     if tls && !app.allow_domain_fronting() {
         chain.push("sni_check");
     }
@@ -198,6 +202,10 @@ impl ProxyHttp for Gateway {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Ctx) -> pingora::Result<bool> {
+        // Before routing: a validation request names a host that may have no route yet.
+        if acme::serve_challenge(session, &ctx.table).await? {
+            return Ok(true);
+        }
         // Before routing: a misdirected request learns nothing about the route it named.
         if let Err(err) = sni::check(session, &ctx.table) {
             respond::write_error(session, &err).await?;

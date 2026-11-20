@@ -51,6 +51,8 @@ const _: () =
 /// | `ADMIN_SOCKET` | `/run/podgate/admin.sock` | Unix socket of the admin API. |
 /// | `REQUEST_TIMEOUT_SECS` | `30` | Admin request and upstream I/O limit, 1..=3600. |
 /// | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
+/// | `NODE_NAME` | unset | Name of this node; the node whose name equals the snapshot's `acme.issuer_node` orders certificates. |
+/// | `ACME_CA_FILE` | unset | PEM file with the root certificate to trust for the ACME server instead of the platform's roots (private or test CAs). |
 /// | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
@@ -73,6 +75,10 @@ pub struct Config {
     /// A filter run waits at most this many milliseconds for a free worker; then the request
     /// answers `503` with `retry-after`.
     pub wasm_queue_timeout_ms: NonZeroU16,
+    /// Name of this node, compared with the snapshot's `acme.issuer_node`. Absent: never issues.
+    pub node_name: Option<Box<str>>,
+    /// PEM file with the root certificate trusted for the ACME server. Absent: platform roots.
+    pub acme_ca_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -88,6 +94,8 @@ impl Default for Config {
                 .and_then(|cores| NonZeroUsize::new(cores.get().min(WASM_WORKERS_MAX)))
                 .unwrap_or(NonZeroUsize::MIN),
             wasm_queue_timeout_ms: NonZeroU16::MIN.saturating_add(999),
+            node_name: None,
+            acme_ca_file: None,
         }
     }
 }
@@ -200,6 +208,16 @@ impl Config {
             }
             config.wasm_queue_timeout_ms = millis;
         }
+        let non_empty = |var: &'static str| match lookup(var) {
+            Some(raw) if raw.trim().is_empty() => Err(ConfigError {
+                var,
+                reason: "is empty".into(),
+            }),
+            Some(raw) => Ok(Some(raw.trim().to_owned())),
+            None => Ok(None),
+        };
+        config.node_name = non_empty("NODE_NAME")?.map(String::into_boxed_str);
+        config.acme_ca_file = non_empty("ACME_CA_FILE")?.map(PathBuf::from);
         Ok(config)
     }
 }
@@ -231,6 +249,8 @@ mod test {
             ("LOG_FORMAT", "JSON"),
             ("WASM_MAX_CONCURRENT", "2"),
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
+            ("NODE_NAME", "n1"),
+            ("ACME_CA_FILE", "/etc/acme-root.pem"),
         ]);
         assert_eq!(
             parsed,
@@ -242,6 +262,8 @@ mod test {
                 log_format: LogFormat::Json,
                 wasm_max_concurrent: NonZeroUsize::new(2).expect("2 is not zero"),
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
+                node_name: Some("n1".into()),
+                acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
             })
         );
     }
@@ -260,6 +282,8 @@ mod test {
             ("WASM_MAX_CONCURRENT", "many"),
             ("WASM_QUEUE_TIMEOUT_MS", "0"),
             ("WASM_QUEUE_TIMEOUT_MS", "60001"),
+            ("NODE_NAME", " "),
+            ("ACME_CA_FILE", ""),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);
