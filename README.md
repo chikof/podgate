@@ -4,7 +4,7 @@ podgate is the ingress proxy for our PaaS. It is written in Rust on Cloudflare's
 
 ## Why not Traefik or Caddy
 
-Each row is a failure class that Traefik or Caddy leave open and that podgate closes by design. Every row is a task spec in [`the project history`](the project history); none is built yet.
+Each row is a failure class that Traefik or Caddy leave open and that podgate closes by design.
 
 |Idea|What it prevents or enables|
 |---|---|

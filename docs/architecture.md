@@ -19,12 +19,10 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), lock-free atomics on the request path (one registry swap per `sync`), `InflightGuard`, and the `revision_drained` event. |
 | `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`), the per-request `Ctx`, and `middleware_chain`: the ordered request-path stages, which `GET /v1/explain` reports. A new stage adds one line there. |
 | `src/explain.rs` | `Target::parse` (the `url` and `method` of an explain query) and `explain(table, target)`: why a request goes where it goes, read from the live `RoutingTable` (`lookup`, `nearest_wildcard`, `effective_weight`). |
-| `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), `InflightGuard`, and the `revision_drained` event. |
 | `src/outcomes.rs` | `Outcomes`: response outcomes (total, `5xx`) per (app id, revision id) over a sliding window, recorded in `Gateway::logging` by `record_request`. Read by auto-revert; the canary reads per revision. |
 | `src/plan.rs` | `diff(live, candidate) -> Plan` (added, removed, changed hosts, posture changes) and `changed_apps`: the diff of two compiled tables. |
 | `src/revert.rs` | `Reverter`: after every snapshot push, watches the `5xx` ratio of the apps it changed and restores the previous table on a spike. |
 | `src/canary.rs` | SLO-driven canary: `Canary` policy validation (`canary_*` codes), the live share and verdict kept in a `Registry` outside the table (`Fingerprint`-keyed, settled on every swap), `judge` (ramp, hold, regress and the `canary_regressed` event) and `CanaryService`, the background ticker. `CompiledApp::reweigh` in `table.rs` is the one place effective weights are defined. |
-| `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`) and the per-request `Ctx`. |
 | `src/respond.rs` | `write_error`: answers a proxied request with an `AppError`. |
 | `src/budget.rs` | `Budgets` (per-tenant registry that survives snapshot swaps), `TenantBudget`, the `TenantSlot` and `BufferGuard` RAII charges, `admit`, and the Prometheus rendering. |
 | `src/fairq.rs` | Backend admission: `Backends` (limiters per upstream address), `Limiter` (adaptive gradient limit plus weighted fair queues), `Permit` and the per-request `Slot`; see `## Backend admission`. |
@@ -37,8 +35,9 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/wake.rs` | Scale to zero: `Wake` holds requests for an app with no upstream (`hold`, woken by `TableHandle::subscribe`), emits `wake_requested` once per wake cycle, hands the held tenant slot on in `admit`, and `sweep` emits `app_idle`; `WakeService` runs the sweep as a background service; `State` is the per-request field of `Ctx`. |
 | `src/wasm.rs` | WASM request filters: compile and validate the `App.filters` modules at snapshot compile, `run_filters` runs them per request with fuel and a memory limit, the proxy-wasm host functions. |
 | `src/wasm/executor.rs` | `Executor`: the bounded filter pool (`WASM_MAX_CONCURRENT` permits, `WASM_QUEUE_TIMEOUT_MS` wait) and the per-run memory charge; `Gateway::with_wasm`. |
+| `src/wasm/wasi.rs` | The `wasi_snapshot_preview1` stubs a filter may import (clock, entropy, `proc_exit`, empty environment and arguments, `fd_write` to the log). |
 | `src/admin.rs` | The admin router (`router`), `AppState`, the unix socket (`bind`, mode `0600`) and `AdminService`, a Pingora background service. |
-| `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `metrics.rs`, `snapshot.rs`, `events.rs`, `explain.rs`, `failures.rs`. |
+| `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `metrics.rs`, `snapshot.rs`, `plan.rs`, `events.rs`, `explain.rs`, `failures.rs`. |
 | `src/failures.rs` | `Failures`: per-app rings of failed requests (header redaction, opt-in bodies via `Capture`), and `replay`. `Gateway::with_failures` and `AppState::with_failures` share one recorder; hooks in `request_filter`, `request_body_filter`, `response_filter`, `response_body_filter` and `logging`; see `### Failed requests` for the order against compression. |
 | `tests/common/mod.rs` | Test harness: `Podgate::start()` spawns the built binary on free ports with a temp admin socket; `push_snapshot`, `get`, `https_get`; `Upstream::start(body)`; `TestCert`; snapshot builders. Include with `mod common;`. |
 | `tests/proxy.rs` | End-to-end tests through the real binary. New features add their own `tests/<feature>.rs`. |
@@ -53,8 +52,14 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/wasm.rs` | Filters written in WAT through the real binary: headers edited, fuel exhaustion and memory limit end in `500` while other requests are served, forbidden imports are `422`, local responses. |
 | `tests/plan.rs` | `POST /v1/snapshot/plan`: the host diff, posture changes, and that nothing is applied. |
 | `tests/revert.rs` | Auto-revert through the real binary: a `5xx` spike reverts and emits `config_reverted`; an unrelated app's outage does not. |
+| `tests/budget.rs` | Tenant budgets through the real binary, observed on `GET /metrics`: the buffer budget holds under concurrent compressible responses, `max_inflight` answers `503`. |
+| `tests/events.rs` | Event feed and drain handshake through the real binary: `revision_drained` only after the in-flight request ends, once per draining period, long poll timeout and wake-up, `after` resume, `boot_id`, malformed queries. |
+| `tests/fairq.rs` | Requests pass through the per-backend limiter, visible as `podgate_backend_*` on `GET /metrics`. The weighted order and the limit are unit tests in `src/fairq.rs`. |
+| `tests/inflight_alloc.rs` | The in-flight hot path allocates nothing. Its own test binary, with a counting global allocator. |
 | `tests/wasm_budget.rs` | Filter memory charged to the tenant (`503` over budget, peak and refusal metrics) and the bounded filter pool (queued filter runs refused, snapshot pushes and other tenants unaffected). |
 | `tests/acme.rs` | End-to-end against `pebble` (with `pebble-challtestsrv` as its DNS, so HTTP-01 is validated for real): the test plays the control plane. A missing `pebble` fails the tests. |
+| `examples/slow_upstream.rs` | A backend with a fixed latency and capacity (`slow_upstream <addr> <latency_ms> <capacity>`), for `scripts/load-fairness.sh`. |
+| `scripts/load-fairness.sh` | Load test of the per-tenant fair queue: tenant A floods at 1000 rps, tenant B sends 10 rps, with `oha` against the `podgate` binary and `slow_upstream`; see `## Backend admission`. |
 | `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
 
 ### Adding a feature
@@ -129,7 +134,7 @@ The snapshot is compiled into an immutable routing table and swapped atomically.
 
 ### Event feed
 
-`GET /v1/events?after=<seq>&timeout_secs=<n>` is a long poll. It returns the ordered events with sequence numbers greater than `after`, or an empty list after the timeout. The event kinds are `revision_drained`, `config_reverted`, `canary_regressed`, `wake_requested`, `app_idle`, `acme_challenge` and `certificate_issued`.
+`GET /v1/events?after=<seq>&timeout_secs=<n>` is a long poll. It returns the ordered events with sequence numbers greater than `after`, or an empty list after the timeout. The event kinds are `revision_drained`, `wake_requested`, `app_idle`, `config_reverted`, `config_revert_failed`, `canary_regressed`, `acme_challenge`, `certificate_issued` and `certificate_requested`.
 
 `canary_regressed` carries `app`, `revision` and `error_permille` (the canary's `5xx` per thousand requests over the judged window).
 
@@ -194,7 +199,7 @@ Only map type `0` (request headers) exists. The pseudo headers `:method`, `:path
 
 ### Not built yet
 
-Change 0001 built the planes (without ACME and the event feed); change 0004 built the feed with `revision_drained`, the other event kinds arrive with their specs, the snapshot model, compile and swap, revision states for new requests, and the error shape; change 0014 built ACME issuance, renewal and on-demand TLS on top of `Snapshot.certificates` (`## ACME and on-demand TLS`). The rest of this section is the target; each part is described below.
+HTTP/3: Pingora 0.9 has no HTTP/3 server. Every other part of this section is built; each part is described below.
 
 ## Run
 
@@ -248,7 +253,6 @@ Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects)
 | `GET /healthz` | Liveness. `200 {"status":"ok"}` whenever the process answers. Checks no dependency. |
 | `GET /readyz` | Readiness. `200 {"status":"ready"}` while the admin API serves; `503 {"status":"not ready"}` before startup completes and while draining. It does not probe the proxy listeners: Pingora binds them on its own schedule and retries while a port is busy. |
 | `PUT /v1/snapshot` | Replaces the routing table. `200 {"version":N}` when applied; `400` for malformed JSON; `409` when `version` is not greater than the live one (the table is unchanged); `422 {"error":"snapshot rejected","conflicts":[...]}` when it does not compile: conflicting declarations (see `### Snapshot conflicts`), an unknown tenant, a bad host, an unusable certificate, a `skew_secret` shorter than 16 bytes. Every entry of `conflicts` is an object with a `code` and a `message`. Bodies up to 16 MiB. The live version starts at `0`, so the first snapshot needs `version >= 1`. |
-| `PUT /v1/snapshot` | Replaces the routing table. `200 {"version":N}` when applied; `400` for malformed JSON; `409` when `version` is not greater than the live one (the table is unchanged); `422 {"error":"snapshot rejected","conflicts":[...]}` when it does not compile: conflicting declarations (see `### Snapshot conflicts`), an unknown tenant, a bad host, an unusable certificate. Every entry of `conflicts` is an object with a `code` and a `message`. Bodies up to 16 MiB. The live version starts at `0`, so the first snapshot needs `version >= 1`. |
 | `POST /v1/snapshot/plan` | Same body as `PUT /v1/snapshot`; applies nothing. `200` with `{"from_version","to_version","added":[...],"removed":[...],"changed":[...],"posture_changes":[{"host","app","kind"}]}` (hosts are declared patterns, sorted); `400`, `409` and `422` exactly as the `PUT` answers the same body, because the plan runs the same version check and compiler. See `## Plan and auto-revert`. |
 | `GET /metrics` | Prometheus text (`text/plain; version=0.0.4`): the per-tenant series listed under `## Memory budgets`, then the per-backend series listed under `## Backend admission`. |
 | `GET /v1/events?after=<seq>&timeout_secs=<n>` | Long poll of the event feed. `200 {"boot_id":"...","events":[{"seq":N,"kind":"revision_drained","app":"...","revision":"..."}]}` (other kinds: `{"kind":"wake_requested","app":"..."}`, `{"kind":"app_idle","app":"..."}`): events with `seq` greater than `after` (default `0`), oldest first; an empty list when none arrive within `timeout_secs` (default `0`: answer at once; capped at `REQUEST_TIMEOUT_SECS - 1` so the poll ends before the `408`). `410 {"error":"...","boot_id":"...","oldest":N}` when `after` is older than the 4096-event ring: resync. `400` for a malformed query. Sequence numbers start at `1` and restart with the process; compare `boot_id` to detect a restart. |
