@@ -28,6 +28,10 @@ pub struct Snapshot {
     /// logged.
     #[serde(default)]
     pub skew_secret: Option<SkewSecret>,
+    /// Seconds after this snapshot goes live during which a 5xx spike in the apps it changed
+    /// restores the previous snapshot. Absent: 60. `0`: never revert. Capped at 300.
+    #[serde(default)]
+    pub revert_window_secs: Option<u64>,
 }
 
 /// One tenant of the PaaS.

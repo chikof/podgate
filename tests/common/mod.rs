@@ -196,6 +196,20 @@ impl Podgate {
         self.push_snapshot_raw(&snapshot.to_string()).await
     }
 
+    /// `POST path` on the admin socket with a JSON body.
+    pub async fn admin_post(&self, path: &str, body: &Value) -> Response {
+        let body = body.to_string();
+        let mut stream = UnixStream::connect(&self.admin_socket)
+            .await
+            .expect("connect to the admin socket");
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        exchange(&mut stream, &request).await
+    }
+
     /// `GET path` on the HTTP proxy listener with `Host: host`.
     pub async fn get(&self, host: &str, path: &str) -> Response {
         let mut stream = TcpStream::connect(self.proxy_addr)

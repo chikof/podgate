@@ -26,10 +26,17 @@ async fn put_snapshot(State(state): State<AppState>, body: Bytes) -> Result<Json
         .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
     // Compiling can be slow (WASM filter modules): keep it off the admin runtime's workers.
     let table = state.table().clone();
-    let snapshot = tokio::task::spawn_blocking(move || table.apply(&snapshot).map(|()| snapshot))
-        .await
-        .map_err(|err| AppError::Internal(err.into()))??;
+    let (replaced, snapshot) = tokio::task::spawn_blocking(move || {
+        table
+            .apply_replacing(&snapshot)
+            .map(|replaced| (replaced, snapshot))
+    })
+    .await
+    .map_err(|err| AppError::Internal(err.into()))??;
     state.inflight().sync(&state.table().load());
     state.failures().retain_apps(&state.table().load());
+    state
+        .reverter()
+        .applied(&replaced, snapshot.revert_window_secs);
     Ok(Json(json!({ "version": snapshot.version })))
 }

@@ -47,6 +47,24 @@ pub enum EventKind {
         /// The idle app.
         app: Box<str>,
     },
+    /// A 5xx spike in the apps a snapshot changed restored the previous snapshot.
+    ConfigReverted {
+        /// The version that was live and got replaced; the live version stays at this number.
+        from_version: u64,
+        /// The version of the snapshot that is serving again.
+        to_version: u64,
+    },
+    /// A `5xx` spike called for a revert, but the previous snapshot no longer compiles (for
+    /// example a certificate expired meanwhile). The current table stays live and the change
+    /// is no longer watched.
+    ConfigRevertFailed {
+        /// The version that is live and could not be reverted.
+        from_version: u64,
+        /// The version of the snapshot that could not be restored.
+        to_version: u64,
+        /// Why the previous snapshot does not compile.
+        error: Box<str>,
+    },
 }
 
 /// One entry of the feed: a sequence number and what happened.

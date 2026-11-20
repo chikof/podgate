@@ -18,6 +18,8 @@
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
+//! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
+//!   and [`revert`] undoes a snapshot that makes the apps it changed fail.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -32,9 +34,12 @@ pub mod explain;
 pub mod failures;
 pub mod host;
 pub mod inflight;
+pub mod outcomes;
+pub mod plan;
 pub mod pool;
 pub mod proxy;
 pub mod respond;
+pub mod revert;
 pub mod route;
 pub mod skew;
 pub mod snapshot;
@@ -59,6 +64,7 @@ pub use error::AppError;
 pub use events::{Event, EventFeed, EventKind};
 pub use failures::Failures;
 pub use inflight::{Inflight, InflightGuard};
+pub use outcomes::Outcomes;
 pub use proxy::{Ctx, Gateway};
 pub use snapshot::Snapshot;
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
@@ -81,6 +87,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let inflight = Inflight::new(events.clone());
     let budgets = Budgets::new();
     let wake = Wake::new(events.clone());
+    let outcomes = Outcomes::new();
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -99,7 +106,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         Gateway::new(table.clone(), inflight.clone(), timeout)
             .with_budgets(budgets.clone())
             .with_failures(failures.clone())
-            .with_wake(wake.clone()),
+            .with_wake(wake.clone())
+            .with_outcomes(outcomes.clone()),
     );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {
@@ -118,7 +126,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             admin_listener,
             AppState::new(table, events, inflight)
                 .with_budgets(budgets)
-                .with_failures(failures),
+                .with_failures(failures)
+                .with_outcomes(outcomes),
             timeout,
         ),
     ));

@@ -11,6 +11,7 @@ mod explain;
 mod failures;
 mod health;
 mod metrics;
+mod plan;
 mod snapshot;
 
 use std::io;
@@ -36,6 +37,8 @@ use crate::error::AppError;
 use crate::events::EventFeed;
 use crate::failures::Failures;
 use crate::inflight::Inflight;
+use crate::outcomes::Outcomes;
+use crate::revert::Reverter;
 use crate::table::TableHandle;
 
 /// Shared handler state. Cheap to clone.
@@ -47,12 +50,19 @@ pub struct AppState {
     inflight: Inflight,
     budgets: Budgets,
     failures: Failures,
+    reverter: Reverter,
 }
 
 impl AppState {
     /// Creates a state that is not ready yet; [`AdminService`] flips it once serving.
     #[must_use]
     pub fn new(table: TableHandle, events: EventFeed, inflight: Inflight) -> Self {
+        let reverter = Reverter::new(
+            table.clone(),
+            events.clone(),
+            inflight.clone(),
+            Outcomes::new(),
+        );
         Self {
             ready: Arc::new(AtomicBool::new(false)),
             table,
@@ -60,6 +70,7 @@ impl AppState {
             inflight,
             budgets: Budgets::new(),
             failures: Failures::new(),
+            reverter,
         }
     }
 
@@ -117,6 +128,24 @@ impl AppState {
     pub fn failures(&self) -> &Failures {
         &self.failures
     }
+
+    /// Reads `outcomes`, the counters the proxy records into, for auto-revert.
+    #[must_use]
+    pub fn with_outcomes(mut self, outcomes: Outcomes) -> Self {
+        self.reverter = Reverter::new(
+            self.table.clone(),
+            self.events.clone(),
+            self.inflight.clone(),
+            outcomes,
+        );
+        self
+    }
+
+    /// Watches every applied snapshot and reverts it on a `5xx` spike.
+    #[must_use]
+    pub fn reverter(&self) -> &Reverter {
+        &self.reverter
+    }
 }
 
 async fn not_found() -> AppError {
@@ -142,6 +171,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(health::routes())
         .merge(metrics::routes())
         .merge(snapshot::routes())
+        .merge(plan::routes())
         .merge(events::routes())
         .merge(explain::routes())
         .merge(failures::routes())

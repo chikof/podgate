@@ -43,6 +43,7 @@ use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::failures::{self, Failures};
 use crate::inflight::{Inflight, InflightGuard};
+use crate::outcomes::{self, Outcomes};
 use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
@@ -116,6 +117,7 @@ pub struct Gateway {
     budgets: Budgets,
     failures: Failures,
     wake: Wake,
+    outcomes: Outcomes,
 }
 
 impl Gateway {
@@ -131,6 +133,7 @@ impl Gateway {
             budgets: Budgets::new(),
             failures: Failures::new(),
             wake: Wake::default(),
+            outcomes: Outcomes::new(),
         }
     }
 
@@ -152,6 +155,13 @@ impl Gateway {
     #[must_use]
     pub fn with_wake(mut self, wake: Wake) -> Self {
         self.wake = wake;
+        self
+    }
+
+    /// Records every finished request into `outcomes`, a registry shared with auto-revert.
+    #[must_use]
+    pub fn with_outcomes(mut self, outcomes: Outcomes) -> Self {
+        self.outcomes = outcomes;
         self
     }
 }
@@ -265,6 +275,7 @@ impl ProxyHttp for Gateway {
 
     async fn logging(&self, session: &mut Session, _error: Option<&Error>, ctx: &mut Ctx) {
         self.failures.log(session, ctx);
+        outcomes::record_request(&self.outcomes, session, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
     }

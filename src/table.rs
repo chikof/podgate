@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
-use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot};
+use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
 use crate::tls::{CertError, CertStore};
 use crate::wasm::{self, CompiledFilter};
 
@@ -73,6 +73,19 @@ pub enum ApplyError {
     /// It does not compile.
     #[error(transparent)]
     Compile(#[from] CompileError),
+}
+
+/// The two tables of one successful [`TableHandle::apply_replacing`], and the snapshot the old
+/// one was compiled from.
+#[derive(Debug, Clone)]
+pub struct Replaced {
+    /// The table that was live before the swap.
+    pub previous: Arc<RoutingTable>,
+    /// The table that is live now.
+    pub current: Arc<RoutingTable>,
+    /// The snapshot `previous` was compiled from: what [`TableHandle::revert_to`] restores.
+    /// `None` for the first snapshot of the process, which replaced the empty table.
+    pub previous_snapshot: Option<Arc<Snapshot>>,
 }
 
 /// One revision of an app, ready for routing.
@@ -170,6 +183,8 @@ pub struct CompiledApp {
     filters: Box<[CompiledFilter]>,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
+    hosts: Box<[Box<str>]>,
+    tls: TlsPolicy,
 }
 
 /// Where [`CompiledApp::pick`] sent a new request.
@@ -193,6 +208,12 @@ impl CompiledApp {
             scale_to_zero: app.scale_to_zero,
             revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
             next_revision: AtomicU64::new(0),
+            hosts: app
+                .hosts
+                .iter()
+                .map(|host| host.to_ascii_lowercase().into())
+                .collect(),
+            tls: app.tls.clone(),
         }
     }
 
@@ -206,6 +227,18 @@ impl CompiledApp {
     #[must_use]
     pub fn allow_domain_fronting(&self) -> bool {
         self.allow_domain_fronting
+    }
+
+    /// The host patterns the app declares, lowercased: exact names and `*.` wildcards.
+    #[must_use]
+    pub fn hosts(&self) -> &[Box<str>] {
+        &self.hosts
+    }
+
+    /// The app's TLS policy.
+    #[must_use]
+    pub fn tls(&self) -> &TlsPolicy {
+        &self.tls
     }
 
     /// Whether failed requests keep their bodies for replay.
@@ -448,6 +481,8 @@ pub struct TableHandle {
     apply_lock: Arc<Mutex<()>>,
     // Holds the version of the newest table; every swap sends, so waiters see each one.
     swapped: Arc<watch::Sender<u64>>,
+    // The snapshot the live table was compiled from; touched only while `apply_lock` is held.
+    source: Arc<Mutex<Option<Arc<Snapshot>>>>,
 }
 
 impl TableHandle {
@@ -470,11 +505,23 @@ impl TableHandle {
     /// [`ApplyError::Stale`] when `snapshot.version` is not greater than the live version,
     /// [`ApplyError::Compile`] when it does not compile. The live table stays in both cases.
     pub fn apply(&self, snapshot: &Snapshot) -> Result<(), ApplyError> {
+        self.apply_replacing(snapshot).map(drop)
+    }
+
+    /// Like [`Self::apply`], and returns the table that went out, the one that came in and the
+    /// snapshot that went out, all read under the lock of the swap, so concurrent pushes cannot
+    /// mix them up.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::apply`].
+    pub fn apply_replacing(&self, snapshot: &Snapshot) -> Result<Replaced, ApplyError> {
         let _guard = self
             .apply_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let live = self.live.load().version();
+        let previous = self.live.load_full();
+        let live = previous.version();
         if snapshot.version <= live {
             return Err(ApplyError::Stale {
                 live,
@@ -488,7 +535,48 @@ impl TableHandle {
             "snapshot applied"
         );
         self.swap(table);
-        Ok(())
+        // Nothing else swaps while `apply_lock` is held, so this is the table just stored.
+        let current = self.live.load_full();
+        let previous_snapshot = self.source().replace(Arc::new(snapshot.clone()));
+        Ok(Replaced {
+            previous,
+            current,
+            previous_snapshot,
+        })
+    }
+
+    /// Puts `previous`, the snapshot of an earlier live table, back in service, but only while
+    /// the live version is still `keep_version`: a snapshot that landed since wins and
+    /// `Ok(false)` is returned.
+    ///
+    /// The snapshot is compiled again with its version set to `keep_version`, the version it
+    /// replaces, and swapped in as a new table; tables never change once built, so requests
+    /// holding the reverted table keep seeing it. The live version therefore never goes down:
+    /// the next push must be newer than the reverted snapshot, so the control plane cannot
+    /// replay it by accident, and [`crate::Inflight::sync`] does not discard the restored table
+    /// as older.
+    ///
+    /// # Errors
+    ///
+    /// [`CompileError`] when `previous` no longer compiles (a certificate that expired since,
+    /// say). The live table stays.
+    pub fn revert_to(&self, previous: &Snapshot, keep_version: u64) -> Result<bool, CompileError> {
+        let _guard = self
+            .apply_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.live.load().version() != keep_version {
+            return Ok(false);
+        }
+        let mut restored = previous.clone();
+        restored.version = keep_version;
+        self.swap(RoutingTable::compile(&restored)?);
+        *self.source() = Some(Arc::new(restored));
+        Ok(true)
+    }
+
+    fn source(&self) -> MutexGuard<'_, Option<Arc<Snapshot>>> {
+        self.source.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The one place the live table is replaced: stores `table` and fires the [`Self::subscribe`]
@@ -556,6 +644,7 @@ mod test {
             apps,
             certificates: Vec::new(),
             skew_secret: None,
+            revert_window_secs: None,
         }
     }
 
