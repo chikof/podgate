@@ -154,7 +154,13 @@ pub fn reason_of(err: &AppError) -> &'static str {
         AppError::Misdirected => "misdirected",
         AppError::ClientCertRequired => "client_cert_required",
         AppError::NotFound => "no_route",
-        AppError::Overloaded | AppError::FilterOverBudget => "over_budget",
+        AppError::Overloaded | AppError::FilterOverBudget | AppError::BufferingOverBudget => {
+            "over_budget"
+        }
+        AppError::PayloadTooLarge => "payload_too_large",
+        AppError::ExpectationFailed => "expectation_failed",
+        AppError::RequestTimeout => "request_timeout",
+        AppError::UpstreamResponseTooLarge => "upstream_response_too_large",
         AppError::Saturated => "backend_saturated",
         AppError::WakeTimeout => "wake_timeout",
         AppError::FilterBusy => "filter_busy",
