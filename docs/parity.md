@@ -160,7 +160,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | etcd, Redis (key trees) | yes | none | 0109 (shared key-value layer), 0110 |
 | HTTP provider | yes | `--config <url>` | 0111 |
 | Marathon, Rancher, Nomad-less legacy providers | Marathon, Rancher (removed in v3) | none | not planned: end-of-life platforms |
-| One writer per node | not applicable (providers merge in-process) | not applicable | 0068 (refused, not conventional), 0069, 0080 |
+| One writer per node | not applicable (providers merge in-process) | not applicable | built (refused by name, takeover by the operator), 0069, 0080 |
 | Tenants, budgets, host claims | none | none | built, providers 0069 |
 
 ## Observability and operations
@@ -171,10 +171,10 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Prometheus metrics per entry point, router, service | `metrics.prometheus` | `metrics` | built (separate metrics listener, cardinality caps) |
 | OpenTelemetry tracing | `tracing.otlp` | `tracing` | built (OTLP over HTTP; `capturedResponseHeaders`, `safeQueryParams` not built), 0112 (OTLP over gRPC) |
 | Health endpoint | `ping` | none | built (`/healthz`, `/readyz` on the admin socket) |
-| JSON schema of the configuration | none | `caddy adapt`, JSON docs | 0068 (`GET /v1/schema`) |
-| Validate without applying | none | `caddy validate` | 0068 (`POST /v1/snapshot/validate`), plan built |
+| JSON schema of the configuration | none | `caddy adapt`, JSON docs | built (`GET /v1/schema`, generated from the model types) |
+| Validate without applying | none | `caddy validate` | built (`POST /v1/snapshot/validate`, the same compile as the push), plan built |
 | Explain a route | none | none | built, extended by 0022 |
-| Read-only overview API | `/api/*` | admin API | built (one document with filters and a cursor, 4 MiB cap, no secrets, `GET` only; the writer name joins with 0068) |
+| Read-only overview API | `/api/*` | admin API | built (one document with filters and a cursor, 4 MiB cap, no secrets, `GET` only; `summary.writer` shows the pinned writer) |
 | Dashboard (web UI) | `dashboard` | none | 0088 (embedded, read-only, separate listener, never shows events or secrets) |
 | Config reload without dropping connections | yes | yes | built (atomic swap) |
 | Auto-revert of a bad config | none | none | built |
