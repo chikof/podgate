@@ -79,10 +79,7 @@ async fn scrape(podgate: &Podgate) -> String {
 }
 
 fn free_addr() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
+    SocketAddr::from(([127, 0, 0, 1], common::free_ports(1)[0]))
 }
 
 /// What an HTTP exchange with the metrics listener returned.

@@ -107,7 +107,7 @@ fn get_request(host: &str, path: &str) -> String {
 ///
 /// All probes stay bound until every port is chosen: probing one at a time released each port
 /// before the next probe, and the kernel can hand the same port out twice in a row.
-fn free_ports(count: usize) -> Vec<u16> {
+pub fn free_ports(count: usize) -> Vec<u16> {
     let probes: Vec<std::net::TcpListener> = (0..count)
         .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port"))
         .collect();

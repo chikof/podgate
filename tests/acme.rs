@@ -45,14 +45,6 @@ async fn node(name: &str) -> Podgate {
     Podgate::start_with_env(&[("NODE_NAME", name)]).await
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a free port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
 /// A private CA that signs the certificate of pebble's own HTTPS listener.
 #[derive(Clone)]
 struct Pki {
@@ -130,8 +122,9 @@ impl Pebble {
     }
 
     async fn try_start(pki: Pki, http_port: u16) -> Result<Self, String> {
-        let (acme, management, tls_alpn) = (free_port(), free_port(), free_port());
-        let (dns, challtest_management) = (free_port(), free_port());
+        let ports = common::free_ports(5);
+        let (acme, management, tls_alpn) = (ports[0], ports[1], ports[2]);
+        let (dns, challtest_management) = (ports[3], ports[4]);
         let config = json!({"pebble": {
             "listenAddress": format!("127.0.0.1:{acme}"),
             "managementListenAddress": format!("127.0.0.1:{management}"),
