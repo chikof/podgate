@@ -33,6 +33,9 @@ use podgate_model::{App, Declared};
 
 pub mod content_type;
 pub mod headers;
+pub mod redirect;
+pub mod redirect_regex;
+pub mod redirect_scheme;
 pub mod wasm;
 
 /// What a request hook decided.
@@ -330,9 +333,9 @@ kinds! {
 
     "replace_path_regex" => unbuilt,
 
-    "redirect_scheme" => unbuilt,
+    "redirect_scheme" => RedirectScheme(redirect_scheme::RedirectScheme),
 
-    "redirect_regex" => unbuilt,
+    "redirect_regex" => RedirectRegex(redirect_regex::RedirectRegex),
 
     "headers" => Headers(headers::Headers),
 

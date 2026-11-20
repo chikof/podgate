@@ -572,6 +572,22 @@ pub fn with_filters(mut app: Value, filters: &[Value]) -> Value {
     app
 }
 
+/// `app` with one more middleware `name` of type `kind` (`config`: its own fields), appended to
+/// the app's `default_chain`.
+pub fn with_middleware(mut app: Value, name: &str, kind: &str, config: Value) -> Value {
+    if let Some(list) = app["middlewares"].as_array_mut() {
+        list.push(middleware(name, kind, config));
+    } else {
+        app["middlewares"] = json!([middleware(name, kind, config)]);
+    }
+    if let Some(chain) = app["default_chain"].as_array_mut() {
+        chain.push(json!(name));
+    } else {
+        app["default_chain"] = json!([name]);
+    }
+    app
+}
+
 /// A snapshot with tenant `t1`, the given apps and no certificates.
 pub fn snapshot(version: u64, apps: &[Value]) -> Value {
     json!({

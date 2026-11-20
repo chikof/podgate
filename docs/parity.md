@@ -85,7 +85,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
 | Add and strip prefix, replace path (and regexp) | `addPrefix`, `stripPrefix*`, `replacePath*` | `uri`, `rewrite`, `handle_path` | 0043 |
-| Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | 0044 |
+| Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | built: `301`/`302` as the pinned Traefik sends; the Location is refused on control characters (also escaped), other schemes and userinfo; a `redirect_scheme` removal is a plan posture change |
 | Custom headers, security headers | `headers` | `header`, `request_header` | built: `src/middleware/headers.rs`; framing headers cannot be set; HSTS only over TLS |
 | CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |
 | Content type sniffing | `contentType` | none | built: never sniffs; `auto_detect: true` refused |
