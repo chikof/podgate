@@ -19,6 +19,7 @@
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
 //!   report drained revisions into it.
 //! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
+//! - [`overview`]: what is configured and how it is doing, behind `GET /v1/overview`.
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
 //! - [`admin`]: the admin API router and its background service.
@@ -59,6 +60,7 @@ pub mod l4;
 pub mod middleware;
 pub mod observe;
 pub mod outcomes;
+pub mod overview;
 pub mod pipeline;
 pub mod plan;
 pub mod pool;
@@ -254,7 +256,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 .with_failures(failures)
                 .with_access_log(access_log)
                 .with_upstream_policy(upstream_policy)
-                .with_outcomes(outcomes),
+                .with_outcomes(outcomes)
+                .with_entry_points(config.entry_points.clone()),
             timeout,
         ),
     ));

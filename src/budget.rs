@@ -220,6 +220,13 @@ impl Budgets {
         created
     }
 
+    /// The budget of tenant `id` when something has used it, without creating one.
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<Arc<TenantBudget>> {
+        let tenants = self.tenants.lock().unwrap_or_else(PoisonError::into_inner);
+        tenants.get(id).map(Arc::clone)
+    }
+
     /// Prometheus text exposition of every tenant's usage. Tenants the `live` table no longer
     /// declares are listed only while they still hold something.
     #[must_use]

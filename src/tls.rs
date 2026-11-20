@@ -47,6 +47,39 @@ pub struct CertStore {
     by_host: HostMap<Arc<CertifiedKey>>,
     expiries: Vec<(Box<str>, u64)>,
     default: Option<Arc<CertifiedKey>>,
+    summaries: Vec<Summary>,
+}
+
+/// What the read-only overview says about one certificate: never the chain or the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// The hosts the snapshot declares for it.
+    pub hosts: Box<[Box<str>]>,
+    /// The issuer's distinguished name; `None` when the leaf cannot be parsed.
+    pub issuer: Option<Box<str>>,
+    /// End of validity in seconds since the Unix epoch; `None` when the leaf cannot be parsed.
+    pub not_after: Option<i64>,
+    /// Whether it is the `default` certificate, served for names no certificate covers.
+    pub default: bool,
+}
+
+impl Summary {
+    fn of(hosts: &[Box<str>], default: bool, key: &CertifiedKey) -> Self {
+        let parsed = key
+            .cert
+            .first()
+            .and_then(|leaf| x509_parser::parse_x509_certificate(leaf).ok());
+        Self {
+            hosts: hosts.into(),
+            issuer: parsed
+                .as_ref()
+                .map(|(_, cert)| cert.issuer().to_string().into()),
+            not_after: parsed
+                .as_ref()
+                .map(|(_, cert)| cert.validity().not_after.timestamp()),
+            default,
+        }
+    }
 }
 
 impl CertStore {
@@ -60,6 +93,7 @@ impl CertStore {
         let mut by_host = HostMap::default();
         let mut expiries = Vec::new();
         let mut default = None;
+        let mut summaries = Vec::with_capacity(certificates.len());
         for certificate in certificates {
             let hosts = certificate.hosts.join(",");
             let reject = |reason: String| CertError {
@@ -77,6 +111,7 @@ impl CertStore {
             if certificate.default && default.replace(Arc::clone(&key)).is_some() {
                 return Err(reject("a second certificate is marked default".into()));
             }
+            summaries.push(Summary::of(&certificate.hosts, certificate.default, &key));
             for raw in &certificate.hosts {
                 expiries.extend(not_after.map(|at| (raw.clone(), at)));
                 let pattern = HostPattern::parse(raw).map_err(|err| reject(err.to_string()))?;
@@ -89,7 +124,14 @@ impl CertStore {
             by_host,
             expiries,
             default,
+            summaries,
         })
+    }
+
+    /// The certificates of the snapshot as the overview shows them, in snapshot order.
+    #[must_use]
+    pub fn summaries(&self) -> &[Summary] {
+        &self.summaries
     }
 
     /// The certificate for a server name from the client hello, if the snapshot has one.

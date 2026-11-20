@@ -27,6 +27,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use crate::host::HostPattern;
 use crate::observe::access_log;
 use podgate_model::{App, EntryPointPolicy, Router};
+use serde_json::Value;
 
 pub use matcher::{Claim, Failure, Matcher, Spec, View};
 pub use priority::Key;
@@ -67,6 +68,7 @@ pub struct CompiledRouter {
     chain: Box<[usize]>,
     chain_digest: u64,
     access_log: Option<bool>,
+    matcher_json: Value,
 }
 
 impl CompiledRouter {
@@ -116,6 +118,7 @@ impl CompiledRouter {
                 .observability
                 .as_ref()
                 .and_then(access_log::router_override),
+            matcher_json: router.matcher.clone(),
         })
     }
 
@@ -147,6 +150,12 @@ impl CompiledRouter {
     #[must_use]
     pub fn priority(&self) -> i32 {
         self.priority
+    }
+
+    /// The matcher as the snapshot wrote it, for the read-only overview.
+    #[must_use]
+    pub fn matcher_json(&self) -> &Value {
+        &self.matcher_json
     }
 
     /// The matcher.

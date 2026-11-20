@@ -293,6 +293,9 @@ macro_rules! kinds {
                 }
             }
 
+            /// Every built type name, as written in a snapshot.
+            pub const BUILT: &[&str] = &[ $($ty,)* ];
+
             /// The type name, as written in a snapshot.
             #[must_use]
             pub fn kind(&self) -> &'static str {

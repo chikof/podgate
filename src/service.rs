@@ -97,6 +97,30 @@ impl Service {
         }
     }
 
+    /// The name of the balancing algorithm, for a type that has one.
+    #[must_use]
+    pub fn algorithm(&self) -> Option<&'static str> {
+        match self {
+            Self::LoadBalancer(balancer) => Some(balancer.algorithm()),
+        }
+    }
+
+    /// Whether the service probes its servers actively (`health_check`).
+    #[must_use]
+    pub fn has_health_check(&self) -> bool {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.health_check().is_some(),
+        }
+    }
+
+    /// Whether the service ejects servers that fail real requests (`passive`).
+    #[must_use]
+    pub fn has_outlier_detection(&self) -> bool {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.passive().is_some(),
+        }
+    }
+
     /// The servers the service may send to, in declaration order.
     #[must_use]
     pub fn servers(&self) -> &[Server] {

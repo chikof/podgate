@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
@@ -642,6 +642,7 @@ pub struct RoutingTable {
     context: CompileContext,
     access_log: Option<Arc<Policy>>,
     series: TableSeries,
+    applied_at: u64,
 }
 
 impl RoutingTable {
@@ -701,6 +702,9 @@ impl RoutingTable {
             // `compile::shape` refused an invalid policy before this runs.
             access_log: access_log::compile(snapshot).ok().flatten(),
             series: TableSeries::default(),
+            applied_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
         })
     }
 
@@ -708,6 +712,18 @@ impl RoutingTable {
     #[must_use]
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// When this table was compiled, in seconds since the Unix epoch: the moment its snapshot
+    /// went live, or the moment a revert put it back. `0` for the empty table.
+    #[must_use]
+    pub fn applied_at(&self) -> u64 {
+        self.applied_at
+    }
+
+    /// The ids of the tenants the snapshot declares, in no particular order.
+    pub fn tenant_ids(&self) -> impl Iterator<Item = &str> {
+        self.budgets.keys().map(AsRef::as_ref)
     }
 
     /// The router index, for [`crate::route`].

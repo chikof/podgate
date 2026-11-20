@@ -11,6 +11,7 @@ mod explain;
 mod failures;
 mod health;
 mod metrics;
+mod overview;
 mod plan;
 mod snapshot;
 
@@ -28,11 +29,13 @@ use axum::http::{Request, StatusCode};
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::budget::Budgets;
+use crate::entry::EntryPoint;
 use crate::error::AppError;
 use crate::events::EventFeed;
 use crate::failures::Failures;
@@ -57,17 +60,21 @@ pub struct AppState {
     upstream_policy: UpstreamPolicy,
     access_log: AccessLog,
     reverter: Reverter,
+    outcomes: Outcomes,
+    entry_points: Arc<[EntryPoint]>,
+    overview_slots: Arc<Semaphore>,
 }
 
 impl AppState {
     /// Creates a state that is not ready yet; [`AdminService`] flips it once serving.
     #[must_use]
     pub fn new(table: TableHandle, events: EventFeed, inflight: Inflight) -> Self {
+        let outcomes = Outcomes::new();
         let reverter = Reverter::new(
             table.clone(),
             events.clone(),
             inflight.clone(),
-            Outcomes::new(),
+            outcomes.clone(),
         );
         Self {
             ready: Arc::new(AtomicBool::new(false)),
@@ -80,6 +87,9 @@ impl AppState {
             upstream_policy: UpstreamPolicy::builtin(),
             access_log: AccessLog::new(),
             reverter,
+            outcomes,
+            entry_points: Arc::default(),
+            overview_slots: Arc::new(Semaphore::new(overview::MAX_CONCURRENT)),
         }
     }
 
@@ -177,15 +187,23 @@ impl AppState {
         &self.access_log
     }
 
-    /// Reads `outcomes`, the counters the proxy records into, for auto-revert.
+    /// Reads `outcomes`, the counters the proxy records into, for auto-revert and the overview.
     #[must_use]
     pub fn with_outcomes(mut self, outcomes: Outcomes) -> Self {
         self.reverter = Reverter::new(
             self.table.clone(),
             self.events.clone(),
             self.inflight.clone(),
-            outcomes,
+            outcomes.clone(),
         );
+        self.outcomes = outcomes;
+        self
+    }
+
+    /// Reports `entry_points`, the listeners this process bound, on `GET /v1/overview`.
+    #[must_use]
+    pub fn with_entry_points(mut self, entry_points: Vec<EntryPoint>) -> Self {
+        self.entry_points = entry_points.into();
         self
     }
 
@@ -193,6 +211,24 @@ impl AppState {
     #[must_use]
     pub fn reverter(&self) -> &Reverter {
         &self.reverter
+    }
+
+    /// The response outcomes `GET /v1/overview` reports as recent requests.
+    #[must_use]
+    pub fn outcomes(&self) -> &Outcomes {
+        &self.outcomes
+    }
+
+    /// The listeners `GET /v1/overview` reports, with their addresses.
+    #[must_use]
+    pub fn entry_points(&self) -> Arc<[EntryPoint]> {
+        Arc::clone(&self.entry_points)
+    }
+
+    /// The slots that cap concurrent `GET /v1/overview` computations.
+    #[must_use]
+    pub fn overview_slots(&self) -> &Arc<Semaphore> {
+        &self.overview_slots
     }
 }
 
@@ -203,7 +239,8 @@ async fn not_found() -> AppError {
 /// Builds the router with all routes and middleware.
 ///
 /// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`,
-/// `GET /v1/explain`, `GET /v1/apps/{app}/failures`, `POST /v1/apps/{app}/failures/{id}/replay`;
+/// `GET /v1/explain`, `GET /v1/overview`, `GET /v1/apps/{app}/failures`,
+/// `POST /v1/apps/{app}/failures/{id}/replay`;
 /// anything else is a JSON 404.
 ///
 /// Middleware, outermost first:
@@ -223,6 +260,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(events::routes())
         .merge(explain::routes())
         .merge(failures::routes())
+        .merge(overview::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)
