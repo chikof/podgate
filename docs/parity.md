@@ -55,7 +55,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Active health checks | `healthCheck` | `health_uri` and friends | built (`health_check` with thresholds, status ranges, body regex, per-server jitter and a global probe cap; HTTPS probes use the service's transport: private CA, SNI, client certificate) |
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | built (`passive` on `loadbalancer`; connect failures, timeouts, 5xx and slow responses eject a server for a growing time, capped by a percentage and never the last available server; see `docs/ref/svc-outlier.md`) |
 | Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | 0035 (connect errors; idempotent replay only; no retry on a response status) |
-| Sticky sessions | `sticky.cookie` | `lb_policy cookie` | 0036 (HMAC cookie) |
+| Sticky sessions | `sticky.cookie` | `lb_policy cookie` | 0036 (built: HMAC cookie, `docs/ref/svc-sticky.md`) |
 | Weighted service of services | `weighted` | none | 0037 |
 | Failover service | `failover` | `lb_try_duration` partly | 0037 |
 | Mirroring | `mirroring` | none in core | 0038 (bounded, shed first) |
