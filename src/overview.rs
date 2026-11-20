@@ -45,10 +45,6 @@ const TAIL: usize = 128;
 /// the real payload, always have room.
 const SMALL_SECTION_SHARE: usize = 8;
 
-/// The words that make a field name a secret: no built kind may describe itself with one.
-#[cfg(test)]
-const SECRET_WORDS: [&str; 5] = ["password", "secret", "key_pem", "token", "hash"];
-
 /// A part of the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -155,6 +151,8 @@ pub struct Runtime<'a> {
     pub boot_id: &'a str,
     /// The listeners the process bound.
     pub entry_points: &'a [EntryPoint],
+    /// Where the read-only metrics listener serves, when the process has one.
+    pub metrics_addr: Option<std::net::SocketAddr>,
 }
 
 /// Renders the overview of `table` as a JSON body of at most `query.max_bytes` bytes.
@@ -206,6 +204,9 @@ struct SummaryView<'a> {
     /// Seconds since the Unix epoch when the table was compiled.
     applied_at: u64,
     boot_id: &'a str,
+    /// The read-only metrics listener, when the process has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics_addr: Option<std::net::SocketAddr>,
     tenants: usize,
     apps: usize,
     routers: usize,
@@ -225,6 +226,7 @@ fn summary<'a>(table: &RoutingTable, runtime: &Runtime<'a>) -> SummaryView<'a> {
         version: table.version(),
         applied_at: table.applied_at(),
         boot_id: runtime.boot_id,
+        metrics_addr: runtime.metrics_addr,
         tenants: table.tenant_ids().count(),
         apps: table.apps().len(),
         routers: 0,
@@ -685,20 +687,9 @@ fn service_view<'a>(revision: Option<&'a str>, named: &'a service::Named) -> Ser
     }
 }
 
-/// Words in a header or query parameter name that say its value is a credential.
-const CREDENTIAL_NAMES: [&str; 8] = [
-    "authorization",
-    "cookie",
-    "token",
-    "secret",
-    "key",
-    "password",
-    "passwd",
-    "signature",
-];
-
-/// A matcher tree as declared, with the value of any `header` or `query` leaf that names a
-/// credential replaced by `[redacted]`.
+/// A matcher tree as declared, except that the value or regular expression of a `header` or
+/// `query` leaf is `[value]` whatever the name: such a value is what a client sends, and a router
+/// may match on a credential. The names stay.
 fn shown_matcher(value: &Value) -> Value {
     match value {
         Value::Object(map) => map
@@ -720,16 +711,10 @@ fn shown_leaf(leaf: &Value) -> Value {
     let Some(map) = leaf.as_object() else {
         return leaf.clone();
     };
-    let credential = map
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|name| CREDENTIAL_NAMES.iter().any(|word| name.contains(word)));
     map.iter()
         .map(|(key, value)| {
-            let hidden = credential && (key == "value" || key == "regex");
-            let shown = if hidden {
-                Value::from("[redacted]")
+            let shown = if key == "value" || key == "regex" {
+                Value::from("[value]")
             } else {
                 value.clone()
             };
@@ -812,13 +797,10 @@ fn write_page_from<'a, X: Copy, T: Serialize>(
 
 #[cfg(test)]
 mod test {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
     use serde_json::{Value, json};
 
     use super::*;
     use crate::events::EventFeed;
-    use crate::middleware::Stage;
 
     fn table_of(snapshot: &Value) -> RoutingTable {
         let snapshot = serde_json::from_value(snapshot.clone()).expect("snapshot");
@@ -836,6 +818,7 @@ mod test {
             outcomes: &outcomes,
             boot_id: events.boot_id(),
             entry_points: &[],
+            metrics_addr: None,
         };
         let body = render(table, &runtime, query).expect("renders");
         assert!(body.len() <= query.max_bytes, "{} bytes", body.len());
@@ -857,107 +840,6 @@ mod test {
             "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
             "apps": apps,
         })
-    }
-
-    /// One middleware of every built kind, each configured as its own tests do.
-    fn every_kind() -> Vec<(&'static str, Value)> {
-        let wasm = wat::parse_str(
-            r#"(module
-              (memory (export "memory") 1)
-              (func (export "proxy_abi_version_0_2_1"))
-              (func (export "proxy_on_memory_allocate") (param i32) (result i32) (i32.const 0))
-              (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32) (i32.const 0)))"#,
-        )
-        .expect("valid WAT");
-        let hash = bcrypt::hash("pw", 10).expect("bcrypt hash");
-        vec![
-            (
-                "wasm",
-                json!({"wasm_base64": STANDARD.encode(wasm), "fuel": 1000, "max_memory_bytes": 65536}),
-            ),
-            ("add_prefix", json!({"prefix": "/api"})),
-            ("strip_prefix", json!({"prefixes": ["/api"]})),
-            ("strip_prefix_regex", json!({"regexes": ["^/t-[a-z]+"]})),
-            ("replace_path", json!({"path": "/new"})),
-            (
-                "replace_path_regex",
-                json!({"regex": "^/old/(.*)", "replacement": "/new/$1"}),
-            ),
-            ("redirect_scheme", json!({"scheme": "https"})),
-            (
-                "redirect_regex",
-                json!({"regex": "^http://([^/]+)/old/(.*)$", "replacement": "https://$1/new/$2"}),
-            ),
-            ("headers", json!({"request": {"set": {"x-demo": "1"}}})),
-            ("content_type", json!({})),
-            ("basic_auth", json!({"users": [format!("alice:{hash}")]})),
-            (
-                "circuit_breaker",
-                json!({"trip_when": {"network_error_ratio": 0.3}}),
-            ),
-            ("buffering", json!({"max_request_body_bytes": 1024})),
-            ("compress", json!({})),
-        ]
-    }
-
-    fn field_names(value: &Value, found: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                for (key, child) in map {
-                    found.push(key.clone());
-                    field_names(child, found);
-                }
-            }
-            Value::Array(list) => list.iter().for_each(|child| field_names(child, found)),
-            _ => {}
-        }
-    }
-
-    #[test]
-    fn every_describe_is_secret_free() {
-        let kinds = every_kind();
-        let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
-        let mut built: Vec<&str> = Stage::BUILT.to_vec();
-        declared.sort_unstable();
-        built.sort_unstable();
-        assert_eq!(
-            declared, built,
-            "a middleware kind was built or removed: add or drop its fixture in `every_kind`"
-        );
-
-        let mut app = app("a");
-        app["middlewares"] = kinds
-            .iter()
-            .map(|(kind, config)| {
-                let mut declared = json!({"name": kind, "type": kind});
-                declared
-                    .as_object_mut()
-                    .expect("object")
-                    .extend(config.as_object().expect("object").clone());
-                declared
-            })
-            .collect();
-        let table = table_of(&snapshot(&[app]));
-        let stages = table.apps()[0].stages();
-        assert_eq!(stages.len(), kinds.len());
-        for named in stages {
-            let mut names = Vec::new();
-            field_names(&named.stage.describe(), &mut names);
-            for name in names {
-                for word in SECRET_WORDS {
-                    assert!(
-                        !name.to_ascii_lowercase().contains(word),
-                        "{} describes itself with the field {name:?}, which names a secret ({word})",
-                        named.stage.kind()
-                    );
-                }
-            }
-        }
-        let shown = rendered(&table, &Query::default()).to_string();
-        assert!(
-            !shown.contains(&kinds[10].1["users"][0].as_str().unwrap_or("?")[6..]),
-            "the bcrypt hash is in the overview"
-        );
     }
 
     #[test]
@@ -1018,19 +900,25 @@ mod test {
     }
 
     #[test]
-    fn credential_matchers_are_redacted() {
+    fn matcher_values_are_never_shown() {
         let shown = shown_matcher(&json!({"all": [
             {"header": {"name": "X-Api-Key", "value": "hunter2"}},
             {"header": {"name": "x-env", "value": "canary"}},
+            {"header_regexp": {"name": "x-id", "regex": "^abc"}},
+            {"query": {"name": "page", "value": "1"}},
             {"query_regexp": {"name": "token", "regex": "^abc"}},
+            {"not": {"header": {"name": "x-flag"}}},
             {"path_prefix": "/api"},
         ]}));
         assert_eq!(
             shown,
             json!({"all": [
-                {"header": {"name": "X-Api-Key", "value": "[redacted]"}},
-                {"header": {"name": "x-env", "value": "canary"}},
-                {"query_regexp": {"name": "token", "regex": "[redacted]"}},
+                {"header": {"name": "X-Api-Key", "value": "[value]"}},
+                {"header": {"name": "x-env", "value": "[value]"}},
+                {"header_regexp": {"name": "x-id", "regex": "[value]"}},
+                {"query": {"name": "page", "value": "[value]"}},
+                {"query_regexp": {"name": "token", "regex": "[value]"}},
+                {"not": {"header": {"name": "x-flag"}}},
                 {"path_prefix": "/api"},
             ]})
         );

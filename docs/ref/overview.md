@@ -24,7 +24,7 @@ Every list is `{"total": n, "items": [...]}`. `total` counts what the filters se
 
 | Section | Content |
 |---|---|
-| `summary` | `version`, `applied_at` (seconds since the Unix epoch when the live table was compiled; a revert counts), `boot_id` (as on the event feed), counts of `tenants`, `apps`, `routers`, `services`, and `servers` by `healthy`, `unhealthy` and `ejected`. The counts cover the whole node, whatever the filters say. |
+| `summary` | `version`, `applied_at` (seconds since the Unix epoch when the live table was compiled; a revert counts), `boot_id` (as on the event feed), `metrics_addr` (when the process has a `METRICS_ADDR` listener), counts of `tenants`, `apps`, `routers`, `services`, and `servers` by `healthy`, `unhealthy` and `ejected`. The counts cover the whole node, whatever the filters say. |
 | `entry_points` | Per listener: `name`, `protocol`, `address`, `proxy_protocol` (only when on), `forwarded_headers` (`nobody`, `listed_peers` or `everyone`). |
 | `tenants` | `id`, `weight`, `budget`, `apps`, and live `inflight` and `buffer_bytes`. |
 | `certificates` | `hosts`, `issuer`, `not_after` (seconds since the Unix epoch), `source` (`acme` when the issuer renews it, else `snapshot`). Never a chain or a key. |
@@ -51,12 +51,12 @@ A field of a feature that is not configured is absent, not `null`: a service wit
 | Never shown | How |
 |---|---|
 | `client_ca_pem`, certificate chains and keys, ACME account keys and external account binding keys, `skew_secret` | The view types have no field for them; `tls` shows `client_auth: true`. |
-| `basic_auth` users and hashes, WASM module bytes | A kind reaches the view only through `describe()`: `basic_auth` shows the user count, `wasm` shows `fuel` and `max_memory_bytes`, never the bytes. |
-| The value of a credential `header` or `query` matcher leaf | Replaced by `[redacted]` when the leaf's name contains `authorization`, `cookie`, `token`, `secret`, `key`, `password`, `passwd` or `signature`. Do not put a credential in a matcher: any other name is shown as written. |
+| `basic_auth` and `digest_auth` users and hashes, WASM module bytes, header values set by `headers` | A kind reaches the view only through `describe()`: `basic_auth` and `digest_auth` show the user count, `wasm` shows `fuel` and `max_memory_bytes`, `headers` shows header names. |
+| The value of a `header` or `query` matcher leaf | Replaced by `[value]` for every name, in `header`, `header_regexp`, `query` and `query_regexp`; the names stay. Hosts, paths, methods and client IP ranges are shown as written. |
 | The event feed | It carries `certificate_issued` with private keys; `section=events` is `400`. |
 | Request data | Failed requests have their own endpoint, `GET /v1/apps/{app}/failures`. |
 
-The unit test `every_describe_is_secret_free` compiles one middleware of every built kind (`Stage::BUILT`) and fails when its `describe()` output has a field name containing `password`, `secret`, `key_pem`, `token` or `hash`. It also fails when a kind is built without a fixture, so a new kind cannot skip the check: add its fixture to `every_kind` in `src/overview.rs`.
+Protection is an allowlist plus one value test, not a list of bad names. The view types list the fields they show, and a service or router is never serialized as declared. A middleware shows only its own `describe()`. The integration test `overview_redacts_secrets` pushes one snapshot in which every built middleware kind, every matcher leaf that carries a client's value, the sticky cookie, a transport's client key, the client CA, a certificate and key, `skew_secret` and the ACME account key hold a unique planted string, and fails when any of them appears anywhere in the answer (all sections, all pages). The same fixture function fails when a kind is built (`Stage::BUILT`) without a fixture, so a new kind cannot skip the check: add it to `every_kind` in `tests/overview.rs` with a planted secret in every field that holds one. `every_describe_is_secret_free` is a secondary check that no `describe()` names a field `password`, `secret`, `key_pem`, `token` or `hash`.
 
 ## Against explain
 

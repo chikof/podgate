@@ -257,7 +257,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 .with_access_log(access_log)
                 .with_upstream_policy(upstream_policy)
                 .with_outcomes(outcomes)
-                .with_entry_points(config.entry_points.clone()),
+                .with_entry_points(config.entry_points.clone())
+                .with_metrics_addr(config.metrics_addr),
             timeout,
         ),
     ));

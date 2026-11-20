@@ -440,100 +440,267 @@ async fn overview_without_optional_features() {
     );
 }
 
+/// A string no overview may ever show: unique, so one `contains` finds it.
+fn plant(what: &str) -> String {
+    format!("PLANT-{what}-7f3a9c")
+}
+
+/// A line of a PEM's base64 body.
+fn pem_body(pem: &str) -> String {
+    pem.lines().nth(1).expect("a PEM body line").to_owned()
+}
+
+/// One middleware of every built kind, with a planted secret wherever the kind takes one. A kind
+/// that is built and missing here fails the guard, so no kind reaches the overview unchecked.
+fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
+    let module = wat::parse_str(format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (data (i32.const 0) "{}")
+          (func (export "proxy_abi_version_0_2_1"))
+          (func (export "proxy_on_memory_allocate") (param i32) (result i32) (i32.const 0))
+          (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32) (i32.const 0)))"#,
+        plant("wasm-bytes")
+    ))
+    .expect("valid WAT");
+    let wasm = STANDARD.encode(module);
+    plants.extend([wasm.clone(), wasm[40..72].to_owned()]);
+
+    let password = plant("basic-password");
+    let hash = bcrypt::hash(&password, 10).expect("bcrypt hash");
+    plants.extend([password, hash.clone()]);
+    let ha1 = "7f3a9c0de1b2a45f6c8d90e1a2b3c4d5".to_owned();
+    plants.push(ha1.clone());
+    let (request_value, response_value) = (
+        plant("request-header-value"),
+        plant("response-header-value"),
+    );
+    plants.extend([request_value.clone(), response_value.clone()]);
+
+    let kinds = vec![
+        (
+            "wasm",
+            json!({"wasm_base64": wasm, "fuel": 1000, "max_memory_bytes": 65536}),
+        ),
+        ("add_prefix", json!({"prefix": "/api"})),
+        ("strip_prefix", json!({"prefixes": ["/api"]})),
+        ("strip_prefix_regex", json!({"regexes": ["^/t-[a-z]+"]})),
+        ("replace_path", json!({"path": "/new"})),
+        (
+            "replace_path_regex",
+            json!({"regex": "^/old/(.*)", "replacement": "/new/$1"}),
+        ),
+        ("redirect_scheme", json!({"scheme": "https"})),
+        (
+            "redirect_regex",
+            json!({"regex": "^http://([^/]+)/old/(.*)$", "replacement": "https://$1/new/$2"}),
+        ),
+        (
+            "headers",
+            json!({"request": {"set": {"x-up": request_value}},
+                   "response": {"set": {"x-down": response_value}}}),
+        ),
+        ("content_type", json!({})),
+        ("basic_auth", json!({"users": [format!("alice:{hash}")]})),
+        (
+            "digest_auth",
+            json!({"users": [format!("alice:podgate:{ha1}")], "realm": "podgate"}),
+        ),
+        (
+            "circuit_breaker",
+            json!({"trip_when": {"network_error_ratio": 0.3}}),
+        ),
+        ("buffering", json!({"max_request_body_bytes": 1024})),
+        ("compress", json!({})),
+    ];
+    let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
+    let mut built: Vec<&str> = podgate::middleware::Stage::BUILT.to_vec();
+    declared.sort_unstable();
+    built.sort_unstable();
+    assert_eq!(
+        declared, built,
+        "a middleware kind was built or removed: add or drop its fixture in `every_kind`, with a \
+         planted secret in every field that holds one"
+    );
+    kinds
+}
+
+/// A snapshot of one app that holds a planted secret in everything that can hold one: every
+/// built middleware kind, the four matcher leaves that carry a client's value, the sticky cookie,
+/// a transport's client key, the client CA, a certificate and its key, the skew secret and the
+/// ACME account key. Returns it with every planted string.
+fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
+    let mut plants = Vec::new();
+    let kinds = every_kind(&mut plants);
+    let (ca, cert, client) = (
+        TestCa::new("planted-ca"),
+        TestCert::new(&["a.test"]),
+        TestCert::new(&["client.test"]),
+    );
+    plants.extend([
+        pem_body(&ca.pem),
+        pem_body(&cert.key_pem),
+        pem_body(&cert.cert_pem),
+        pem_body(&client.key_pem),
+    ]);
+    let matchers = [
+        ("header-value", "header", "value"),
+        ("header-regex", "header_regexp", "regex"),
+        ("query-value", "query", "value"),
+        ("query-regex", "query_regexp", "regex"),
+    ];
+    let mut leaves = vec![json!({"host": "a.test"})];
+    for (index, (what, leaf, field)) in matchers.into_iter().enumerate() {
+        let value = plant(&format!("matcher-{what}"));
+        plants.push(value.clone());
+        leaves.push(json!({ leaf: {"name": format!("x-{index}"), field: value}}));
+    }
+    let sticky = plant("sticky-cookie");
+    plants.push(sticky.clone());
+    let skew = plant("skew-secret-0123456789");
+    let account = plant("account-key");
+    let key_authorization = plant("key-authorization");
+    plants.extend([skew.clone(), account.clone(), key_authorization.clone()]);
+
+    let mut a = app("a", &["a.test"], &[serving("r1", upstream)]);
+    a["tls"]["client_ca_pem"] = json!(ca.pem);
+    a["routers"] = json!([
+        router("a", json!({"all": leaves}), "web"),
+        router("p", json!({"host": "p.test"}), "pinned"),
+        router("s", json!({"host": "s.test"}), "secure"),
+    ]);
+    a["services"] = json!([
+        {"name": "pinned", "type": "loadbalancer", "servers": [{"url": format!("http://{upstream}")}],
+         "sticky": {"cookie": {"name": sticky}}},
+        {"name": "secure", "type": "loadbalancer", "transport": "internal",
+         "servers": [{"url": "https://127.0.0.1:9"}]},
+    ]);
+    a["transports"] = json!([{
+        "name": "internal", "type": "servers_transport", "ca_pem": cert.cert_pem,
+        "client_cert": {"cert_pem": client.cert_pem, "key_pem": client.key_pem},
+    }]);
+    a["middlewares"] = kinds
+        .iter()
+        .map(|(kind, config)| {
+            let mut declared = json!({"name": kind, "type": kind});
+            declared
+                .as_object_mut()
+                .expect("object")
+                .extend(config.as_object().expect("object").clone());
+            declared
+        })
+        .collect();
+    let mut pushed = snapshot(1, &[a]);
+    pushed["certificates"] = json!([cert.entry(&["a.test"])]);
+    pushed["skew_secret"] = json!(skew);
+    pushed["acme"] = json!({
+        "issuer_node": "some-other-node",
+        "directory_url": "https://acme.invalid/directory",
+        "account_key_pem": account,
+        "challenges": [{"token": "tok-1", "key_authorization": key_authorization}],
+    });
+    (pushed, plants)
+}
+
 #[tokio::test]
 async fn overview_redacts_secrets() {
     let podgate = Podgate::start().await;
     let upstream = Upstream::start("x").await;
-    let ca = TestCa::new("secret-ca");
-    let cert = TestCert::new(&["a.test"]);
-    let password = "sentinel-password-hunter2";
-    let hash = bcrypt::hash(password, 10).expect("bcrypt hash");
-    let wasm = STANDARD.encode(
-        wat::parse_str(
-            r#"(module
-              (memory (export "memory") 1)
-              (func (export "proxy_abi_version_0_2_1"))
-              (func (export "proxy_on_memory_allocate") (param i32) (result i32) (i32.const 0))
-              (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32) (i32.const 0)))"#,
-        )
-        .expect("valid WAT"),
-    );
-
-    let mut a = app("a", &["a.test"], &[serving("r1", upstream.addr)]);
-    a["tls"]["client_ca_pem"] = json!(ca.pem);
-    a["routers"] = json!([router(
-        "keyed",
-        json!({"all": [{"host": "a.test"}, {"header": {"name": "x-api-key", "value": "sentinel-matcher-key"}}]}),
-        "web"
-    )]);
-    let a = with_middleware(
-        a,
-        "auth",
-        "basic_auth",
-        json!({"users": [format!("alice:{hash}")]}),
-    );
-    let a = with_middleware(
-        a,
-        "filter",
-        "wasm",
-        json!({"wasm_base64": wasm, "fuel": 1000, "max_memory_bytes": 65536}),
-    );
-    let a = with_middleware(
-        a,
-        "h",
-        "headers",
-        json!({"request": {"set": {"x-upstream-auth": "sentinel-header-value"}}}),
-    );
-    let mut pushed = snapshot(1, &[a]);
-    pushed["certificates"] = json!([cert.entry(&["a.test"])]);
-    pushed["skew_secret"] = json!("sentinel-skew-secret-0123456789");
-    pushed["acme"] = json!({
-        "issuer_node": "some-other-node",
-        "directory_url": "https://acme.invalid/directory",
-        "account_key_pem": "sentinel-account-key",
-        "challenges": [{"token": "tok-1", "key_authorization": "sentinel-key-authorization"}],
-    });
+    let (pushed, plants) = planted(upstream.addr);
     push(&podgate, &pushed).await;
 
-    let body = podgate.admin_get("/v1/overview?limit=500").await.body;
-    assert!(
-        body.contains("\"basic_auth\""),
-        "the middleware is listed: {body}"
-    );
-    let body_line = |pem: &str| pem.lines().nth(1).expect("a PEM body line").to_owned();
-    for secret in [
-        hash.as_str(),
-        password,
-        "sentinel-skew-secret-0123456789",
-        "sentinel-account-key",
-        "sentinel-key-authorization",
-        "sentinel-matcher-key",
-        "sentinel-header-value",
-        wasm.as_str(),
-        &wasm[..24],
-        &body_line(&ca.pem),
-        &body_line(&cert.key_pem),
-        &body_line(&cert.cert_pem),
-        "BEGIN",
-        "client_ca_pem",
-        "key_pem",
-        "skew_secret",
-    ] {
-        assert!(
-            !body.contains(secret),
-            "{secret:?} is in the overview: {body}"
-        );
+    // Every section in one answer, and the apps again page by page.
+    let mut bodies = vec![podgate.admin_get("/v1/overview?limit=500").await.body];
+    let mut after = String::new();
+    loop {
+        let page = overview(&podgate, &format!("?section=apps&limit=1{after}")).await;
+        bodies.push(page.to_string());
+        match page["apps"]["next"].as_str() {
+            Some(next) => after = format!("&after={next}"),
+            None => break,
+        }
     }
-    let document: Value = serde_json::from_str(&body).expect("JSON");
-    assert_eq!(app_of(&document, "a")["tls"]["client_auth"], true);
+    for body in &bodies {
+        for secret in plants
+            .iter()
+            .map(String::as_str)
+            .chain(["BEGIN", "client_ca_pem"])
+        {
+            assert!(
+                !body.contains(secret),
+                "{secret:?} is in the overview: {body}"
+            );
+        }
+    }
+
+    // The planted snapshot is really in the view: only the secrets are missing.
+    let document: Value = serde_json::from_str(&bodies[0]).expect("JSON");
+    let a = app_of(&document, "a");
+    assert_eq!(a["tls"]["client_auth"], true);
+    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(15));
     assert_eq!(
-        app_of(&document, "a")["routers"][0]["match"]["all"][1],
-        json!({"header": {"name": "x-api-key", "value": "[redacted]"}})
+        a["routers"][0]["match"]["all"][1],
+        json!({"header": {"name": "x-0", "value": "[value]"}})
     );
     assert_eq!(
-        app_of(&document, "a")["middlewares"][1]["config"],
-        json!({"fuel": 1000, "max_memory_bytes": 65536})
+        a["routers"][0]["match"]["all"][4],
+        json!({"query_regexp": {"name": "x-3", "regex": "[value]"}})
     );
+    assert_eq!(a["services"].as_array().map(Vec::len), Some(3));
+    assert_eq!(items(&document, "certificates").len(), 1);
+}
+
+#[tokio::test]
+async fn every_describe_is_secret_free() {
+    let podgate = Podgate::start().await;
+    let upstream = Upstream::start("x").await;
+    let (pushed, _) = planted(upstream.addr);
+    push(&podgate, &pushed).await;
+
+    // Secondary to the value check above: no `describe()` names a field like a secret.
+    fn names(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    found.push(key.to_ascii_lowercase());
+                    names(child, found);
+                }
+            }
+            Value::Array(list) => list.iter().for_each(|child| names(child, found)),
+            _ => {}
+        }
+    }
+    let document = overview(&podgate, "?section=apps").await;
+    for middleware in app_of(&document, "a")["middlewares"]
+        .as_array()
+        .expect("middlewares")
+    {
+        let mut found = Vec::new();
+        names(&middleware["config"], &mut found);
+        for name in found {
+            for word in ["password", "secret", "key_pem", "token", "hash"] {
+                assert!(
+                    !name.contains(word),
+                    "{} describes itself with the field {name:?}, which names a secret",
+                    middleware["type"]
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn overview_shows_the_metrics_listener() {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = probe.local_addr().expect("addr").to_string();
+    drop(probe);
+    let podgate = Podgate::start_with_env(&[("METRICS_ADDR", &addr)]).await;
+    let shown = overview(&podgate, "?section=summary").await;
+    assert_eq!(shown["summary"]["metrics_addr"], addr);
+
+    let plain = Podgate::start().await;
+    let shown = overview(&plain, "?section=summary").await;
+    assert!(shown["summary"].get("metrics_addr").is_none());
 }
 
 /// Apps `a0` to `a{count-1}`, each with one serving revision.

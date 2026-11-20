@@ -62,6 +62,7 @@ pub struct AppState {
     reverter: Reverter,
     outcomes: Outcomes,
     entry_points: Arc<[EntryPoint]>,
+    metrics_addr: Option<std::net::SocketAddr>,
     overview_slots: Arc<Semaphore>,
 }
 
@@ -89,6 +90,7 @@ impl AppState {
             reverter,
             outcomes,
             entry_points: Arc::default(),
+            metrics_addr: None,
             overview_slots: Arc::new(Semaphore::new(overview::MAX_CONCURRENT)),
         }
     }
@@ -207,6 +209,13 @@ impl AppState {
         self
     }
 
+    /// Reports `addr`, where the read-only metrics listener serves, on `GET /v1/overview`.
+    #[must_use]
+    pub fn with_metrics_addr(mut self, addr: Option<std::net::SocketAddr>) -> Self {
+        self.metrics_addr = addr;
+        self
+    }
+
     /// Watches every applied snapshot and reverts it on a `5xx` spike.
     #[must_use]
     pub fn reverter(&self) -> &Reverter {
@@ -223,6 +232,12 @@ impl AppState {
     #[must_use]
     pub fn entry_points(&self) -> Arc<[EntryPoint]> {
         Arc::clone(&self.entry_points)
+    }
+
+    /// The read-only metrics listener `GET /v1/overview` reports, when the process has one.
+    #[must_use]
+    pub fn metrics_addr(&self) -> Option<std::net::SocketAddr> {
+        self.metrics_addr
     }
 
     /// The slots that cap concurrent `GET /v1/overview` computations.
