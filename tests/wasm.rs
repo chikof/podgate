@@ -179,6 +179,7 @@ async fn wasm_filter_runs() {
     assert_eq!(
         explained.json()["middleware"],
         json!([
+            "acme_http01",
             "route",
             "inflight_admit",
             "tenant_admit",

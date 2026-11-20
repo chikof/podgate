@@ -184,6 +184,7 @@ async fn app_idle_event() {
     assert_eq!(
         explained.json()["middleware"],
         json!([
+            "acme_http01",
             "route",
             "wake_hold",
             "inflight_admit",
