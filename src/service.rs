@@ -123,6 +123,7 @@ impl Service {
     pub fn algorithm(&self) -> Option<&'static str> {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.algorithm()),
+            Self::Static(_) => None,
         }
     }
 
@@ -131,6 +132,7 @@ impl Service {
     pub fn has_health_check(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.health_check().is_some(),
+            Self::Static(_) => false,
         }
     }
 
@@ -139,6 +141,7 @@ impl Service {
     pub fn has_outlier_detection(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.passive().is_some(),
+            Self::Static(_) => false,
         }
     }
 
