@@ -49,7 +49,7 @@ use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
 use crate::client_ip::ForwardedView;
 use crate::clientauth;
-use crate::compress::{self, Gzip};
+use crate::compress::{self, Encoder};
 use crate::entry;
 use crate::error::AppError;
 use crate::events::EventFeed;
@@ -105,8 +105,8 @@ pub struct Ctx {
     /// The tenant's in-flight slot (see [`crate::budget`]), taken by `request_filter` after the
     /// revision is counted and freed in `logging`.
     pub tenant_slot: Option<TenantSlot>,
-    /// The gzip encoder of this response, when it is being compressed.
-    pub compression: Option<Gzip>,
+    /// The encoder of this response, when it is being compressed.
+    pub compression: Option<Encoder>,
     /// Pool partition state of the downstream connection, see [`pool`].
     pub pool: pool::State,
     /// Failed-request capture, begun by `request_filter` for a matched request.
@@ -523,8 +523,17 @@ impl ProxyHttp for Gateway {
             }
         }
         if let Some(slot) = &ctx.tenant_slot {
-            ctx.compression =
-                compress::start(session.req_header(), upstream_response, slot.tenant());
+            let settings = ctx
+                .matched
+                .and_then(|matched| ctx.table.router(matched))
+                .and_then(|(app, router)| middleware::compression(app.stages(), router.chain()))
+                .unwrap_or_else(|| compress::Settings::platform());
+            ctx.compression = compress::start(
+                session.req_header(),
+                upstream_response,
+                slot.tenant(),
+                settings,
+            );
         }
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             middleware::run_response(
@@ -546,7 +555,7 @@ impl ProxyHttp for Gateway {
     ) -> pingora::Result<Option<Duration>> {
         ctx.failures.response_chunk(body.as_ref());
         compress::filter(&mut ctx.compression, body, end_of_stream)
-            .map_err(|err| Error::because(InternalError, "gzip encoding failed", err))?;
+            .map_err(|err| Error::because(InternalError, "compression failed", err))?;
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             middleware::run_response_body(
                 app.stages(),

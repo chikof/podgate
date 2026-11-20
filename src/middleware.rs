@@ -38,6 +38,7 @@ pub mod add_prefix;
 pub mod basic_auth;
 pub mod buffering;
 pub mod circuit_breaker;
+pub mod compress;
 pub mod content_type;
 pub mod headers;
 mod path_rewrite;
@@ -479,7 +480,7 @@ kinds! {
 
     "buffering" => Buffering(buffering::Buffering),
 
-    "compress" => unbuilt,
+    "compress" => Compress(compress::Compress),
 
     "errors" => unbuilt,
 
@@ -593,6 +594,23 @@ pub fn run_response_body(
         }
     }
     Ok(())
+}
+
+/// The settings of the `compress` stage that decides for `chain`: the last one, so a router's own
+/// chain overrides the app's `default_chain`. `None` when the chain has no `compress`, which
+/// leaves the platform default ([`crate::compress::Settings::platform`]).
+#[must_use]
+pub fn compression<'a>(
+    stages: &'a [Named],
+    chain: &[usize],
+) -> Option<&'a crate::compress::Settings> {
+    chain
+        .iter()
+        .rev()
+        .find_map(|index| match &stages.get(*index)?.stage {
+            Stage::Compress(compress) => Some(compress.settings()),
+            _ => None,
+        })
 }
 
 /// Runs the finish hooks of `chain` in order, once the request is over.

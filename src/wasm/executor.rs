@@ -10,7 +10,7 @@
 //!   cannot get a permit within `WASM_QUEUE_TIMEOUT_MS` is refused.
 //! - Memory. Before a run is instantiated, the filter's `max_memory_bytes` is reserved from the
 //!   tenant's `max_buffer_bytes`, the same budget response compression draws on
-//!   ([`crate::compress::RESERVATION_BYTES`] per compressed response). A run that does not fit is
+//!   ([`crate::compress::Algorithm::reservation`] per compressed response). A run that does not fit is
 //!   refused.
 //!
 //! Both refusals are `503` with `retry-after`, never a partial run: [`AppError::FilterBusy`] for no
