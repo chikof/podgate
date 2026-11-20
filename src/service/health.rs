@@ -50,9 +50,10 @@
 //!   (64 by default); each has a timeout of `timeout_secs`; a response head is read up to
 //!   [`MAX_HEAD_BYTES`] and a body up to [`MAX_BODY_BYTES`]. Probes are not requests: they take
 //!   no tenant slot, no backend slot and are not counted in the outcomes auto-revert reads.
-//! - **Transport.** Plain HTTP only until upstream TLS lands; `scheme: "https"` is
-//!   refused with `service_not_built`. `HttpProbe::peer` is the one place that builds the
-//!   `HttpPeer`: change 0039 makes it use the service's transport there.
+//! - **Transport.** [`Check::peer`] builds the `HttpPeer` from the service's transport
+//!   ([`Upstream::peer`]): an `https://` server is probed over TLS with the SNI, trust anchors and
+//!   client certificate its requests use, and `scheme` overrides the server's. The dialled IP is
+//!   still checked against the upstream policy.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -79,7 +80,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use super::upstream_policy::UpstreamPolicy;
-use super::{Server, ServerState, Service};
+use super::{Server, ServerState, Service, Upstream};
 use crate::budget::Escaped;
 use crate::compile::Invalid;
 use crate::router::digest;
@@ -282,6 +283,7 @@ pub struct Check {
     headers: Box<[(HeaderName, HeaderValue)]>,
     host: Option<Box<str>>,
     port: Option<u16>,
+    tls: Option<bool>,
     fingerprint: u64,
 }
 
@@ -299,8 +301,7 @@ impl Check {
     ///
     /// `invalid_service` for a field that is missing, unknown, out of range or malformed (a
     /// path that is not `/...`, a status outside `100..=599`, a header the check may not set,
-    /// a body regex on a `HEAD` probe, a regex that is too large); `service_not_built` for
-    /// `scheme: "https"`, which needs upstream transports.
+    /// a body regex on a `HEAD` probe, a regex that is too large, an unknown `scheme`).
     pub fn compile(value: &Value) -> Result<Self, Invalid> {
         let config: Config = serde_json::from_value(value.clone()).map_err(invalid)?;
         if !config.path.starts_with('/')
@@ -338,19 +339,14 @@ impl Check {
                 .filter(|method| *method != Method::CONNECT)
                 .ok_or_else(|| invalid(format!("method {name:?} is not an HTTP method")))?,
         };
-        match config.scheme.as_deref() {
-            None | Some("http") => {}
-            Some("https") => {
-                return Err(Invalid::new(
-                    "service_not_built",
-                    "loadbalancer health_check scheme https needs upstream TLS transports, \
-                     which are planned and not built yet",
-                ));
-            }
+        let tls = match config.scheme.as_deref() {
+            None => None,
+            Some("http") => Some(false),
+            Some("https") => Some(true),
             Some(other) => {
                 return Err(invalid(format!("scheme {other:?} is not http or https")));
             }
-        }
+        };
         let statuses: Box<[StatusRange]> = match &config.expect_status {
             None => Box::new([StatusRange {
                 low: 200,
@@ -393,6 +389,7 @@ impl Check {
             headers,
             host,
             port: config.port,
+            tls,
             fingerprint: digest(value.to_string()),
         })
     }
@@ -418,6 +415,32 @@ impl Check {
             Some(port) => SocketAddr::new(server.ip(), port),
             None => server,
         }
+    }
+
+    /// The peer a probe of `upstream` dials: its server's IP on `port` when the check sets one,
+    /// over TLS when the server is `https://` (or `scheme` says so), with the transport of the
+    /// service: the SNI, trust anchors and client certificate its requests use. Timeouts are
+    /// the check's `timeout_secs`.
+    #[must_use]
+    pub fn peer(&self, upstream: Upstream<'_>) -> HttpPeer {
+        let server = upstream.server;
+        let probed = Server {
+            url: Box::default(),
+            addr: self.target(server.addr),
+            tls: self.tls.unwrap_or(server.tls),
+            weight: server.weight,
+            state: Arc::clone(&server.state),
+        };
+        let mut peer = Upstream {
+            server: &probed,
+            transport: upstream.transport,
+        }
+        .peer();
+        let timeout = self.schedule.timeout;
+        peer.options.connection_timeout = Some(timeout);
+        peer.options.read_timeout = Some(timeout);
+        peer.options.write_timeout = Some(timeout);
+        peer
     }
 
     /// The request bytes for a probe of `target`: `Host` is the check's `hostname`, else the
@@ -666,7 +689,7 @@ where
 pub struct HttpProbe {
     check: Arc<Check>,
     tenant: Box<str>,
-    server: SocketAddr,
+    peer: HttpPeer,
     policy: UpstreamPolicy,
     connector: Arc<TransportConnector>,
 }
@@ -675,26 +698,27 @@ impl fmt::Debug for HttpProbe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpProbe")
             .field("tenant", &self.tenant)
-            .field("server", &self.server)
+            .field("peer", &self.peer._address)
+            .field("tls", &self.peer.is_tls())
             .finish_non_exhaustive()
     }
 }
 
 impl HttpProbe {
-    /// A probe of `server`, a declared server of an app of `tenant`, by `check`, subject to
-    /// `policy`, dialling through `connector`.
+    /// A probe by `check` of the declared server that `peer` (from [`Check::peer`]) points at,
+    /// for an app of `tenant`, subject to `policy`, dialling through `connector`.
     #[must_use]
     pub fn new(
         check: Arc<Check>,
         tenant: &str,
-        server: SocketAddr,
+        peer: HttpPeer,
         policy: UpstreamPolicy,
         connector: Arc<TransportConnector>,
     ) -> Self {
         Self {
             check,
             tenant: tenant.into(),
-            server,
+            peer,
             policy,
             connector,
         }
@@ -706,26 +730,16 @@ impl HttpProbe {
         Arc::new(TransportConnector::new(None))
     }
 
-    /// The peer to dial. The seam for upstream TLS: it builds the peer from the
-    /// service's transport there, so `https://` servers are probed with the SNI, trust anchors
-    /// and client certificate their requests use.
-    fn peer(&self, target: SocketAddr, timeout: Duration) -> HttpPeer {
-        let mut peer = HttpPeer::new(target, false, String::new());
-        peer.options.connection_timeout = Some(timeout);
-        peer.options.read_timeout = Some(timeout);
-        peer.options.write_timeout = Some(timeout);
-        peer
-    }
-
     /// Probes the server once. The caller bounds the time ([`Scheduler`] does).
     pub async fn run(&self) -> Verdict {
-        let target = self.check.target(self.server);
+        let Some(target) = self.peer._address.as_inet().copied() else {
+            return Verdict::fail("the probe target is not an IP address");
+        };
         // The exact address about to be dialled, every time.
         if let Err(refused) = self.policy.check(&self.tenant, target.ip()) {
             return Verdict::fail(format!("refused by the upstream address policy: {refused}"));
         }
-        let peer = self.peer(target, self.check.schedule.timeout);
-        let mut stream = match Box::pin(self.connector.new_stream(&peer)).await {
+        let mut stream = match Box::pin(self.connector.new_stream(&self.peer)).await {
             Ok(stream) => stream,
             Err(err) => return Verdict::fail(format!("connect: {err}")),
         };
@@ -982,6 +996,9 @@ impl HealthService {
                     continue;
                 };
                 for server in balancer.servers() {
+                    let Some(upstream) = balancer.upstream(server.addr) else {
+                        continue;
+                    };
                     let key = Key {
                         owner: HTTP_OWNER,
                         app: app.id().into(),
@@ -995,7 +1012,7 @@ impl HealthService {
                         key,
                         check.schedule(),
                         Arc::clone(&server.state),
-                        self.probe_of(check, app.tenant(), server),
+                        self.probe_of(check, app.tenant(), upstream),
                     );
                 }
             }
@@ -1004,11 +1021,11 @@ impl HealthService {
             .retain(HTTP_OWNER, |key| wanted.contains(key));
     }
 
-    fn probe_of(&self, check: &Arc<Check>, tenant: &str, server: &Server) -> ProbeFn {
+    fn probe_of(&self, check: &Arc<Check>, tenant: &str, upstream: Upstream<'_>) -> ProbeFn {
         let probe = Arc::new(HttpProbe::new(
             Arc::clone(check),
             tenant,
-            server.addr,
+            check.peer(upstream),
             self.policy.clone(),
             Arc::clone(&self.connector),
         ));
@@ -1188,10 +1205,6 @@ mod test {
         for case in cases {
             assert_eq!(refused(&case).code, "invalid_service", "{case}");
         }
-        assert_eq!(
-            refused(&json!({ "scheme": "https" })).code,
-            "service_not_built"
-        );
         for missing in ["path", "interval_secs", "timeout_secs"] {
             let mut value = json!({ "path": "/h", "interval_secs": 1, "timeout_secs": 1 });
             value.as_object_mut().expect("object").remove(missing);

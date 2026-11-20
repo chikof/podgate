@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use common::{Podgate, app, snapshot};
 use podgate::service::health::{Check, HttpProbe, Verdict};
 use podgate::service::upstream_policy::UpstreamPolicy;
+use podgate::service::{Server, Transport, Upstream};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
+use tokio_rustls::TlsAcceptor;
 
 /// The path the backends treat as the health endpoint; everything else is traffic.
 const HEALTH_PATH: &str = "/healthz";
@@ -48,10 +50,18 @@ struct Backend {
 
 impl Backend {
     async fn start(name: &'static str) -> Self {
-        Self::start_with(name, Arc::default()).await
+        Self::start_on(name, Arc::default(), None).await
     }
 
     async fn start_with(name: &'static str, gauge: Arc<Gauge>) -> Self {
+        Self::start_on(name, gauge, None).await
+    }
+
+    async fn start_tls(name: &'static str, acceptor: TlsAcceptor) -> Self {
+        Self::start_on(name, Arc::default(), Some(acceptor)).await
+    }
+
+    async fn start_on(name: &'static str, gauge: Arc<Gauge>, tls: Option<TlsAcceptor>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let behaviour = Arc::new(Behaviour {
@@ -67,9 +77,10 @@ impl Backend {
             Arc::clone(&gauge),
         );
         tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(
-                    stream,
+            while let Ok((tcp, _)) = listener.accept().await {
+                tokio::spawn(accept(
+                    tls.clone(),
+                    tcp,
                     name,
                     Arc::clone(&shared),
                     Arc::clone(&seen),
@@ -103,8 +114,27 @@ impl Backend {
     }
 }
 
-async fn serve(
-    mut stream: TcpStream,
+/// Serves one connection, over TLS when the backend has an acceptor.
+async fn accept(
+    tls: Option<TlsAcceptor>,
+    tcp: TcpStream,
+    name: &'static str,
+    behaviour: Arc<Behaviour>,
+    probes: Arc<Mutex<Vec<String>>>,
+    gauge: Arc<Gauge>,
+) {
+    match tls {
+        None => serve(tcp, name, behaviour, probes, gauge).await,
+        Some(acceptor) => {
+            if let Ok(stream) = acceptor.accept(tcp).await {
+                Box::pin(serve(stream, name, behaviour, probes, gauge)).await;
+            }
+        }
+    }
+}
+
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     name: &'static str,
     behaviour: Arc<Behaviour>,
     probes: Arc<Mutex<Vec<String>>>,
@@ -541,19 +571,29 @@ async fn health_probe_concurrency_capped() {
     );
 }
 
+/// A probe by a check with `extra` fields of the plain-HTTP server at `addr`, through the
+/// default transport.
+fn probe_of(addr: SocketAddr, extra: &Value, policy: UpstreamPolicy) -> HttpProbe {
+    let rule = Arc::new(Check::compile(&check(extra)).expect("compiles"));
+    let server = Server {
+        url: Box::default(),
+        addr,
+        tls: false,
+        weight: 1,
+        state: Arc::default(),
+    };
+    let transport = Transport::default();
+    let peer = rule.peer(Upstream {
+        server: &server,
+        transport: &transport,
+    });
+    HttpProbe::new(rule, "t1", peer, policy, HttpProbe::connector())
+}
+
 #[tokio::test]
 async fn health_probe_obeys_upstream_policy() {
     let backend = Backend::start("b").await;
-    let probe = |policy: UpstreamPolicy| {
-        let rule = Check::compile(&check(&json!({}))).expect("compiles");
-        HttpProbe::new(
-            Arc::new(rule),
-            "t1",
-            backend.addr,
-            policy,
-            HttpProbe::connector(),
-        )
-    };
+    let probe = |policy: UpstreamPolicy| probe_of(backend.addr, &json!({}), policy);
 
     let denying = UpstreamPolicy::parse(r#"{"deny": ["127.0.0.0/8"]}"#).expect("policy");
     let verdict = probe(denying.clone()).run().await;
@@ -688,7 +728,6 @@ async fn health_check_invalid_rejected() {
         (json!({ "interval_secs": 0 }), "invalid_service"),
         (json!({ "expect_status": ["x"] }), "invalid_service"),
         (json!({ "headers": { "Host": "evil" } }), "invalid_service"),
-        (json!({ "scheme": "https" }), "service_not_built"),
     ];
     for (version, (extra, code)) in (1_u64..).zip(cases) {
         let pushed = podgate
@@ -700,4 +739,130 @@ async fn health_check_invalid_rejected() {
         assert_eq!(pushed.status, 422, "{extra}: {pushed:?}");
         assert_eq!(pushed.json()["conflicts"][0]["code"], code, "{extra}");
     }
+}
+
+/// A private certificate authority and what it issues for the TLS backends.
+struct Ca {
+    issuer: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
+    pem: String,
+}
+
+impl Ca {
+    fn new(name: &str) -> Self {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, name);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let issuer = rcgen::CertifiedIssuer::self_signed(
+            params,
+            rcgen::KeyPair::generate().expect("CA key"),
+        )
+        .expect("self-signed CA");
+        let pem = issuer.pem();
+        Self { issuer, pem }
+    }
+
+    /// An acceptor presenting a certificate for 127.0.0.1 issued by this CA.
+    fn acceptor(&self) -> TlsAcceptor {
+        let key = rcgen::KeyPair::generate().expect("leaf key");
+        let params =
+            rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).expect("leaf params");
+        let cert = params.signed_by(&key, &self.issuer).expect("sign leaf");
+        let chain = vec![cert.der().clone()];
+        let key = rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).expect("key");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .expect("server config");
+        TlsAcceptor::from(Arc::new(config))
+    }
+}
+
+/// An app whose service `web` has one `https://` server and trusts `ca` through a transport.
+fn tls_app(backend: &Backend, ca: &Ca, health_check: Value) -> Value {
+    let mut tls = health_app("x", "x.test", &[backend.addr], health_check);
+    tls["revisions"][0]["services"][0]["servers"][0]["url"] =
+        json!(format!("https://{}", backend.addr));
+    tls["revisions"][0]["services"][0]["transport"] = json!("private");
+    tls["transports"] =
+        json!([{ "name": "private", "type": "servers_transport", "ca_pem": ca.pem }]);
+    tls
+}
+
+#[tokio::test]
+async fn health_https_probe_uses_the_transport() {
+    let podgate = Podgate::start().await;
+    let ca = Ca::new("private ca");
+    let backend = Backend::start_tls("secure", ca.acceptor()).await;
+    push(
+        &podgate,
+        &snapshot(1, &[tls_app(&backend, &ca, check(&json!({})))]),
+    )
+    .await;
+
+    // A probe is recorded only after the TLS handshake with the private CA succeeded.
+    eventually("the TLS server was probed twice", 20, async || {
+        backend.probed() >= 2
+    })
+    .await;
+    assert_eq!(podgate.get("x.test", "/").await.body, "secure");
+    backend.set_status(503);
+    eventually("the failing TLS server is marked down", 20, async || {
+        answers_503(&podgate, "x.test").await
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn health_https_probe_verifies_the_certificate() {
+    let podgate = Podgate::start().await;
+    let trusted = Ca::new("trusted");
+    let stranger = Ca::new("stranger");
+    // The server's certificate comes from a CA the transport does not trust.
+    let backend = Backend::start_tls("secure", stranger.acceptor()).await;
+    push(
+        &podgate,
+        &snapshot(1, &[tls_app(&backend, &trusted, check(&json!({})))]),
+    )
+    .await;
+    eventually("the untrusted server is marked down", 20, async || {
+        answers_503(&podgate, "x.test").await
+    })
+    .await;
+    assert_eq!(backend.probed(), 0, "no probe got past the handshake");
+}
+
+#[tokio::test]
+async fn health_https_scheme_override_obeys_policy() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let rule = json!({ "scheme": "https" });
+    let denying = UpstreamPolicy::parse(r#"{"deny": ["127.0.0.0/8"]}"#).expect("policy");
+    let verdict = probe_of(addr, &rule, denying).run().await;
+    assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+    let dialled = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+    assert!(dialled.is_err(), "a TLS probe dialled a denied address");
+
+    // Allowed, the override makes the probe speak TLS to the plain listener: it connects and
+    // the handshake fails.
+    let allowed = probe_of(addr, &rule, UpstreamPolicy::allow_all());
+    let probe = tokio::spawn(async move { allowed.run().await });
+    let (mut tcp, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("connected")
+        .expect("accept");
+    let mut hello = [0_u8; 3];
+    tcp.read_exact(&mut hello).await.expect("a TLS record");
+    assert_eq!(hello[0], 0x16, "the probe opened with a TLS handshake");
+    drop(tcp);
+    assert!(matches!(probe.await.expect("probe"), Verdict::Fail(_)));
 }

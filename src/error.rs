@@ -39,6 +39,10 @@ pub enum AppError {
     /// Nothing can serve the request now: `503 Service Unavailable`.
     #[error("{0}")]
     Unavailable(Box<str>),
+    /// A revision takes requests but every server of the service is unhealthy or ejected:
+    /// `503 Service Unavailable`. The app is not asleep, so nothing wakes it.
+    #[error("no healthy upstream available")]
+    NoHealthyUpstream,
     /// The tenant is at its in-flight limit: `503`, and the client should retry in a second.
     #[error("tenant is over its in-flight limit")]
     Overloaded,
@@ -94,6 +98,7 @@ impl AppError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unavailable(_)
+            | Self::NoHealthyUpstream
             | Self::Overloaded
             | Self::Saturated
             | Self::WakeTimeout
@@ -162,6 +167,7 @@ impl AppError {
             Self::FilterBusy => "filter_busy",
             Self::AuthBusy => "auth_busy",
             Self::Unavailable(_) => "no_upstream",
+            Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
         }
     }
@@ -213,9 +219,8 @@ impl From<RouteError> for AppError {
     fn from(err: RouteError) -> Self {
         match err {
             RouteError::NoRoute => Self::NotFound,
-            RouteError::NoUpstream | RouteError::AllUnhealthy => {
-                Self::Unavailable(err.to_string().into())
-            }
+            RouteError::NoUpstream => Self::Unavailable(err.to_string().into()),
+            RouteError::AllUnhealthy => Self::NoHealthyUpstream,
         }
     }
 }

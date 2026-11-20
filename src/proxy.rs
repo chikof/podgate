@@ -430,7 +430,9 @@ impl ProxyHttp for Gateway {
                     continue;
                 }
                 Err(err) => {
-                    respond::write_error(session, &AppError::from(err)).await?;
+                    let err = AppError::from(err);
+                    ctx.access.refused(&err);
+                    respond::write_error(session, &err).await?;
                     return Ok(true);
                 }
             };

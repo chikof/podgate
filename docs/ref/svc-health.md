@@ -22,7 +22,7 @@ A `loadbalancer` with a `health_check` is probed by podgate: a server that fails
 | `expect_body_regex` | none | The probe passes only if the regex matches the first 4 KiB of the body. Not allowed with `HEAD`. Matching is linear time and the compiled size is capped. | none | `health_body` |
 | `headers` | none | Extra request headers, at most 32. `Host`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`, `Expect`, `Keep-Alive` and `Proxy-Connection` cannot be set. | `headers` | `health_headers` |
 | `hostname` | the address probed | The `Host` header, with an optional `:port`. | `hostname` | `health_headers` |
-| `scheme` | `http` | `https` is refused with `service_not_built` until upstream TLS transports land; then it probes with the service's transport. | `scheme` | `health_uri` scheme |
+| `scheme` | `http` | Overrides the server's scheme: `https` probes over TLS with the service's transport (trust anchors, SNI, client certificate), `http` probes in the clear. Unset: the scheme of the server URL. | `scheme` | `health_uri` scheme |
 | `port` | the server's port | Probe another port of the same IP, such as a management port. | `port` | `health_port` |
 | `healthy_threshold` | `1` | Consecutive passes that mark a down server up, 1..=100. | none | `health_passes` |
 | `unhealthy_threshold` | `1` | Consecutive failures that mark an up server down, 1..=100. | none | `health_fails` |
@@ -41,7 +41,7 @@ A field that is missing, unknown or out of range is `invalid_service`, and the w
 
 - Only the declared servers: the IP of the server, on `port` when the check sets one. Nothing from a request, a response header or a `Location` is ever dialled; a redirect is read and not followed.
 - Every probe calls the upstream address policy (`docs/ref/upstream-policy.md`) with the tenant and the exact IP it is about to dial. A refusal fails the probe and counts in `podgate_upstream_refused_total{tenant}`.
-- Probes connect through Pingora's `TransportConnector`, the connect path of the proxy. The seam for upstream TLS is `HttpProbe::peer` in `src/service/health.rs`.
+- Probes connect through Pingora's `TransportConnector`, the connect path of the proxy. The peer comes from the service's transport (`Check::peer`, via `Upstream::peer`), so an `https://` server is probed with the trust anchors, SNI and client certificate of its requests, and the dialled IP is still checked against the policy.
 
 ## Bounds
 

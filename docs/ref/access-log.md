@@ -43,7 +43,7 @@ Optional fields, written only when named `keep` or `redact`: `query`, `user_agen
 
 - `client_ip` is the address podgate resolved behind trusted proxies (`docs/ref/client-ip.md`), never a header an untrusted peer sent.
 - `entry_point` is the name of the entry point the request arrived on (`Ctx.entry_point`).
-- `origin` is `upstream` when an upstream answered, else `podgate`. `reason` says why podgate itself refused or failed the request: a stage notes it (`ctx.access.reason`, `ctx.access.refused(&err)`), else it is derived from how far the request got: `bad_request`, `misdirected`, `client_cert_required`, `no_route`, `no_upstream`, `over_budget`, `backend_saturated`, `wake_timeout`, `filter_busy`, `middleware`, `upstream_unavailable`, `no_response` (the client left before an answer). Middlewares that refuse for their own reason set it: `rate_limited`, `circuit_open`, `auth_failed`.
+- `origin` is `upstream` when an upstream answered, else `podgate`. `reason` says why podgate itself refused or failed the request: a stage notes it (`ctx.access.reason`, `ctx.access.refused(&err)`), else it is derived from how far the request got: `bad_request`, `misdirected`, `client_cert_required`, `no_route`, `no_upstream`, `no_healthy_upstream`, `over_budget`, `backend_saturated`, `wake_timeout`, `filter_busy`, `middleware`, `upstream_unavailable`, `no_response` (the client left before an answer). Middlewares that refuse for their own reason set it: `rate_limited`, `circuit_open`, `auth_failed`.
 - `request_id` is the `X-Request-Id` a **trusted** peer sent (a short string of visible ASCII), else a generated id. An untrusted client never picks it, so it cannot choose whether sampling logs it.
 - `retry_attempts` counts retries the retry middleware made.
 
