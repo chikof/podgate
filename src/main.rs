@@ -1,10 +1,9 @@
-//! `podgate` binary: read config, start logging, serve until SIGINT/SIGTERM.
+//! `podgate` binary: read config, start logging, run the proxy until it is told to stop.
 
-use podgate::{Config, init_tracing, serve, shutdown_signal};
+use podgate::{Config, init_tracing, run};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     init_tracing(config.log_format);
-    serve(&config, shutdown_signal()).await
+    run(&config)
 }
