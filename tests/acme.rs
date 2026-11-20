@@ -552,7 +552,21 @@ async fn acme_http01_served() {
             .await;
         assert_eq!(
             unknown.body, "upstream body",
-            "a token the snapshot does not hold is routed like any request"
+            "a token the snapshot does not hold is routed like any request: {unknown:?}"
+        );
+        // The answered challenges took no tenant slot, and the routed request gives its slot
+        // back when its `logging` callback runs, which can be just after the client has the body.
+        let mut metrics = String::new();
+        for _ in 0..40 {
+            metrics = node.admin_get("/metrics").await.body;
+            if metrics.contains("podgate_tenant_inflight{tenant=\"t1\"} 0\n") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            metrics.contains("podgate_tenant_inflight{tenant=\"t1\"} 0\n"),
+            "tenant slots leaked:\n{metrics}"
         );
     }
 

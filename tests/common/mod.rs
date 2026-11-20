@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -105,10 +105,48 @@ fn get_request(host: &str, path: &str) -> String {
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a free port")
+        .expect("bind free port")
         .local_addr()
         .expect("local addr")
         .port()
+}
+
+/// Starts of `podgate` tried before the harness gives up; see [`Podgate::wait_until_ready`].
+const START_ATTEMPTS: u32 = 5;
+/// Longest one start attempt waits for the process to listen.
+const START_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether process `pid` has a TCP socket listening on loopback `port`.
+fn listens(pid: u32, port: u16) -> bool {
+    let wanted = format!(":{port:04X}");
+    let inodes: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|table| std::fs::read_to_string(table).ok())
+        .flat_map(|table| {
+            table
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let columns: Vec<&str> = line.split_whitespace().collect();
+                    // Columns: sl, local_address, rem_address, st, ..., inode (index 9).
+                    let local = columns.get(1)?;
+                    let state = columns.get(3)?;
+                    (*state == "0A" && local.ends_with(&wanted))
+                        .then(|| format!("socket:[{}]", columns.get(9).copied().unwrap_or("")))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.filter_map(Result::ok)
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .any(|target| {
+            inodes
+                .iter()
+                .any(|inode| target.to_string_lossy() == *inode)
+        })
 }
 
 /// A running `podgate` process. Killed and cleaned up on drop.
@@ -133,6 +171,27 @@ impl Podgate {
     /// [`Self::start`] with extra environment variables, for settings the default does not
     /// cover.
     pub async fn start_with_env(extra_env: &[(&str, &str)]) -> Self {
+        Self::start_on(extra_env, None).await
+    }
+
+    /// [`Self::start_with_env`], the first attempt on the given proxy port instead of a
+    /// free one. For testing the harness itself: a port taken by someone else must not fool it.
+    pub async fn start_on(extra_env: &[(&str, &str)], first_proxy_port: Option<u16>) -> Self {
+        let mut failures = Vec::new();
+        for attempt in 0..START_ATTEMPTS {
+            let ports = first_proxy_port
+                .filter(|_| attempt == 0)
+                .map(|proxy| (proxy, free_port()))
+                .unwrap_or_else(|| (free_port(), free_port()));
+            match Self::try_start(extra_env, ports).await {
+                Ok(podgate) => return podgate,
+                Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
+            }
+        }
+        panic!("podgate did not start:\n{}", failures.join("\n"));
+    }
+
+    async fn try_start(extra_env: &[(&str, &str)], ports: (u16, u16)) -> Result<Self, String> {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "podgate-test-{}-{}",
@@ -140,8 +199,8 @@ impl Podgate {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let proxy_addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
-        let tls_addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
+        let proxy_addr = SocketAddr::from(([127, 0, 0, 1], ports.0));
+        let tls_addr = SocketAddr::from(([127, 0, 0, 1], ports.1));
         let admin_socket = dir.join("admin.sock");
         let child = Command::new(env!("CARGO_BIN_EXE_podgate"))
             .env("PROXY_ADDR", proxy_addr.to_string())
@@ -153,28 +212,48 @@ impl Podgate {
             .stdin(Stdio::null())
             .spawn()
             .expect("spawn podgate");
-        let podgate = Self {
+        let mut podgate = Self {
             child,
             dir,
             proxy_addr,
             tls_addr,
             admin_socket,
         };
-        podgate.wait_until_ready().await;
-        podgate
+        // On `Err`, dropping `podgate` kills the process and removes its directory.
+        podgate.wait_until_ready().await?;
+        Ok(podgate)
     }
 
-    async fn wait_until_ready(&self) {
-        for _ in 0..200 {
+    /// Ready when `/readyz` answers 200 and this process itself listens on both proxy ports.
+    ///
+    /// The ports come from [`free_port`], which releases them again; between that and the bind
+    /// another process (a test running in parallel) can take one. Pingora then retries the bind
+    /// for as long as the port is busy, and a plain connect succeeds against the squatter, so
+    /// the test would talk to somebody else's proxy. Checking who owns the listener closes that.
+    async fn wait_until_ready(&mut self) -> Result<(), String> {
+        let deadline = Instant::now() + START_WAIT;
+        while Instant::now() < deadline {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Err(format!("podgate exited with {status}"));
+            }
             if let Ok(mut stream) = UnixStream::connect(&self.admin_socket).await {
                 let ready = exchange(&mut stream, &get_request("x", "/readyz")).await;
-                if ready.status == 200 && TcpStream::connect(self.proxy_addr).await.is_ok() {
-                    return;
+                let pid = self.child.id();
+                if ready.status == 200
+                    && listens(pid, self.proxy_addr.port())
+                    && listens(pid, self.tls_addr.port())
+                {
+                    return Ok(());
                 }
             }
             sleep(Duration::from_millis(50)).await;
         }
-        panic!("podgate did not become ready");
+        Err(format!(
+            "not ready after {START_WAIT:?}: proxy port {} or tls port {} is not listened on by pid {}",
+            self.proxy_addr.port(),
+            self.tls_addr.port(),
+            self.child.id()
+        ))
     }
 
     /// `GET path` on the admin socket.
