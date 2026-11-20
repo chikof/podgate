@@ -77,6 +77,9 @@ pub struct App {
     /// a request to an app with no upstream gets `503`.
     #[serde(default)]
     pub scale_to_zero: Option<ScaleToZero>,
+    /// WASM request filters, run in order on the request headers. Absent: none.
+    #[serde(default)]
+    pub filters: Vec<Filter>,
 }
 
 /// Scale-to-zero policy of an app.
@@ -91,6 +94,31 @@ pub struct ScaleToZero {
 
 fn default_wake_timeout_secs() -> u64 {
     30
+}
+
+/// One WASM request filter of an app: a proxy-wasm module and the limits it runs under.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Filter {
+    /// The module in the WebAssembly binary format, standard base64.
+    pub wasm_base64: String,
+    /// Instructions the filter may execute per request; running out ends the request with `500`.
+    pub fuel: u64,
+    /// Most bytes of linear memory the filter may hold; growing past it ends the request with
+    /// `500`.
+    pub max_memory_bytes: u64,
+}
+
+impl fmt::Debug for Filter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Filter")
+            .field(
+                "wasm_base64",
+                &format_args!("{} bytes", self.wasm_base64.len()),
+            )
+            .field("fuel", &self.fuel)
+            .field("max_memory_bytes", &self.max_memory_bytes)
+            .finish()
+    }
 }
 
 /// How an app gets certificates, plus optional client authentication.

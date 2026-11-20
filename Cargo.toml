@@ -17,6 +17,7 @@ base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bytes = "1.12.2"
 crc32fast = "1.5.5"
 hmac = "0.13.0"
+http = "1.5.0"
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 rustls-pki-types = "1.16.0"
@@ -28,6 +29,7 @@ tokio = { version = "1.54.1", features = ["net", "rt", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+wasmtime = { version = "50.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [dev-dependencies]
 # tests/common: raw HTTP/1.1 over TCP and unix sockets, plus a tiny upstream server.
@@ -36,7 +38,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pe
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 h2 = "0.4.20"
-http = "1.5.0"
+wat = "1.263.0"
 
 [lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review

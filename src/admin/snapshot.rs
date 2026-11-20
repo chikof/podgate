@@ -24,7 +24,11 @@ pub(super) fn routes() -> Router<AppState> {
 async fn put_snapshot(State(state): State<AppState>, body: Bytes) -> Result<Json<Value>, AppError> {
     let snapshot: Snapshot = serde_json::from_slice(&body)
         .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
-    state.table().apply(&snapshot)?;
+    // Compiling can be slow (WASM filter modules): keep it off the admin runtime's workers.
+    let table = state.table().clone();
+    let snapshot = tokio::task::spawn_blocking(move || table.apply(&snapshot).map(|()| snapshot))
+        .await
+        .map_err(|err| AppError::Internal(err.into()))??;
     state.inflight().sync(&state.table().load());
     state.failures().retain_apps(&state.table().load());
     Ok(Json(json!({ "version": snapshot.version })))

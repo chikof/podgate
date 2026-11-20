@@ -50,13 +50,15 @@ use crate::skew;
 use crate::sni;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
 use crate::wake::{self, Wake};
+use crate::wasm;
 
 /// Routing attempts before a request gives up; see `Gateway::request_filter`.
 const MAX_ROUTE_ATTEMPTS: u8 = 3;
 
 /// The request-path stages `request_filter` runs for `app`, in the order it runs them; `tls`
 /// says the request arrived over a TLS connection. A stage that cannot act for this app is
-/// left out: `sni_check` never refuses an app that sets `allow_domain_fronting`.
+/// left out: `sni_check` never refuses an app that sets `allow_domain_fronting`, and
+/// `wasm_filters` only runs for an app with filters.
 ///
 /// Every stage appends one line here, next to where `request_filter` calls it.
 #[must_use]
@@ -72,6 +74,9 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     chain.push("inflight_admit");
     chain.push("tenant_admit");
     chain.push("failure_capture");
+    if !app.filters().is_empty() {
+        chain.push("wasm_filters");
+    }
     chain
 }
 
@@ -215,7 +220,9 @@ impl ProxyHttp for Gateway {
                     .app(selected.app)
                     .is_some_and(CompiledApp::record_bodies);
                 ctx.failures.begin(keep_bodies);
-                return Ok(false);
+                // After routing and every admission: a filter-answered request releases its
+                // guards with the context.
+                return wasm::run_filters(session, &ctx.table, selected.app).await;
             }
             // The revision drained after this request loaded its table: route again with the
             // live one. Repeated refusals mean snapshots are landing right now; give up.

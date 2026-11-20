@@ -6,6 +6,7 @@
 //!
 //! - [`Config`]: settings read from environment variables.
 //! - [`Snapshot`]: the JSON model of a pushed snapshot.
+//! - [`wasm`]: WASM request filters (proxy-wasm subset) with fuel and memory limits.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
 //! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
@@ -41,6 +42,7 @@ pub mod sni;
 pub mod table;
 pub mod tls;
 pub mod wake;
+pub mod wasm;
 
 use anyhow::Context;
 use pingora::proxy::http_proxy_service;

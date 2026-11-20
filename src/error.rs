@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::conflict::Conflict;
 use crate::route::RouteError;
 use crate::table::{ApplyError, CompileError};
+use crate::wasm::Rejection;
 
 /// Errors answered to clients. Rendered as `{"error": "<message>"}` with the matching status.
 #[derive(Debug, Error)]
@@ -101,6 +102,7 @@ fn rejection(err: &CompileError) -> Vec<Value> {
         CompileError::UnknownTenant { .. } => other("unknown_tenant"),
         CompileError::Certificate(_) => other("invalid_certificate"),
         CompileError::SkewSecretTooShort => other("invalid_skew_secret"),
+        CompileError::Wasm(rejections) => rejections.iter().map(Rejection::to_json).collect(),
     }
 }
 

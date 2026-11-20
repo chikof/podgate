@@ -19,6 +19,7 @@ use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
 use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot};
 use crate::tls::{CertError, CertStore};
+use crate::wasm::{self, CompiledFilter};
 
 /// A snapshot the compiler refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -51,6 +52,10 @@ pub enum CompileError {
     /// The `skew_secret` is shorter than [`SkewSecret::MIN_LEN`] bytes.
     #[error("skew_secret must be at least {} bytes", SkewSecret::MIN_LEN)]
     SkewSecretTooShort,
+    /// A WASM filter module is invalid or imports something podgate does not provide. Every
+    /// rejected filter is listed.
+    #[error("{}", wasm::join(.0))]
+    Wasm(Vec<wasm::Rejection>),
 }
 
 /// Why a snapshot was not applied.
@@ -162,6 +167,7 @@ pub struct CompiledApp {
     allow_domain_fronting: bool,
     record_bodies: bool,
     scale_to_zero: Option<ScaleToZero>,
+    filters: Box<[CompiledFilter]>,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
 }
@@ -176,8 +182,9 @@ pub struct Pick {
 }
 
 impl CompiledApp {
-    fn new(app: &App) -> Self {
+    fn new(app: &App, filters: Box<[CompiledFilter]>) -> Self {
         Self {
+            filters,
             id: app.id.clone(),
             tenant: app.tenant.clone(),
             declared_by: app.declared_by.clone(),
@@ -187,6 +194,12 @@ impl CompiledApp {
             revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
             next_revision: AtomicU64::new(0),
         }
+    }
+
+    /// The app's WASM request filters, in the order they run.
+    #[must_use]
+    pub fn filters(&self) -> &[CompiledFilter] {
+        &self.filters
     }
 
     /// Whether a TLS request may name a host other than its SNI.
@@ -334,13 +347,30 @@ impl RoutingTable {
         if !conflicts.is_empty() {
             return Err(CompileError::Conflicts(conflicts));
         }
+        let mut wasm = wasm::Compiler::default();
+        let mut filters = Vec::with_capacity(snapshot.apps.len());
+        let mut rejected = Vec::new();
+        for app in &snapshot.apps {
+            match wasm.compile_app(app) {
+                Ok(compiled) => filters.push(compiled),
+                Err(errors) => rejected.extend(errors),
+            }
+        }
+        if !rejected.is_empty() {
+            return Err(CompileError::Wasm(rejected));
+        }
         let mut hosts = HostMap::default();
         for (pattern, index) in claims {
             hosts.insert(pattern, index);
         }
         Ok(Self {
             version: snapshot.version,
-            apps: snapshot.apps.iter().map(CompiledApp::new).collect(),
+            apps: snapshot
+                .apps
+                .iter()
+                .zip(filters)
+                .map(|(app, filters)| CompiledApp::new(app, filters))
+                .collect(),
             hosts,
             certificates: CertStore::build(&snapshot.certificates)?,
             budgets: snapshot
@@ -508,6 +538,7 @@ mod test {
             allow_domain_fronting: false,
             record_bodies: false,
             scale_to_zero: None,
+            filters: Vec::new(),
         }
     }
 

@@ -248,6 +248,7 @@ mod test {
             allow_domain_fronting: false,
             record_bodies: false,
             scale_to_zero: None,
+            filters: Vec::new(),
         }
     }
 
