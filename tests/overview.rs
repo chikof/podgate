@@ -514,6 +514,14 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         ),
         ("compress", json!({})),
         ("ip_allow_list", json!({"source_range": ["203.0.113.0/24"]})),
+        (
+            "rate_limit",
+            json!({"average": 10, "burst": 20, "source": {"ip": {}}, "max_sources": 64}),
+        ),
+        (
+            "in_flight_req",
+            json!({"amount": 5, "source": {"header": "x-api-key"}, "max_sources": 64}),
+        ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
     let mut built: Vec<&str> = podgate::middleware::Stage::BUILT.to_vec();
@@ -639,7 +647,7 @@ async fn overview_redacts_secrets() {
     let document: Value = serde_json::from_str(&bodies[0]).expect("JSON");
     let a = app_of(&document, "a");
     assert_eq!(a["tls"]["client_auth"], true);
-    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(17));
+    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(19));
     assert_eq!(
         a["routers"][0]["match"]["all"][1],
         json!({"header": {"name": "x-0", "value": "[value]"}})
