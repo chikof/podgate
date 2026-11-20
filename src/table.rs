@@ -477,7 +477,7 @@ mod test {
         assert!(matches!(
             RoutingTable::compile(&duplicate),
             Err(CompileError::Conflicts(conflicts))
-                if matches!(conflicts.as_slice(), [Conflict::HostConflict { .. }])
+                if matches!(conflicts.as_slice(), [Conflict::Host { .. }])
         ));
 
         let mut unknown = snapshot(1, vec![app("a", &["a.test"], serving(1))]);

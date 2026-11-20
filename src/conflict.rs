@@ -7,7 +7,7 @@
 //! Rules, over every host pattern an app claims (an exact name, or a `*.` wildcard that covers
 //! one extra label):
 //!
-//! - Two different apps claiming the same pattern: [`Conflict::HostConflict`], whatever their
+//! - Two different apps claiming the same pattern: [`Conflict::Host`], whatever their
 //!   tenants. An app repeating its own host is not a conflict.
 //! - A claim is *under* a wildcard when the claimed name (the host itself, or the base name of a
 //!   wildcard) is one label below the wildcard's base: `x.a.test` and `*.x.a.test` are under
@@ -15,7 +15,7 @@
 //! - A claim under another tenant's wildcard: [`Conflict::CrossTenantWildcard`].
 //! - A claim under a wildcard of the same tenant, in another app, with a different
 //!   `tls.client_ca_pem` (compared as written, `None` against `Some` included):
-//!   [`Conflict::TlsPolicyConflict`]. Exact beats wildcard when routing, so without this rule an
+//!   [`Conflict::TlsPolicy`]. Exact beats wildcard when routing, so without this rule an
 //!   app could drop or swap the client-certificate requirement its wildcard sibling declares.
 
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ pub enum Conflict {
         "host {host} is claimed by app {} ({}) and app {} ({})",
         .apps[0], .declared_by[0], .apps[1], .declared_by[1]
     )]
-    HostConflict {
+    Host {
         /// The contested pattern, as `a.test` or `*.a.test`.
         host: Box<str>,
         /// The apps, first claimant first.
@@ -48,7 +48,7 @@ pub enum Conflict {
         "host {host} of app {} ({}) and wildcard {wildcard} of app {} ({}) disagree on client_ca_pem",
         .apps[0], .declared_by[0], .apps[1], .declared_by[1]
     )]
-    TlsPolicyConflict {
+    TlsPolicy {
         /// The claim under the wildcard.
         host: Box<str>,
         /// The wildcard above it.
@@ -82,8 +82,8 @@ impl Conflict {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::HostConflict { .. } => "host_conflict",
-            Self::TlsPolicyConflict { .. } => "tls_policy_conflict",
+            Self::Host { .. } => "host_conflict",
+            Self::TlsPolicy { .. } => "tls_policy_conflict",
             Self::CrossTenantWildcard { .. } => "cross_tenant_wildcard",
         }
     }
@@ -94,7 +94,7 @@ impl Conflict {
     pub fn to_json(&self) -> Value {
         let (code, message) = (self.code(), self.to_string());
         match self {
-            Self::HostConflict {
+            Self::Host {
                 host,
                 apps,
                 declared_by,
@@ -102,7 +102,7 @@ impl Conflict {
                 "code": code, "message": message,
                 "host": host, "apps": apps, "declared_by": declared_by,
             }),
-            Self::TlsPolicyConflict {
+            Self::TlsPolicy {
                 host,
                 wildcard,
                 apps,
@@ -162,7 +162,7 @@ pub(crate) fn detect(apps: &[App], claims: &[(HostPattern, usize)]) -> Vec<Confl
         if let Some(&first) = seen.first()
             && let (Some(other), Some(second)) = (apps.get(first), apps.get(*index))
         {
-            found.push(Conflict::HostConflict {
+            found.push(Conflict::Host {
                 host: show(pattern),
                 apps: pair(&other.id, &second.id),
                 declared_by: pair(&other.declared_by, &second.declared_by),
@@ -207,7 +207,7 @@ pub(crate) fn detect(apps: &[App], claims: &[(HostPattern, usize)]) -> Vec<Confl
                     declared_by,
                 });
             } else if app.tls.client_ca_pem != owner.tls.client_ca_pem {
-                found.push(Conflict::TlsPolicyConflict {
+                found.push(Conflict::TlsPolicy {
                     host,
                     wildcard,
                     apps,
@@ -279,20 +279,26 @@ mod test {
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(
             found[0],
-            Conflict::HostConflict {
+            Conflict::Host {
                 host: "x.test".into(),
                 apps: pair("a", "b"),
                 declared_by: pair("src/a", "src/b"),
             }
         );
-        assert!(
-            matches!(&found[1], Conflict::HostConflict { host, .. } if &**host == "*.w.test")
-        );
+        assert!(matches!(&found[1], Conflict::Host { host, .. } if &**host == "*.w.test"));
     }
 
     #[test]
     fn an_app_repeating_its_own_host_is_not_a_conflict() {
-        assert!(conflicts(vec![app("a", "t1", &["x.test", "x.test", "*.w.test", "*.w.test"], None)]).is_empty());
+        assert!(
+            conflicts(vec![app(
+                "a",
+                "t1",
+                &["x.test", "x.test", "*.w.test", "*.w.test"],
+                None
+            )])
+            .is_empty()
+        );
     }
 
     #[test]
@@ -306,13 +312,13 @@ mod test {
         assert_eq!(
             found,
             vec![
-                Conflict::TlsPolicyConflict {
+                Conflict::TlsPolicy {
                     host: "x.a.test".into(),
                     wildcard: "*.a.test".into(),
                     apps: pair("exact", "wild"),
                     declared_by: pair("src/exact", "src/wild"),
                 },
-                Conflict::TlsPolicyConflict {
+                Conflict::TlsPolicy {
                     host: "*.z.a.test".into(),
                     wildcard: "*.a.test".into(),
                     apps: pair("nested", "wild"),
@@ -341,7 +347,9 @@ mod test {
                 declared_by: pair("src/exact", "src/wild"),
             }
         );
-        assert!(matches!(&found[1], Conflict::CrossTenantWildcard { host, .. } if &**host == "*.y.a.test"));
+        assert!(
+            matches!(&found[1], Conflict::CrossTenantWildcard { host, .. } if &**host == "*.y.a.test")
+        );
     }
 
     #[test]
@@ -354,7 +362,11 @@ mod test {
         let codes: Vec<_> = found.iter().map(Conflict::code).collect();
         assert_eq!(
             codes,
-            ["host_conflict", "tls_policy_conflict", "cross_tenant_wildcard"]
+            [
+                "host_conflict",
+                "tls_policy_conflict",
+                "cross_tenant_wildcard"
+            ]
         );
         assert_eq!(
             found[0].to_json(),

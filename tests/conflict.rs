@@ -155,5 +155,8 @@ async fn rejected_keeps_previous() {
             &[app_of("a", "t1", &["a.test", "b.test"], None, &upstream)],
         ))
         .await;
-    assert_eq!(retry.status, 200, "a rejected version is not consumed: {retry:?}");
+    assert_eq!(
+        retry.status, 200,
+        "a rejected version is not consumed: {retry:?}"
+    );
 }

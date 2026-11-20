@@ -122,7 +122,8 @@ mod test {
 
     #[test]
     fn rejected_snapshot_lists_conflicts() {
-        let err = AppError::SnapshotRejected(vec![json!({"code": "host_conflict", "host": "a.test"})]);
+        let err =
+            AppError::SnapshotRejected(vec![json!({"code": "host_conflict", "host": "a.test"})]);
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             err.body(),
