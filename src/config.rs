@@ -69,7 +69,7 @@ impl Default for Config {
             proxy_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
             proxy_tls_addr: None,
             admin_socket: PathBuf::from("/run/podgate/admin.sock"),
-            request_timeout_secs: NonZeroU16::new(30).expect("30 is not zero"),
+            request_timeout_secs: NonZeroU16::MIN.saturating_add(29),
             log_format: LogFormat::Pretty,
         }
     }
