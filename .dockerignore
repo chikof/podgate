@@ -1,0 +1,10 @@
+target/
+.git/
+.devenv/
+.direnv/
+.env
+docs/
+scripts/
+*.md
+Dockerfile
+.dockerignore

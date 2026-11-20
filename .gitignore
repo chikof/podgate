@@ -1,0 +1,10 @@
+target/
+.env
+.env.local
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+.direnv
+.pre-commit-config.yaml
+.bacon-locations
+bacon-ls.log

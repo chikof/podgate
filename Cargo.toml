@@ -1,0 +1,87 @@
+[package]
+name = "podgate"
+description = "Memory-safe reverse proxy for our PaaS, built on Pingora"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+# Not published: `cargo deny` treats private crates as licence-exempt.
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+# `oneshot` drives the router in-process, without a socket.
+tower = { version = "0.5.3", features = ["util"] }
+# Raw TCP in tests/http.rs: write the request, wait for shutdown.
+tokio = { version = "1.54.1", features = ["io-util", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"            # allow per module only with a SAFETY comment and review
+missing_docs = "warn"           # public items are documented
+unreachable_pub = "warn"        # pub only where the API really exposes it
+variant_size_differences = "warn" # enum variants of very different size waste space; box the big one
+
+[lints.clippy]
+# imports
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+# ownership and signatures
+borrowed_box = "warn"
+ptr_arg = "warn"
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+# traits
+should_implement_trait = "warn"
+new_without_default = "warn"
+wrong_self_convention = "warn"
+len_without_is_empty = "warn"
+# errors and panics
+unwrap_used = "warn"
+unnecessary_unwrap = "warn"
+missing_panics_doc = "warn"
+missing_errors_doc = "warn"
+undocumented_unsafe_blocks = "warn"
+# API surface
+# Application crate: the exhaustive_* rules only matter across team boundaries.
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+must_use_candidate = "warn"
+# style
+needless_for_each = "warn"
+# memory layout and niches (docs/rust-style.md `## Memory layout`, clippy.toml sets the thresholds)
+large_enum_variant = "warn"
+large_futures = "warn"
+large_stack_frames = "warn"
+large_stack_arrays = "warn"
+large_const_arrays = "warn"
+large_types_passed_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+needless_pass_by_value = "warn"
+box_collection = "warn"
+vec_box = "warn"
+redundant_allocation = "warn"
+boxed_local = "warn"
+unnecessary_box_returns = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+option_option = "warn"
+ref_option = "warn"
+ref_option_ref = "warn"
+zero_sized_map_values = "warn"
+inefficient_to_string = "warn"
+non_zero_suggestions = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
