@@ -33,8 +33,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Host regexp | `HostRegexp` | `header_regexp Host` | built: a regexp only narrows a literal claim; a bare one needs an exclusive entry point or the operator's allowance (`catch_all_not_allowed`) |
 | Path, prefix, regexp | `Path`, `PathPrefix`, `PathRegexp` | `path`, `path_regexp` | built (prefix is whole-segment) |
 | Method | `Method` | `method` | built |
-| Header, header regexp | `Header`, `HeaderRegexp` | `header`, `header_regexp` | 0025 |
-| Query, query regexp | `Query`, `QueryRegexp` | `query` | 0025 |
+| Header, header regexp | `Header`, `HeaderRegexp` | `header`, `header_regexp` | built: `header`, `header_regexp`, `query`, `query_regexp` leaves; names case-insensitive for headers, query decoded as form-urlencoded; unanchored regexps; no Caddy glob or `!`, use `not` |
+| Query, query regexp | `Query`, `QueryRegexp` | `query` | built: `header`, `header_regexp`, `query`, `query_regexp` leaves; names case-insensitive for headers, query decoded as form-urlencoded; unanchored regexps; no Caddy glob or `!`, use `not` |
 | Client IP | `ClientIP` (peer) | `remote_ip`, `client_ip` | built: `client_ip` resolves through the entry point's trusted proxies, IPv4-mapped normalized |
 | Boolean combination | `&&`, `||`, `!` in a rule string | `not`, named matchers | model (`all`, `any`, `not`), 0022; rule strings are translated by 0071 |
 | Explicit priority | `priority` | route order | 0022 (within a tenant); Traefik's order reproduced by 0071 |
