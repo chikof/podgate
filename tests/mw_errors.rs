@@ -944,7 +944,10 @@ async fn errors_cap_over_tenant_budget_rejected() {
     let (up, pages) = (upstream().await, pages().await);
     let site_with = |extra: Value| {
         let mut config = json!({"status": ["503"], "service": "pages"});
-        config.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
+        config
+            .as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
         site("a", "a.test", up.addr, pages.addr, config)
     };
     let with_budget = |version: u64, bytes: u64, app: Value| {
@@ -965,7 +968,10 @@ async fn errors_cap_over_tenant_budget_rejected() {
     assert_eq!(entry["max_buffer_bytes"], 100 * 1024, "{entry}");
     assert_eq!(entry["tenant"], "t1", "{entry}");
     let message = entry["message"].as_str().expect("message");
-    assert!(message.contains("t1") && message.contains("102400"), "{message}");
+    assert!(
+        message.contains("t1") && message.contains("102400"),
+        "{message}"
+    );
 
     // Exactly the budget fits; a budget that is merely busy later keeps the original response.
     let needed = 8192 + 16 * 1024;
@@ -974,9 +980,16 @@ async fn errors_cap_over_tenant_budget_rejected() {
         &with_budget(2, needed, site_with(json!({"max_body_bytes": 8192}))),
     )
     .await;
-    assert_eq!(podgate.get("a.test", "/boom").await.body, "<h1>page for /503.html</h1>");
+    assert_eq!(
+        podgate.get("a.test", "/boom").await.body,
+        "<h1>page for /503.html</h1>"
+    );
     let refused = podgate
-        .push_snapshot(&with_budget(3, needed - 1, site_with(json!({"max_body_bytes": 8192}))))
+        .push_snapshot(&with_budget(
+            3,
+            needed - 1,
+            site_with(json!({"max_body_bytes": 8192})),
+        ))
         .await;
     assert_eq!(rejection(&refused)["code"], "invalid_middleware");
 }
