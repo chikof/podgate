@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::service::upstream_policy::UpstreamPolicy;
 use crate::entry::{self, EntryPoint};
+use crate::service::upstream_policy::UpstreamPolicy;
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
 /// snapshot compiles always find threads.

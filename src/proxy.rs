@@ -308,7 +308,8 @@ impl ProxyHttp for Gateway {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
-        ctx.forwarded = ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point));
+        ctx.forwarded =
+            ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point));
         let found = route::matching(
             &ctx.table,
             session.req_header(),
