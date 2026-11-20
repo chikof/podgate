@@ -12,11 +12,12 @@
 //! | `mirroring` | `mirroring.rs` |
 //! | `failover` | `failover.rs` |
 //!
-//! Shared by the load balancer's helpers, and empty until their specs land: active health checks
-//! (`health.rs`), passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`), upstream
-//! transports (`transport.rs`) and DNS upstreams (`resolve.rs`). [`upstream_policy`] is built:
-//! the operator's rule for which addresses a tenant's servers may have, checked by the compiler
-//! and before every connection.
+//! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
+//! (`state.rs`, see [`state`]), and, empty until their specs land, active health checks
+//! (`health.rs`), passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`),
+//! upstream transports (`transport.rs`) and DNS upstreams (`resolve.rs`). [`upstream_policy`]
+//! is built: the operator's rule for which addresses a tenant's servers may have, checked by the
+//! compiler and before every connection.
 //!
 //! Adding a service type: a file here with `compile` and `pick`, one variant in [`Service`] and
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
@@ -28,6 +29,7 @@ mod loadbalancer;
 mod mirroring;
 mod outlier;
 mod resolve;
+pub mod state;
 mod sticky;
 mod transport;
 pub mod upstream_policy;
@@ -39,7 +41,9 @@ use crate::compile::Invalid;
 use podgate_model::Declared;
 
 pub use lb::PickCx;
-pub use loadbalancer::{LoadBalancer, Server, ServerState};
+pub use loadbalancer::{LoadBalancer, Server};
+pub(crate) use state::Registry;
+pub use state::{Lease, ServerState, ServiceState};
 
 /// Service types that are planned and not built yet.
 const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
@@ -104,9 +108,10 @@ impl Service {
         !self.servers().is_empty()
     }
 
-    /// The address of the server a new request goes to, or `None` when no server can take it.
+    /// The address of the server a new request goes to and the [`Lease`] that counts the request
+    /// on it, or `None` when no server can take it. Keep the lease until the request is done.
     #[must_use]
-    pub fn pick(&self, cx: PickCx<'_>) -> Option<SocketAddr> {
+    pub fn pick(&self, cx: PickCx<'_>) -> Option<(SocketAddr, Lease)> {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
         }

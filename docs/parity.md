@@ -47,10 +47,10 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| Round robin, weights | default WRR | `round_robin`, `weighted_round_robin` | built (round robin), 0031 (weighted) |
-| Least connections | `leasttime`, p2c | `least_conn` | 0031 |
-| Power of two choices | `strategy: p2c` | `random_choose` | 0031 (`p2c_ewma`: latency-aware) |
-| Random | none | `random` | 0031 |
+| Round robin, weights | default WRR | `round_robin`, `weighted_round_robin` | built (`round_robin` in 0022, smooth `weighted_round_robin` in 0031; weight `0` receives nothing, where Traefik treats it as 1) |
+| Least connections | `leasttime`, p2c | `least_conn` | built (full scan up to 8 servers, then two random candidates) |
+| Power of two choices | `strategy: p2c` | `random_choose` | built (0031 `p2c_ewma`: latency-aware peak-EWMA, which neither has) |
+| Random | none | `random` | built |
 | Hash policies | `strategy: hrw` | `ip_hash`, `uri_hash`, `header`, `query`, `cookie` | 0032 (`ip_hash`, `uri_hash`, `header_hash`, `hrw`; `query` and `cookie` declined, sticky is 0036) |
 | Active health checks | `healthCheck` | `health_uri` and friends | 0033 |
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | 0034 |

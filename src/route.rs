@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::host;
 use crate::router::{Matched, View, path};
-use crate::service::PickCx;
+use crate::service::{Lease, PickCx};
 use crate::skew;
 use crate::table::RoutingTable;
 
@@ -83,7 +83,8 @@ pub fn matching(
 
 /// Picks a revision and a backend for a request that matched `matched`. A valid session cookie
 /// (see [`crate::skew`]) pins it to the revision it names while that revision is `serving` or
-/// `retiring`; otherwise the weighted pick decides.
+/// `retiring`; otherwise the weighted pick decides. The [`Lease`] counts the request on the
+/// chosen server: keep it until the request ends.
 ///
 /// # Errors
 ///
@@ -93,9 +94,9 @@ pub fn select(
     table: &RoutingTable,
     matched: Matched,
     request: &RequestHeader,
-) -> Result<Selected, RouteError> {
+) -> Result<(Selected, Lease), RouteError> {
     let app = table.app(matched.app).ok_or(RouteError::NoRoute)?;
-    let cx = PickCx { request };
+    let cx = PickCx::new(request);
     let (pick, pinned) = match skew::pinned(table, app, matched.router, cx) {
         Some(pick) => (pick, true),
         None => (
@@ -103,13 +104,16 @@ pub fn select(
             false,
         ),
     };
-    Ok(Selected {
-        app: matched.app,
-        router: matched.router,
-        revision: pick.revision,
-        upstream: pick.upstream,
-        pinned,
-    })
+    Ok((
+        Selected {
+            app: matched.app,
+            router: matched.router,
+            revision: pick.revision,
+            upstream: pick.upstream,
+            pinned,
+        },
+        pick.lease,
+    ))
 }
 
 /// [`matching`] then [`select`]: the whole routing decision for a request with no middleware
@@ -127,7 +131,7 @@ pub fn resolve(
 ) -> Result<Selected, RouteError> {
     let matched =
         matching(table, request, entry_point, tls, client_ip).ok_or(RouteError::NoRoute)?;
-    select(table, matched, request)
+    select(table, matched, request).map(|(selected, _lease)| selected)
 }
 
 #[cfg(test)]

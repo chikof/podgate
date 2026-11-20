@@ -27,7 +27,7 @@ use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
 use crate::middleware;
 use crate::router::{CompiledRouter, Index, Matched};
-use crate::service::{self, PickCx};
+use crate::service::{self, Lease, PickCx};
 use crate::tls::{CertError, CertStore};
 use podgate_model::SkewSecret;
 use podgate_model::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
@@ -226,12 +226,14 @@ pub const CANARY_TOTAL_WEIGHT: u64 = 10_000;
 const TICKET_STRIDE: u64 = 2_654_435_761;
 
 /// Where [`CompiledApp::pick`] sent a new request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Pick {
     /// Index into [`CompiledApp::revisions`].
     pub revision: usize,
     /// The chosen backend.
     pub upstream: SocketAddr,
+    /// Counts the request on the backend until dropped; keep it for the life of the request.
+    pub lease: Lease,
 }
 
 impl CompiledApp {
@@ -487,10 +489,26 @@ impl CompiledApp {
     }
 
     fn take(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {
+        let (upstream, lease) = self.service(revision, router)?.pick(cx)?;
         Some(Pick {
             revision,
-            upstream: self.service(revision, router)?.pick(cx)?,
+            upstream,
+            lease,
         })
+    }
+
+    /// Every service of the app with the revision it belongs to (`None` for the app's own, shared
+    /// by all revisions), for the registry that settles their runtime state.
+    pub(crate) fn services_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (Option<&str>, &mut service::Named)> {
+        let shared = self.services.iter_mut().map(|named| (None, named));
+        let own = self.revisions.iter_mut().flat_map(|revision| {
+            let CompiledRevision { id, services, .. } = revision;
+            let id: &str = id;
+            services.iter_mut().map(move |named| (Some(id), named))
+        });
+        shared.chain(own)
     }
 
     /// Chooses a revision and backend for a new request that matched router `router`, or `None`
@@ -562,14 +580,14 @@ impl CompiledApp {
     #[cfg(test)]
     pub(crate) fn pick_any(&self) -> Option<Pick> {
         let request = pingora::http::RequestHeader::build("GET", b"/", None).ok()?;
-        self.pick(0, PickCx { request: &request })
+        self.pick(0, PickCx::new(&request))
     }
 
     /// [`Self::pick_pinned`] for the first router, for tests.
     #[cfg(test)]
     pub(crate) fn pick_pinned_any(&self, id: &str) -> Option<Pick> {
         let request = pingora::http::RequestHeader::build("GET", b"/", None).ok()?;
-        self.pick_pinned(0, id, PickCx { request: &request })
+        self.pick_pinned(0, id, PickCx::new(&request))
     }
 }
 
@@ -767,6 +785,8 @@ pub struct TableHandle {
     source: Arc<Mutex<Option<Arc<Snapshot>>>>,
     // Canary state that outlives swaps; touched only by `swap`.
     canaries: Arc<canary::Registry>,
+    // Server and balancer state that outlives swaps; touched only by `swap`.
+    states: Arc<service::Registry>,
     // The entry points this process bound; fixed for the life of the handle.
     context: Arc<CompileContext>,
 }
@@ -895,6 +915,7 @@ impl TableHandle {
     /// signal. Every path that changes the live table goes through here.
     fn swap(&self, mut table: RoutingTable) {
         self.canaries.settle(&mut table.apps);
+        self.states.settle(&mut table.apps);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
@@ -1013,7 +1034,7 @@ mod test {
         let table = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], revisions)]))
             .expect("compiles");
         let app = find(&table, "a.test", "/").expect("known host");
-        assert_eq!(app.pick_any(), None);
+        assert!(app.pick_any().is_none());
     }
 
     #[test]

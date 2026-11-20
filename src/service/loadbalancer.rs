@@ -6,24 +6,27 @@
 //! ```
 //!
 //! `servers` may be empty: the service then has no server, and a `scale_to_zero` app wakes on
-//! the first request. Built today: plain `http://ip:port` servers and the `round_robin`
-//! algorithm. Planned fields (`health_check`, `passive`, `sticky`, `transport`, a `false`
-//! `pass_host_header`), planned algorithms and `https://` or `h2c://` servers are refused with
-//! `service_not_built`; a server named by host name is `dns_upstream_not_built`.
+//! the first request. Built today: plain `http://ip:port` servers and the algorithms
+//! `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma` and `random` (see
+//! [`super::lb`]); only `weighted_round_robin` takes server weights, and a weight of `0` there
+//! means the server receives nothing. Planned fields (`health_check`, `passive`, `sticky`,
+//! `transport`, a `false` `pass_host_header`), planned algorithms and `https://` or `h2c://`
+//! servers are refused with `service_not_built`; a server named by host name is
+//! `dns_upstream_not_built`.
 //!
-//! [`ServerState`] is fixed here for the specs that fill it: health checks write `healthy`, the
-//! outlier detector writes `ejected_until_ms`, least-connections reads and writes `active`,
-//! and the EWMA balancer writes `ewma_us`. All are atomics, so none of those specs reshapes the
-//! struct, and `pick` of every balancer reads [`Server::available`] and nothing else about
-//! health.
+//! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
+//! the service (its turn counter) is in [`super::state`], outside the table, so a push that
+//! leaves the service alone keeps it. `pick` of every balancer reads [`Server::available`] and
+//! nothing else about health.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::lb::{Balancer, PickCx};
+use super::state::{self, Lease, ServerState, ServiceState};
 use crate::compile::Invalid;
 use podgate_model::Declared;
 
@@ -55,32 +58,6 @@ struct ServerConfig {
     weight: Option<u32>,
 }
 
-/// What the balancer, the health checker and the outlier detector share about one server.
-#[derive(Debug)]
-pub struct ServerState {
-    /// Cleared by an active health check that fails.
-    pub healthy: AtomicBool,
-    /// Milliseconds since the process started until which the server is ejected; `0`: not
-    /// ejected. Written by passive outlier detection.
-    pub ejected_until_ms: AtomicU64,
-    /// Requests in flight to the server, for least-connections.
-    pub active: AtomicU32,
-    /// Exponentially weighted moving average of response latency in microseconds, for the EWMA
-    /// balancer; `0`: no sample yet.
-    pub ewma_us: AtomicU64,
-}
-
-impl Default for ServerState {
-    fn default() -> Self {
-        Self {
-            healthy: AtomicBool::new(true),
-            ejected_until_ms: AtomicU64::new(0),
-            active: AtomicU32::new(0),
-            ewma_us: AtomicU64::new(0),
-        }
-    }
-}
-
 /// One upstream server of a load balancer.
 #[derive(Debug)]
 pub struct Server {
@@ -88,18 +65,19 @@ pub struct Server {
     pub url: Box<str>,
     /// The address to connect to.
     pub addr: SocketAddr,
-    /// The relative weight, `1` by default.
+    /// The relative weight, `1` by default; only `weighted_round_robin` uses it, and there `0`
+    /// means no requests.
     pub weight: u32,
-    /// The state the balancer and its helpers share.
-    pub state: ServerState,
+    /// The state the balancer and its helpers share; shared with the previous table's server of
+    /// the same service, see [`super::state`].
+    pub state: Arc<ServerState>,
 }
 
 impl Server {
     /// Whether the server may take a new request: healthy and not ejected.
     #[must_use]
     pub fn available(&self) -> bool {
-        self.state.healthy.load(Ordering::Relaxed)
-            && self.state.ejected_until_ms.load(Ordering::Relaxed) == 0
+        self.state.available()
     }
 }
 
@@ -108,6 +86,8 @@ impl Server {
 pub struct LoadBalancer {
     servers: Box<[Server]>,
     balancer: Balancer,
+    shared: Arc<ServiceState>,
+    fingerprint: u64,
 }
 
 fn not_built(what: &str) -> Invalid {
@@ -153,14 +133,11 @@ fn parse_server(config: &ServerConfig) -> Result<Server, Invalid> {
             });
         }
     };
-    if config.weight == Some(0) {
-        return Err(invalid("weight must be at least 1"));
-    }
     Ok(Server {
         url: url.into(),
         addr,
         weight: config.weight.unwrap_or(1),
-        state: ServerState::default(),
+        state: Arc::default(),
     })
 }
 
@@ -189,7 +166,12 @@ impl LoadBalancer {
             .map(parse_server)
             .collect::<Result<_, _>>()?;
         let balancer = Balancer::compile(config.algorithm.as_deref(), &servers)?;
-        Ok(Self { servers, balancer })
+        Ok(Self {
+            servers,
+            balancer,
+            shared: Arc::default(),
+            fingerprint: state::fingerprint(declared),
+        })
     }
 
     /// The servers, in declaration order.
@@ -204,11 +186,22 @@ impl LoadBalancer {
         self.balancer.name()
     }
 
-    /// The address of the server a new request goes to.
+    /// The address of the server a new request goes to, with the [`Lease`] that counts the
+    /// request on it until dropped. Lock-free and allocation-free.
     #[must_use]
-    pub fn pick(&self, cx: PickCx<'_>) -> Option<SocketAddr> {
-        let index = self.balancer.pick(cx, &self.servers)?;
-        self.servers.get(index).map(|server| server.addr)
+    pub fn pick(&self, cx: PickCx<'_>) -> Option<(SocketAddr, Lease)> {
+        let index = self.balancer.pick(cx, &self.servers, &self.shared)?;
+        let server = self.servers.get(index)?;
+        Some((
+            server.addr,
+            Lease::take(&server.state, self.balancer.observe()),
+        ))
+    }
+
+    /// The service's fingerprint, its shared state and its servers, for [`state::Registry`] to
+    /// swap in the state of the previous table.
+    pub(super) fn state_mut(&mut self) -> (u64, &mut Arc<ServiceState>, &mut [Server]) {
+        (self.fingerprint, &mut self.shared, &mut self.servers)
     }
 }
 
@@ -263,7 +256,8 @@ mod test {
         );
         assert_eq!(
             code(lb(&json!([{ "url": "http://127.0.0.1:1", "weight": 0 }]))),
-            "invalid_service"
+            "invalid_service",
+            "round_robin does not use weights"
         );
         assert_eq!(
             code(lb(&json!([{ "url": "http://127.0.0.1:1", "priority": 2 }]))),
@@ -275,5 +269,23 @@ mod test {
         let mut misspelt = lb(&json!([]));
         misspelt["algorithms"] = json!("round_robin");
         assert_eq!(code(misspelt), "invalid_service");
+    }
+
+    #[test]
+    fn only_weighted_round_robin_takes_weights_and_zero_means_nothing() {
+        let mut weighted = lb(&json!([
+            { "url": "http://127.0.0.1:1", "weight": 3 },
+            { "url": "http://127.0.0.1:2", "weight": 0 },
+        ]));
+        weighted["algorithm"] = json!("weighted_round_robin");
+        let balancer = compile(weighted.clone()).expect("compiles");
+        assert_eq!(balancer.algorithm(), "weighted_round_robin");
+        let request = pingora::http::RequestHeader::build("GET", b"/", None).expect("request");
+        for _ in 0..10 {
+            let (addr, _lease) = balancer.pick(PickCx::new(&request)).expect("a server");
+            assert_eq!(addr.port(), 1);
+        }
+        weighted["algorithm"] = json!("random");
+        assert_eq!(code(weighted), "invalid_service");
     }
 }

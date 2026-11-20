@@ -57,6 +57,7 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
+use crate::service::Lease;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::skew;
 use crate::sni;
@@ -110,6 +111,10 @@ pub struct Ctx {
     /// The backend slot and latency timer (see [`crate::fairq`]), taken by `request_filter` after
     /// the tenant slot and freed when the upstream response ends, or in `logging`.
     pub backend: fairq::Slot,
+    /// The request's claim on the server it was sent to (see [`crate::service::state`]): counts
+    /// it as active there and carries its latency to the balancer. Set with `route`, dropped in
+    /// `logging`.
+    pub lease: Option<Lease>,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -273,6 +278,7 @@ impl ProxyHttp for Gateway {
             wake: wake::State::default(),
             capacity_refusal: false,
             backend: fairq::Slot::default(),
+            lease: None,
         }
     }
 
@@ -324,8 +330,8 @@ impl ProxyHttp for Gateway {
         }
         let mut attempts = 0;
         loop {
-            let selected = match route::select(&ctx.table, matched, session.req_header()) {
-                Ok(selected) => selected,
+            let (selected, lease) = match route::select(&ctx.table, matched, session.req_header()) {
+                Ok(chosen) => chosen,
                 Err(RouteError::NoUpstream) => {
                     let held = self.wake.hold(
                         &mut ctx.wake,
@@ -368,6 +374,7 @@ impl ProxyHttp for Gateway {
                     }
                 }
                 ctx.route = Some(selected);
+                ctx.lease = Some(lease);
                 ctx.inflight = Some(guard);
                 return Ok(false);
             }
@@ -462,6 +469,7 @@ impl ProxyHttp for Gateway {
         ctx.compression = None;
         ctx.tenant_slot = None;
         ctx.backend.release();
+        ctx.lease = None;
     }
 
     async fn upstream_peer(
@@ -521,7 +529,11 @@ impl ProxyHttp for Gateway {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
-        ctx.backend.responded(upstream_response.status.as_u16());
+        let status = upstream_response.status.as_u16();
+        ctx.backend.responded(status);
+        if let Some(lease) = &mut ctx.lease {
+            lease.responded(status);
+        }
         Ok(())
     }
 
