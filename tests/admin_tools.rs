@@ -201,6 +201,8 @@ fn rich_snapshot(addr: SocketAddr) -> Value {
     web["transports"] =
         json!([{"name": "internal", "type": "servers_transport", "insecure_skip_verify": false}]);
     web["canary"] = json!({"revision": "r2", "step_percent": 10, "interval_secs": 60, "max_error_permille": 20});
+    web["forwarded"] =
+        json!({"x_forwarded": true, "real_ip": false, "rfc7239": true, "server": true});
     let mut rich = snapshot(1, &[web]);
     rich["skew_secret"] = json!("0123456789abcdef0123");
     rich["revert_window_secs"] = json!(30);
@@ -358,6 +360,14 @@ async fn schema_rejects_bad_snapshot() {
             broken(
                 &|s| s["apps"][0]["canary"] = json!({"revision": "r1", "step_percent": "ten", "interval_secs": 1, "max_error_permille": 1}),
             ),
+        ),
+        (
+            "a forwarded switch that is text",
+            broken(&|s| s["apps"][0]["forwarded"] = json!({"real_ip": "no"})),
+        ),
+        (
+            "a misspelt forwarded switch",
+            broken(&|s| s["apps"][0]["forwarded"] = json!({"realip": false})),
         ),
     ];
     for (what, bad) in cases {

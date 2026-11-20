@@ -142,6 +142,7 @@ pub struct App {
 /// The forwarding headers an app's upstreams receive. Every field is optional; an absent one has
 /// the default below, so `{}` is the same as no object at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[allow(
     clippy::struct_excessive_bools,
