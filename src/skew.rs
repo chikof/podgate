@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::route::Selected;
+use crate::service::PickCx;
 use crate::table::{CompiledApp, Pick, RoutingTable};
 
 /// Name of the session cookie.
@@ -121,15 +122,20 @@ fn cookie_values(request: &RequestHeader) -> impl Iterator<Item = &str> {
         .filter_map(|pair| pair.trim().strip_prefix(COOKIE_NAME)?.strip_prefix('='))
 }
 
-/// The pick a valid session cookie dictates for `app`, or `None` for normal routing: the feature
-/// is off, there is no cookie, it does not verify or names another app, or its revision is
-/// `draining`, gone or without a backend.
+/// The pick a valid session cookie dictates for `app` and its router `router`, or `None` for
+/// normal routing: the feature is off, there is no cookie, it does not verify or names another
+/// app, or its revision is `draining`, gone or without a backend.
 #[must_use]
-pub fn pinned(table: &RoutingTable, app: &CompiledApp, request: &RequestHeader) -> Option<Pick> {
+pub fn pinned(
+    table: &RoutingTable,
+    app: &CompiledApp,
+    router: usize,
+    cx: PickCx<'_>,
+) -> Option<Pick> {
     let secret = table.skew_secret()?;
-    cookie_values(request)
+    cookie_values(cx.request)
         .filter_map(|value| verify(secret, value, app.id()))
-        .find_map(|revision| app.pick_pinned(&revision))
+        .find_map(|revision| app.pick_pinned(router, &revision, cx))
 }
 
 /// Pins the session to the revision that served this request, unless the request already was

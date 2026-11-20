@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
 
-use common::{Podgate, Response, Upstream, app, revision, serving, snapshot};
+use common::{Podgate, Response, Upstream, app, revision, service, serving, snapshot};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -603,7 +603,7 @@ async fn canary_survives_upstream_scale_out() {
     // The baseline scales out, twice: only its upstream list changes.
     canary.set(200);
     let mut scaled = app_a;
-    scaled["revisions"][0]["upstreams"] = json!([base.addr.to_string(), extra.addr.to_string()]);
+    scaled["revisions"][0]["services"][0] = service("web", &[base.addr, extra.addr]);
     assert_eq!(
         podgate
             .push_snapshot(&snapshot(2, &[scaled.clone()]))
@@ -611,7 +611,7 @@ async fn canary_survives_upstream_scale_out() {
             .status,
         200
     );
-    scaled["revisions"][0]["upstreams"] = json!([extra.addr.to_string()]);
+    scaled["revisions"][0]["services"][0] = service("web", &[extra.addr]);
     assert_eq!(
         podgate.push_snapshot(&snapshot(3, &[scaled])).await.status,
         200

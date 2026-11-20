@@ -238,8 +238,9 @@ mod test {
     fn snapshot(version: u64, tenant_of_app: &str) -> Snapshot {
         serde_json::from_str(&format!(
             r#"{{"version":{version},{TENANT},"apps":[{{"id":"a","tenant":"{tenant_of_app}",
-            "declared_by":"x","hosts":["a.test"],"tls":{{"mode":"acme"}},
-            "revisions":[{{"id":"r","upstreams":["127.0.0.1:1"],"weight":1,"state":"serving"}}]}}]}}"#
+            "declared_by":"x","tls":{{"mode":"acme"}},
+            "routers":[{{"name":"r","match":{{"host":"a.test"}},"service":"web"}}],
+            "revisions":[{{"id":"r","weight":1,"state":"serving","services":[{{"name":"web","type":"loadbalancer","servers":[{{"url":"http://127.0.0.1:1"}}]}}]}}]}}]}}"#
         ))
         .expect("valid snapshot")
     }

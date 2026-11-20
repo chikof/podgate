@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use common::{Podgate, Upstream, app, serving, snapshot};
+use common::{Podgate, Upstream, app, revision_on, serving, snapshot, with_filters};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
@@ -106,12 +106,7 @@ async fn auto_revert_ignores_unchanged_apps() {
 
 /// An app `id` with `scale_to_zero` and one serving revision on `upstreams` (empty: asleep).
 fn sleepy(id: &str, host: &str, upstreams: &[SocketAddr], wake_timeout_secs: u64) -> Value {
-    let revision = json!({
-        "id": "r1",
-        "upstreams": upstreams.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "weight": 100,
-        "state": "serving",
-    });
+    let revision = revision_on("r1", upstreams, 100, "serving");
     let mut app = app(id, &[host], &[revision]);
     app["scale_to_zero"] = json!({ "idle_secs": 3600, "wake_timeout_secs": wake_timeout_secs });
     app
@@ -221,13 +216,14 @@ fn hogging(id: &str, host: &str, upstream: SocketAddr) -> Value {
   (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
     (loop $again (br $again)) (i32.const 0)))"#;
     let wasm = wat::parse_str(wat).expect("valid WAT");
-    let mut app = app(id, &[host], &[serving("r2", upstream)]);
-    app["filters"] = json!([{
-        "wasm_base64": base64::engine::general_purpose::STANDARD.encode(wasm),
-        "fuel": 1_000_000_000_000_u64,
-        "max_memory_bytes": 65_536,
-    }]);
-    app
+    with_filters(
+        app(id, &[host], &[serving("r2", upstream)]),
+        &[json!({
+            "wasm_base64": base64::engine::general_purpose::STANDARD.encode(wasm),
+            "fuel": 1_000_000_000_000_u64,
+            "max_memory_bytes": 65_536,
+        })],
+    )
 }
 
 #[tokio::test]

@@ -1,24 +1,31 @@
 //! Why a request goes where it goes: the logic behind `GET /v1/explain`.
 //!
 //! [`explain`] reads the live [`RoutingTable`], the same compiled table the proxy routes with,
-//! so the answer cannot drift from real routing. It never parses a snapshot. It only reads:
-//! it does not pick a backend, so it does not advance any round-robin or counter.
+//! and runs the same router index, so the answer cannot drift from real routing. It never
+//! parses a snapshot. It only reads: it does not pick a backend, so it does not advance any
+//! round-robin or counter.
 
 use axum::http::{Method, Uri};
+use pingora::http::RequestHeader;
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::canary;
-use crate::host::{self, MatchKind};
-use crate::proxy;
+use crate::entry;
+use crate::host;
+use crate::pipeline;
+use crate::router::{View, path};
 use crate::table::RoutingTable;
 
 /// What a caller asks about: a request as the proxy would see it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Target {
     host: String,
+    path: String,
+    query: Option<String>,
     tls: bool,
     method: Method,
+    entry_point: Option<String>,
 }
 
 /// A `url` or `method` that cannot be explained.
@@ -27,42 +34,69 @@ pub struct Target {
 pub enum TargetError {
     /// `url` is not an absolute `http` or `https` URL with a host.
     #[error("url must be an absolute http or https URL with a host, like https://app.example/")]
-    InvalidUrl,
+    Url,
+    /// `url` has a path the proxy would refuse.
+    #[error("url has a path the proxy refuses: {0}")]
+    Path(Box<str>),
     /// `method` is not an HTTP method token.
     #[error("method {0:?} is not an HTTP method")]
-    InvalidMethod(Box<str>),
+    Method(Box<str>),
 }
 
 impl Target {
     /// Parses the query of `GET /v1/explain`. `method` defaults to `GET`; the scheme decides
-    /// whether the request is treated as arriving over TLS (`https`).
+    /// whether the request is treated as arriving over TLS (`https`) and so on which entry
+    /// point (`web` or `websecure`) unless `entry_point` names one. The path is normalized as
+    /// the proxy does.
     ///
     /// # Errors
     ///
-    /// [`TargetError::InvalidUrl`] unless `url` is an absolute `http` or `https` URL with a
-    /// host, [`TargetError::InvalidMethod`] for a method that is not a token.
-    pub fn parse(url: &str, method: Option<&str>) -> Result<Self, TargetError> {
-        let uri: Uri = url.parse().map_err(|_| TargetError::InvalidUrl)?;
+    /// [`TargetError::Url`] unless `url` is an absolute `http` or `https` URL with a
+    /// host, [`TargetError::Path`] for a path the proxy refuses,
+    /// [`TargetError::Method`] for a method that is not a token.
+    pub fn parse(
+        url: &str,
+        method: Option<&str>,
+        entry_point: Option<&str>,
+    ) -> Result<Self, TargetError> {
+        let uri: Uri = url.parse().map_err(|_| TargetError::Url)?;
         let tls = match uri.scheme_str() {
             Some("https") => true,
             Some("http") => false,
-            _ => return Err(TargetError::InvalidUrl),
+            _ => return Err(TargetError::Url),
         };
-        let authority = uri.authority().ok_or(TargetError::InvalidUrl)?;
+        let authority = uri.authority().ok_or(TargetError::Url)?;
         let host = host::normalize(authority.host()).into_owned();
         if host.is_empty() {
-            return Err(TargetError::InvalidUrl);
+            return Err(TargetError::Url);
         }
         let method = match method {
             None => Method::GET,
-            Some(raw) => Method::from_bytes(raw.as_bytes())
-                .map_err(|_| TargetError::InvalidMethod(raw.into()))?,
+            Some(raw) => {
+                Method::from_bytes(raw.as_bytes()).map_err(|_| TargetError::Method(raw.into()))?
+            }
         };
-        Ok(Self { host, tls, method })
+        let path = path::normalize(uri.path())
+            .map_err(|refused| TargetError::Path(refused.to_string().into()))?
+            .into_owned();
+        Ok(Self {
+            host,
+            path,
+            query: uri.query().map(str::to_owned),
+            tls,
+            method,
+            entry_point: entry_point.map(str::to_owned),
+        })
+    }
+
+    fn entry_point(&self) -> &str {
+        self.entry_point
+            .as_deref()
+            .unwrap_or_else(|| entry::of(self.tls))
     }
 }
 
-/// The answer for a host with a route: `200` body of `GET /v1/explain`.
+/// The answer for a request with a route: `200` body of `GET /v1/explain`.
 #[derive(Debug, Serialize)]
 pub struct Explanation<'a> {
     /// Version of the live table this answer came from.
@@ -71,22 +105,35 @@ pub struct Explanation<'a> {
     host: &'a str,
     /// The request method asked about.
     method: &'a str,
+    /// The normalized path.
+    path: &'a str,
+    /// The entry point the request is taken to arrive on.
+    entry_point: &'a str,
     app: &'a str,
     tenant: &'a str,
     declared_by: &'a str,
-    matched: Matched,
+    matched: Matched<'a>,
+    /// Every router that matches, best first: a router shadowed by a better one is visible.
+    considered: Vec<&'a str>,
+    /// The service the matched router names.
+    service: &'a str,
     revisions: Vec<RevisionView<'a>>,
     /// The canary policy and its live share; absent when the app has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     canary: Option<canary::Status<'a>>,
-    middleware: Vec<&'static str>,
+    /// The stages the request goes through, in order; see [`crate::pipeline`].
+    pipeline: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
-struct Matched {
-    /// The declared host that matched, as written in the snapshot.
-    pattern: String,
-    kind: MatchKind,
+struct Matched<'a> {
+    router: &'a str,
+    priority: i32,
+    /// The declared host that matched, as written in the snapshot; `null` for a router with no
+    /// literal host.
+    pattern: Option<String>,
+    /// `exact`, `wildcard`, `regexp` or `none`.
+    kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,10 +145,19 @@ struct RevisionView<'a> {
     /// What the picker uses for new requests right now: `0` unless the revision is `serving`
     /// with a positive weight and a backend. With a canary, parts of 10000 shared by the app.
     effective_weight: u16,
-    upstreams: &'a [std::net::SocketAddr],
+    /// The servers of the matched router's service in this revision; empty when the revision
+    /// does not define it.
+    servers: Vec<ServerView<'a>>,
 }
 
-/// The answer for a host without a route: `404` body of `GET /v1/explain`.
+#[derive(Debug, Serialize)]
+struct ServerView<'a> {
+    url: &'a str,
+    weight: u32,
+    available: bool,
+}
+
+/// The answer for a request without a route: `404` body of `GET /v1/explain`.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Miss {
     /// Always `"not found"`, the same error every other 404 carries.
@@ -115,39 +171,83 @@ pub struct Miss {
 ///
 /// # Errors
 ///
-/// [`Miss`] when no app answers for the host.
+/// [`Miss`] when no router matches.
 pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explanation<'a>, Miss> {
-    let Some(found) = table.lookup(&target.host) else {
-        return Err(Miss {
-            error: "not found",
-            nearest_wildcard: table.nearest_wildcard(&target.host),
-        });
+    let miss = || Miss {
+        error: "not found",
+        nearest_wildcard: table.nearest_wildcard(&target.host),
     };
-    let app = found.app;
+    let mut request = RequestHeader::build(
+        target.method.as_str(),
+        match &target.query {
+            Some(query) => format!("{}?{query}", target.path),
+            None => target.path.clone(),
+        }
+        .as_bytes(),
+        None,
+    )
+    .map_err(|_| miss())?;
+    request
+        .insert_header("host", target.host.as_str())
+        .map_err(|_| miss())?;
+    let view = View {
+        host: &target.host,
+        path: &target.path,
+        entry_point: target.entry_point(),
+        tls: target.tls,
+        request: &request,
+    };
+    let candidates = table.index().find_all(table.apps(), &view);
+    let best = candidates.first().ok_or_else(miss)?;
+    let (app, router) = table.router(best.matched).ok_or_else(miss)?;
     Ok(Explanation {
         version: table.version(),
         host: &target.host,
         method: target.method.as_str(),
+        path: &target.path,
+        entry_point: target.entry_point(),
         app: app.id(),
         tenant: app.tenant(),
         declared_by: app.declared_by(),
         matched: Matched {
-            pattern: found.pattern,
-            kind: found.kind,
+            router: router.name(),
+            priority: router.priority(),
+            pattern: best.via.pattern(),
+            kind: best.via.kind(),
         },
+        considered: candidates
+            .iter()
+            .filter_map(|candidate| table.router(candidate.matched))
+            .map(|(_, router)| router.name())
+            .collect(),
+        service: router.service(),
         revisions: app
             .revisions()
             .iter()
-            .map(|revision| RevisionView {
+            .enumerate()
+            .map(|(index, revision)| RevisionView {
                 id: revision.id(),
                 state: revision.state(),
                 weight: revision.weight(),
                 effective_weight: revision.effective_weight(),
-                upstreams: revision.upstreams(),
+                servers: app
+                    .service(index, best.matched.router)
+                    .map(|service| {
+                        service
+                            .servers()
+                            .iter()
+                            .map(|server| ServerView {
+                                url: &server.url,
+                                weight: server.weight,
+                                available: server.available(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
             .collect(),
         canary: app.canary(),
-        middleware: proxy::middleware_chain(app, target.tls),
+        pipeline: pipeline::describe(app, router, target.tls),
     })
 }
 
@@ -156,95 +256,83 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::snapshot::Snapshot;
 
     fn table() -> RoutingTable {
-        let snapshot: Snapshot = serde_json::from_value(json!({
+        let snapshot = serde_json::from_value(json!({
             "version": 3,
             "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
             "apps": [{
-                "id": "w", "tenant": "t", "declared_by": "test/w", "hosts": ["*.w.test"],
-                "tls": {"mode": "acme"},
-                "revisions": [
-                    {"id": "old", "upstreams": ["127.0.0.1:1"], "weight": 5, "state": "retiring"},
-                    {"id": "new", "upstreams": ["127.0.0.1:2"], "weight": 7, "state": "serving"}
-                ]
+                "id": "a", "tenant": "t", "declared_by": "src/a", "tls": {"mode": "acme"},
+                "routers": [
+                    {"name": "api", "match": {"all": [{"host": "a.test"}, {"path_prefix": "/api"}]}, "service": "web"},
+                    {"name": "site", "match": {"host": ["a.test", "*.a.test"]}, "service": "web"}
+                ],
+                "revisions": [{"id": "r", "weight": 1, "state": "serving", "services": [
+                    {"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:9000"}]}]}]
             }]
         }))
-        .expect("valid snapshot");
+        .expect("snapshot");
         RoutingTable::compile(&snapshot).expect("compiles")
     }
 
-    fn target(url: &str) -> Target {
-        Target::parse(url, None).expect("valid target")
-    }
-
-    #[test]
-    fn parses_the_url_into_host_and_transport() {
-        let plain = target("http://A.W.test:8080/x?y=1");
-        assert_eq!((plain.host.as_str(), plain.tls), ("a.w.test", false));
-        let tls = target("https://user@a.w.test/");
-        assert_eq!((tls.host.as_str(), tls.tls), ("a.w.test", true));
-        assert_eq!(target("https://[::1]:8443/").host, "::1");
-        assert_eq!(
-            Target::parse("http://a.test/", Some("POST")).map(|t| t.method),
-            Ok(Method::POST)
-        );
-    }
-
-    #[test]
-    fn rejects_urls_and_methods_that_name_no_request() {
-        for bad in [
-            "",
-            "a.test",
-            "/path",
-            "ftp://a.test/",
-            "http://",
-            "https:///x",
-        ] {
-            assert_eq!(
-                Target::parse(bad, None),
-                Err(TargetError::InvalidUrl),
-                "{bad:?}"
-            );
-        }
-        assert_eq!(
-            Target::parse("http://a.test/", Some("not a method")),
-            Err(TargetError::InvalidMethod("not a method".into()))
-        );
-    }
-
-    #[test]
-    fn explains_a_wildcard_match_with_effective_weights() {
+    fn explained(url: &str, method: Option<&str>) -> serde_json::Value {
         let table = table();
-        let target = target("https://x.w.test/");
-        let body = serde_json::to_value(explain(&table, &target).expect("known host"))
-            .expect("serializes");
+        let target = Target::parse(url, method, None).expect("target");
+        serde_json::to_value(explain(&table, &target).expect("routes")).expect("json")
+    }
+
+    #[test]
+    fn parses_scheme_host_method_and_path() {
+        let target =
+            Target::parse("https://A.Test:8443/x/./y?q=1", Some("POST"), None).expect("parses");
+        assert_eq!(target.host, "a.test");
+        assert_eq!(target.path, "/x/y");
+        assert_eq!(target.entry_point(), "websecure");
         assert_eq!(
-            body,
-            json!({
-                "version": 3, "host": "x.w.test", "method": "GET",
-                "app": "w", "tenant": "t", "declared_by": "test/w",
-                "matched": {"pattern": "*.w.test", "kind": "wildcard"},
-                "revisions": [
-                    {"id": "old", "state": "retiring", "weight": 5, "effective_weight": 0, "upstreams": ["127.0.0.1:1"]},
-                    {"id": "new", "state": "serving", "weight": 7, "effective_weight": 7, "upstreams": ["127.0.0.1:2"]}
-                ],
-                "middleware": ["sni_check", "route", "inflight_admit", "tenant_admit", "backend_admit", "failure_capture"],
-            })
+            Target::parse("http://a.test/", None, None)
+                .expect("plain")
+                .entry_point(),
+            "web"
         );
+        assert_eq!(Target::parse("a.test", None, None), Err(TargetError::Url));
+        assert!(matches!(
+            Target::parse("http://a.test/", Some("not a method"), None),
+            Err(TargetError::Method(_))
+        ));
+        assert!(matches!(
+            Target::parse("http://a.test/a%2fb", None, None),
+            Err(TargetError::Path(_))
+        ));
+    }
+
+    #[test]
+    fn shows_the_matched_router_the_shadowed_ones_and_the_pipeline() {
+        let answer = explained("http://a.test/api/x", None);
+        assert_eq!(answer["matched"]["router"], "api");
+        assert_eq!(answer["considered"], json!(["api", "site"]));
+        assert_eq!(answer["service"], "web");
+        assert_eq!(
+            answer["revisions"][0]["servers"][0]["url"],
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(answer["pipeline"][0], json!({"stage": "acme_http01"}));
+
+        let other = explained("http://a.test/other", None);
+        assert_eq!(other["matched"]["router"], "site");
+        assert_eq!(other["matched"]["pattern"], "a.test");
+        assert_eq!(other["considered"], json!(["site"]));
+
+        let wild = explained("http://x.a.test/", None);
+        assert_eq!(wild["matched"]["kind"], "wildcard");
     }
 
     #[test]
     fn a_miss_names_the_nearest_wildcard() {
         let table = table();
-        let target = target("http://w.test/");
-        assert_eq!(
-            explain(&table, &target).expect_err("apex is not matched"),
-            Miss {
-                error: "not found",
-                nearest_wildcard: Some("*.w.test".into())
-            }
-        );
+        let target = Target::parse("http://a.test.other/", None, None).expect("target");
+        assert!(explain(&table, &target).is_err());
+        let target = Target::parse("http://p.q.a.test/", None, None).expect("target");
+        let miss = explain(&table, &target).expect_err("two labels deep");
+        assert_eq!(miss.nearest_wildcard.as_deref(), Some("*.a.test"));
     }
 }

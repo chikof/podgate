@@ -8,10 +8,10 @@ use thiserror::Error;
 
 use crate::canary;
 use crate::clientauth;
+use crate::compile::Rejected;
 use crate::conflict::Conflict;
 use crate::route::RouteError;
 use crate::table::{ApplyError, CompileError};
-use crate::wasm::Rejection;
 
 /// Errors answered to clients. Rendered as `{"error": "<message>"}` with the matching status.
 #[derive(Debug, Error)]
@@ -135,11 +135,10 @@ fn rejection(err: &CompileError) -> Vec<Value> {
     let other = |code: &str| vec![json!({ "code": code, "message": err.to_string() })];
     match err {
         CompileError::Conflicts(conflicts) => conflicts.iter().map(Conflict::to_json).collect(),
-        CompileError::InvalidHost { .. } => other("invalid_host"),
         CompileError::UnknownTenant { .. } => other("unknown_tenant"),
         CompileError::Certificate(_) => other("invalid_certificate"),
         CompileError::SkewSecretTooShort => other("invalid_skew_secret"),
-        CompileError::Wasm(rejections) => rejections.iter().map(Rejection::to_json).collect(),
+        CompileError::Rejected(rejected) => rejected.iter().map(Rejected::to_json).collect(),
         CompileError::Canary(rejections) => {
             rejections.iter().map(canary::Rejection::to_json).collect()
         }
@@ -155,7 +154,7 @@ fn rejection(err: &CompileError) -> Vec<Value> {
 impl From<RouteError> for AppError {
     fn from(err: RouteError) -> Self {
         match err {
-            RouteError::UnknownHost => Self::NotFound,
+            RouteError::NoRoute => Self::NotFound,
             RouteError::NoUpstream => Self::Unavailable(err.to_string().into()),
         }
     }

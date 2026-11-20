@@ -265,6 +265,44 @@ async fn mtls_fronting_cannot_bypass() {
     assert_eq!(response.body, r#"{"error":"client certificate required"}"#);
 }
 
+/// The client CA belongs to the app of the router that matched, however it matched: an mTLS app
+/// reached through a `host_regexp` router (which claims no literal host) still needs a
+/// certificate, and a client that presents one is served.
+#[tokio::test]
+async fn mtls_host_regexp_router_requires_cert() {
+    let podgate = Podgate::start().await;
+    let secure = Upstream::start("secure body").await;
+    let server = TestCert::new(&["secure.test"]);
+    let ca = TestCa::new("trusted ca");
+    let mut secure_app = app("secure", &["unused.test"], &[serving("r1", secure.addr)]);
+    secure_app["tls"]["client_ca_pem"] = json!(ca.pem);
+    secure_app["routers"][0]["match"] = json!({ "host_regexp": "^secure\\.test$" });
+    let mut pushed = snapshot(1, &[secure_app]);
+    pushed["certificates"] = json!([server.entry(&["secure.test"])]);
+    let response = podgate.push_snapshot(&pushed).await;
+    assert_eq!(response.status, 200, "{response:?}");
+
+    let (config, _) = client_config(&server, None, tls13());
+    let refused = podgate
+        .try_https_get(config, "secure.test", "secure.test", "/")
+        .await
+        .expect("handshake and response");
+    assert_eq!(refused.status, 403, "{refused:?}");
+    assert_eq!(refused.body, r#"{"error":"client certificate required"}"#);
+
+    let client = ca.client("alice");
+    let (config, asked) = client_config(&server, Some(&client), tls13());
+    let served = podgate
+        .try_https_get(config, "secure.test", "secure.test", "/")
+        .await
+        .expect("handshake and response");
+    assert!(
+        asked.load(Ordering::SeqCst),
+        "the server asked for a certificate"
+    );
+    assert_eq!((served.status, served.body.as_str()), (200, "secure body"));
+}
+
 #[tokio::test]
 async fn mtls_pass_client_cert_subject() {
     let podgate = Podgate::start().await;

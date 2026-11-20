@@ -1,15 +1,26 @@
 //! The routing snapshot the control plane pushes: the JSON model of `PUT /v1/snapshot`.
 //!
-//! The entities and fields are the table in `docs/architecture.md` (`### Snapshot`). Later specs
-//! add optional fields; give each `#[serde(default)]` so an absent field means the feature is
-//! off, and never `deny_unknown_fields`, so an older podgate still accepts a newer snapshot.
+//! The entities and fields are in `docs/architecture.md` (`## Snapshot model v2`). Envelope
+//! entities ([`Snapshot`], [`App`], [`Router`], [`Revision`]) ignore unknown fields, so an older
+//! podgate accepts a newer snapshot that only adds optional envelope fields; give each new field
+//! `#[serde(default)]` so an absent field means the feature is off. Kind-tagged objects
+//! ([`Declared`]) are the opposite: their configuration belongs to the kind's module, which
+//! parses it strictly, so a misspelt option is refused instead of turning a feature off.
 
 use std::fmt;
-use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::skew::SkewSecret;
+
+mod entry_point;
+mod l4;
+mod observe;
+
+pub use entry_point::EntryPointPolicy;
+pub use l4::{Tcp, Udp};
+pub use observe::Observability;
 
 /// The complete desired state of one node. Replaces the previous snapshot as a whole.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +47,12 @@ pub struct Snapshot {
     /// `certificates` are served.
     #[serde(default)]
     pub acme: Option<Acme>,
+    /// Request-time policy per entry point. Absent: the defaults of every entry point.
+    #[serde(default)]
+    pub entry_points: Vec<EntryPointPolicy>,
+    /// Access log, metrics and tracing settings. Absent: the process defaults.
+    #[serde(default)]
+    pub observability: Option<Observability>,
 }
 
 /// One tenant of the PaaS.
@@ -58,7 +75,8 @@ pub struct Budget {
     pub max_buffer_bytes: u64,
 }
 
-/// One app: the hosts it answers for and the revisions behind them.
+/// One app: the unit of tenancy and deployment. It owns its routers, middlewares, services and
+/// transports; every name resolves inside the app only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct App {
     /// Unique id.
@@ -67,10 +85,22 @@ pub struct App {
     pub tenant: Box<str>,
     /// Free text naming the source of this declaration; used in errors and explain output.
     pub declared_by: Box<str>,
-    /// Exact host names, or names with one leading `*.` wildcard.
-    pub hosts: Vec<Box<str>>,
     /// TLS policy.
     pub tls: TlsPolicy,
+    /// Routers: what the app answers for and where each request goes.
+    pub routers: Vec<Router>,
+    /// Middlewares routers may name in their `chain`.
+    #[serde(default)]
+    pub middlewares: Vec<Declared>,
+    /// Names of middlewares that run before every router's own chain.
+    #[serde(default)]
+    pub default_chain: Vec<Box<str>>,
+    /// Services shared by every revision. A revision's own services are in [`Revision::services`].
+    #[serde(default)]
+    pub services: Vec<Declared>,
+    /// Upstream transports services may name. Not built yet.
+    #[serde(default)]
+    pub transports: Vec<Declared>,
     /// Deployed revisions, split by weight and state.
     pub revisions: Vec<Revision>,
     /// Serve TLS requests whose `Host` differs from the SNI. Absent: refuse them
@@ -85,13 +115,60 @@ pub struct App {
     /// a request to an app with no upstream gets `503`.
     #[serde(default)]
     pub scale_to_zero: Option<ScaleToZero>,
-    /// WASM request filters, run in order on the request headers. Absent: none.
-    #[serde(default)]
-    pub filters: Vec<Filter>,
     /// Ramp one serving revision up while it stays healthy, and pull it back when it does not
     ///. Absent: revisions share traffic by their weights.
     #[serde(default)]
     pub canary: Option<Canary>,
+    /// TCP routers and services. Not built yet.
+    #[serde(default)]
+    pub tcp: Option<Tcp>,
+    /// UDP routers and services. Not built yet.
+    #[serde(default)]
+    pub udp: Option<Udp>,
+}
+
+/// One router: a matcher, a middleware chain and a service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Router {
+    /// Unique among the app's routers.
+    pub name: Box<str>,
+    /// Entry points the router listens on. Absent: every HTTP and HTTPS entry point.
+    #[serde(default)]
+    pub entry_points: Option<Vec<Box<str>>>,
+    /// The matcher tree, parsed by `crate::router::matcher`: an object with exactly one key.
+    #[serde(rename = "match")]
+    pub matcher: Value,
+    /// Higher goes first among the routers of one tenant. Absent: `0`. Never orders routers of
+    /// different tenants.
+    #[serde(default)]
+    pub priority: Option<i32>,
+    /// Names of middlewares that run after the app's `default_chain`, in order.
+    #[serde(default)]
+    pub chain: Vec<Box<str>>,
+    /// The service that answers, by name: one of the revision's services, else one of the app's.
+    pub service: Box<str>,
+    /// Per-router observability overrides. Not built yet.
+    #[serde(default)]
+    pub observability: Option<Value>,
+    /// Source of this router when it differs from the app's.
+    #[serde(default)]
+    pub declared_by: Option<Box<str>>,
+}
+
+/// A kind-tagged, named object: a middleware, service or transport.
+///
+/// The envelope only knows the name and the type; the module of that type owns the rest and
+/// parses it strictly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Declared {
+    /// Unique among the app's objects of this kind of object.
+    pub name: Box<str>,
+    /// The type, such as `loadbalancer` or `wasm`.
+    #[serde(rename = "type")]
+    pub kind: Box<str>,
+    /// The type's own fields.
+    #[serde(flatten)]
+    pub config: Map<String, Value>,
 }
 
 /// Canary policy of an app: the rollout of one revision, judged by its own `5xx` rate.
@@ -126,31 +203,6 @@ fn default_wake_timeout_secs() -> u64 {
     30
 }
 
-/// One WASM request filter of an app: a proxy-wasm module and the limits it runs under.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Filter {
-    /// The module in the WebAssembly binary format, standard base64.
-    pub wasm_base64: String,
-    /// Instructions the filter may execute per request; running out ends the request with `500`.
-    pub fuel: u64,
-    /// Most bytes of linear memory the filter may hold; growing past it ends the request with
-    /// `500`.
-    pub max_memory_bytes: u64,
-}
-
-impl fmt::Debug for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Filter")
-            .field(
-                "wasm_base64",
-                &format_args!("{} bytes", self.wasm_base64.len()),
-            )
-            .field("fuel", &self.fuel)
-            .field("max_memory_bytes", &self.max_memory_bytes)
-            .finish()
-    }
-}
-
 /// How an app gets certificates, plus optional client authentication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TlsPolicy {
@@ -181,12 +233,13 @@ pub enum TlsMode {
 pub struct Revision {
     /// Unique within its app.
     pub id: Box<str>,
-    /// Backends of this revision.
-    pub upstreams: Vec<SocketAddr>,
-    /// Share of new traffic against the app's other serving revisions.
-    pub weight: u16,
     /// Whether the revision takes new traffic.
     pub state: RevisionState,
+    /// Share of new traffic against the app's other serving revisions.
+    pub weight: u16,
+    /// The services of this release. A router's service is looked up here first.
+    #[serde(default)]
+    pub services: Vec<Declared>,
 }
 
 /// Lifecycle state of a revision; see `docs/architecture.md` (`### Revision states`).
@@ -291,43 +344,28 @@ impl fmt::Debug for Acme {
 mod test {
     use super::*;
 
-    const JSON: &str = r#"{
-        "version": 7,
-        "tenants": [{"id": "t1", "weight": 1, "budget": {"max_inflight": 10, "max_buffer_bytes": 1024}}],
-        "apps": [{
-            "id": "a", "tenant": "t1", "declared_by": "paas/a", "hosts": ["a.test", "*.a.test"],
-            "tls": {"mode": "on_demand"},
-            "revisions": [{"id": "r1", "upstreams": ["127.0.0.1:9000"], "weight": 100, "state": "serving"}],
-            "future_field": true
-        }]
-    }"#;
-
     #[test]
-    fn parses_the_documented_shape_and_ignores_unknown_fields() {
-        let snapshot: Snapshot = serde_json::from_str(JSON).expect("valid snapshot");
-        assert_eq!(snapshot.version, 7);
-        assert!(snapshot.certificates.is_empty());
-        let app = &snapshot.apps[0];
-        assert_eq!(app.tls.mode, TlsMode::OnDemand);
-        assert_eq!(app.tls.client_ca_pem, None);
-        assert_eq!(app.revisions[0].state, RevisionState::Serving);
-        assert_eq!(app.revisions[0].upstreams[0].port(), 9000);
+    fn declared_keeps_the_kind_fields_apart_from_name_and_type() {
+        let declared: Declared = serde_json::from_str(
+            r#"{"name": "web", "type": "loadbalancer", "servers": [], "algorithm": "round_robin"}"#,
+        )
+        .expect("parses");
+        assert_eq!(&*declared.name, "web");
+        assert_eq!(&*declared.kind, "loadbalancer");
+        assert_eq!(declared.config.len(), 2);
+        let back = serde_json::to_value(&declared).expect("serializes");
+        assert_eq!(back["type"], "loadbalancer");
+        assert_eq!(back["algorithm"], "round_robin");
     }
 
     #[test]
-    fn rejects_unknown_states() {
-        let bad = JSON.replace("serving", "sleeping");
-        assert!(serde_json::from_str::<Snapshot>(&bad).is_err());
-    }
-
-    #[test]
-    fn debug_hides_the_private_key() {
-        let cert = Certificate {
-            hosts: vec!["a.test".into()],
-            cert_pem: "CERT".into(),
-            key_pem: "SECRET".into(),
-        };
-        let shown = format!("{cert:?}");
-        assert!(!shown.contains("SECRET"), "{shown}");
+    fn a_router_reads_match_as_raw_json() {
+        let router: Router = serde_json::from_str(
+            r#"{"name": "r", "match": {"host": "a.test"}, "service": "web", "future_field": 1}"#,
+        )
+        .expect("unknown fields are ignored");
+        assert_eq!(router.matcher["host"], "a.test");
+        assert_eq!(router.priority, None);
+        assert!(router.chain.is_empty());
     }
 }

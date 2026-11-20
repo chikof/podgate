@@ -67,7 +67,7 @@ use tokio::sync::oneshot;
 
 use crate::error::AppError;
 use crate::route::Selected;
-use crate::table::RoutingTable;
+use crate::table::{CompiledApp, RoutingTable};
 
 /// Limit a new backend starts with.
 const INITIAL_LIMIT: f64 = 32.0;
@@ -594,10 +594,10 @@ impl Backends {
         if let Some(limiter) = old.get(&addr) {
             return Arc::clone(limiter);
         }
-        let named: HashSet<SocketAddr> = (0..)
-            .map_while(|index| table.app(index))
-            .flat_map(|app| app.revisions())
-            .flat_map(|revision| revision.upstreams().iter().copied())
+        let named: HashSet<SocketAddr> = table
+            .apps()
+            .iter()
+            .flat_map(CompiledApp::upstream_addrs)
             .collect();
         let mut next: Registry = old
             .iter()

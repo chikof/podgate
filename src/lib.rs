@@ -1,8 +1,9 @@
 //! `podgate`: memory-safe reverse proxy for our PaaS, built on Pingora.
 //!
 //! The PaaS control plane pushes routing snapshots over a unix-socket admin API; the proxy
-//! routes requests by `Host` with the latest snapshot. The target design is in
-//! `docs/architecture.md`. `main.rs` stays thin; everything testable lives here:
+//! routes requests with the latest snapshot: a router (a matcher tree over host, path and
+//! method) picks the app, its middleware chain runs, and a service picks the server. The design
+//! is in `docs/architecture.md`. `main.rs` stays thin; everything testable lives here:
 //!
 //! - [`Config`]: settings read from environment variables.
 //! - [`Snapshot`]: the JSON model of a pushed snapshot.
@@ -33,9 +34,11 @@ pub mod admin;
 pub mod budget;
 pub mod canary;
 pub mod clientauth;
+pub mod compile;
 pub mod compress;
 pub mod config;
 pub mod conflict;
+pub mod entry;
 pub mod error;
 pub mod events;
 pub mod explain;
@@ -43,13 +46,19 @@ pub mod failures;
 pub mod fairq;
 pub mod host;
 pub mod inflight;
+pub mod l4;
+pub mod middleware;
+pub mod observe;
 pub mod outcomes;
+pub mod pipeline;
 pub mod plan;
 pub mod pool;
 pub mod proxy;
 pub mod respond;
 pub mod revert;
 pub mod route;
+pub mod router;
+pub mod service;
 pub mod skew;
 pub mod snapshot;
 pub mod sni;

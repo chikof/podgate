@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use common::{Podgate, Upstream, serving};
+use common::{Podgate, Upstream, serving, with_filters};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -32,15 +32,12 @@ const NOTHING: &str = "(i32.const 0)";
 const FOREVER: &str = "(loop $again (br $again)) (i32.const 0)";
 
 fn app(id: &str, tenant: &str, host: &str, upstream: SocketAddr, filters: &[Value]) -> Value {
-    json!({
-        "id": id,
-        "tenant": tenant,
-        "declared_by": format!("tests/{id}"),
-        "hosts": [host],
-        "tls": { "mode": "acme" },
-        "revisions": [serving("r1", upstream)],
-        "filters": filters,
-    })
+    let mut app = with_filters(
+        common::app(id, &[host], &[serving("r1", upstream)]),
+        filters,
+    );
+    app["tenant"] = json!(tenant);
+    app
 }
 
 /// Tenants `t1` and `t2`, each with 1 MiB of buffer budget.

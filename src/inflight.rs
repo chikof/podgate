@@ -365,9 +365,11 @@ mod test {
             "version": {version},
             "tenants": [{{"id": "t", "weight": 1, "budget": {{"max_inflight": 1, "max_buffer_bytes": 1}}}}],
             "apps": [{{
-                "id": "a", "tenant": "t", "declared_by": "test", "hosts": ["a.test"],
+                "id": "a", "tenant": "t", "declared_by": "test",
                 "tls": {{"mode": "acme"}},
-                "revisions": [{{"id": "r", "upstreams": ["127.0.0.1:9000"], "weight": 1, "state": "{state}"}}]
+                "routers": [{{"name": "all", "match": {{"host": "a.test"}}, "service": "web"}}],
+                "revisions": [{{"id": "r", "weight": 1, "state": "{state}", "services": [
+                    {{"name": "web", "type": "loadbalancer", "servers": [{{"url": "http://127.0.0.1:9000"}}]}}]}}]
             }}]
         }}"#
         );

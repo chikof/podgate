@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use common::{Podgate, Response, Upstream, app, serving, snapshot};
+use common::{Podgate, Response, Upstream, app, serving, snapshot, with_filters};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -65,9 +65,7 @@ fn wat_filter(wat: &str, fuel: u64, max_memory_bytes: u64) -> Value {
 
 /// An app on `host` with `filters` in front of `upstream`.
 fn filtered(id: &str, host: &str, upstream: SocketAddr, filters: &[Value]) -> Value {
-    let mut app = app(id, &[host], &[serving("r1", upstream)]);
-    app["filters"] = json!(filters);
-    app
+    with_filters(app(id, &[host], &[serving("r1", upstream)]), filters)
 }
 
 /// A backend that answers with the values of the four headers the filters touch.
@@ -177,15 +175,18 @@ async fn wasm_filter_runs() {
 
     let explained = podgate.admin_get("/v1/explain?url=http://a.test/").await;
     assert_eq!(
-        explained.json()["middleware"],
+        explained.json()["pipeline"],
         json!([
-            "acme_http01",
-            "route",
-            "inflight_admit",
-            "tenant_admit",
-            "backend_admit",
-            "failure_capture",
-            "wasm_filters"
+            {"stage": "acme_http01"},
+            {"stage": "entry_point"},
+            {"stage": "route"},
+            {"stage": "failure_capture"},
+            {"stage": "chain", "middleware": "filter0", "type": "wasm",
+             "fuel": 1_000_000, "max_memory_bytes": 262_144},
+            {"stage": "select"},
+            {"stage": "inflight_admit"},
+            {"stage": "tenant_admit"},
+            {"stage": "backend_admit"}
         ])
     );
 }
@@ -378,15 +379,15 @@ async fn wasm_invalid_module() {
         .as_array()
         .expect("list")
         .iter()
-        .map(|entry| (entry["code"].clone(), entry["filter"].clone()))
+        .map(|entry| (entry["code"].clone(), entry["at"].clone()))
         .collect();
     assert_eq!(
         codes,
         [
-            (json!("wasm_invalid"), json!(0)),
-            (json!("wasm_invalid"), json!(1)),
-            (json!("wasm_invalid"), json!(2)),
-            (json!("wasm_invalid"), json!(3)),
+            (json!("wasm_invalid"), json!("middleware filter0")),
+            (json!("wasm_invalid"), json!("middleware filter1")),
+            (json!("wasm_invalid"), json!("middleware filter2")),
+            (json!("wasm_invalid"), json!("middleware filter3")),
         ]
     );
 }

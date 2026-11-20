@@ -102,10 +102,13 @@ impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let name = client_hello.server_name()?;
         let table = self.table.load();
+        // Ask for a client certificate when any app that may serve this host wants one: a
+        // literal claimant, or an app with a `host_regexp` or host-free router. The request
+        // check (`clientauth::admit`) judges the app the request really matched.
         clientauth::decide(
             table
-                .find_app(&host::normalize(name))
-                .is_some_and(|(_, app)| app.client_auth().is_some()),
+                .may_serve(&host::normalize(name))
+                .any(|app| app.client_auth().is_some()),
         );
         table.certificates().lookup(name)
     }

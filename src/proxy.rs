@@ -9,24 +9,24 @@
 //! 2. its own field on [`Ctx`] (default in [`Gateway::new_ctx`]), and
 //! 3. one line in each callback it hooks, and one callback method when it needs a new hook.
 //!
-//! Core host routing is `route.rs`; this file never matches hosts or picks backends itself.
+//! A feature that is a middleware (a per-route stage tenants configure) adds no line here at
+//! all: it is one type in `src/middleware/` and one line in the `kinds!` list, and the chain
+//! runner below calls it. Core routing is `route.rs` and `router.rs`; this file never matches
+//! hosts or picks backends itself.
 //!
 //! # Callback order
 //!
-//! `request_filter` runs SNI, route, in-flight admission, tenant admission, backend admission
-//! (where a request waits when its upstream is at its limit), then starts the
-//! failure capture, so a request refused earlier is never recorded. `response_filter` and
-//! `response_body_filter` run the failure capture first, then compression, so a recorded failure
-//! shows the upstream's headers and uncompressed body. `logging` records the failure first and
-//! then releases the tenant slot, so the recorder sees the final status the client got. The
-//! backend slot is released when the upstream response ends, before the client has read it all.
-//!
-//! # The middleware chain
-//!
-//! [`middleware_chain`] lists, in order, the request-path stages [`Gateway::request_filter`]
-//! runs for an app. `GET /v1/explain` (see [`crate::explain`]) reports it, so it must match
-//! the code. A feature that adds a stage to `request_filter` adds one line to
-//! [`middleware_chain`], in the same position as its call, and nothing else.
+//! `request_filter` runs, in this order (`GET /v1/explain` reports it, see [`crate::pipeline`]):
+//! the ACME challenge answer, path normalization, the route match, the SNI check, the failure
+//! capture start, the router's middleware chain, then the backend selection (where a request for
+//! a sleeping app waits), in-flight admission, tenant admission and backend admission (where a
+//! request waits when its upstream is at its limit). The chain runs before any slot is taken or
+//! app woken, so unauthenticated or rate-limited traffic costs the tenant nothing. A request
+//! refused by admission is never recorded as a failure. `response_filter` and
+//! `response_body_filter` run the failure capture first, then compression, then the chain's
+//! response hooks in reverse order. `logging` records the failure first and then releases the
+//! tenant slot, so the recorder sees the final status the client got. The backend slot is
+//! released when the upstream response ends, before the client has read it all.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::Error;
 use pingora::ErrorType::InternalError;
-use pingora::http::ResponseHeader;
+use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::Digest;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
@@ -45,54 +45,25 @@ use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
 use crate::clientauth;
 use crate::compress::{self, Gzip};
+use crate::entry;
 use crate::error::AppError;
 use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
+use crate::middleware::{self, Flow, RequestCx};
 use crate::outcomes::{self, Outcomes};
 use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
+use crate::router::Matched;
 use crate::skew;
 use crate::sni;
-use crate::table::{CompiledApp, RoutingTable, TableHandle};
+use crate::table::{RoutingTable, TableHandle};
 use crate::wake::{self, Wake};
 use crate::wasm;
 
 /// Routing attempts before a request gives up; see `Gateway::request_filter`.
 const MAX_ROUTE_ATTEMPTS: u8 = 3;
-
-/// The request-path stages `request_filter` runs for `app`, in the order it runs them; `tls`
-/// says the request arrived over a TLS connection. A stage that cannot act for this app is
-/// left out: `sni_check` never refuses an app that sets `allow_domain_fronting`, and
-/// `wasm_filters` only runs for an app with filters.
-///
-/// Every stage appends one line here, next to where `request_filter` calls it.
-#[must_use]
-pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
-    let mut chain = Vec::new();
-    if !tls {
-        chain.push("acme_http01");
-    }
-    if tls && !app.allow_domain_fronting() {
-        chain.push("sni_check");
-    }
-    if app.client_auth().is_some() {
-        chain.push("client_cert");
-    }
-    chain.push("route");
-    if app.scale_to_zero().is_some() {
-        chain.push("wake_hold");
-    }
-    chain.push("inflight_admit");
-    chain.push("tenant_admit");
-    chain.push("backend_admit");
-    chain.push("failure_capture");
-    if !app.filters().is_empty() {
-        chain.push("wasm_filters");
-    }
-    chain
-}
 
 /// State of one proxied request, created by [`Gateway::new_ctx`] and passed to every callback.
 ///
@@ -103,8 +74,16 @@ pub struct Ctx {
     /// The routing table this request started with. Loaded once, so a snapshot swap in the
     /// middle of the request cannot change its routing.
     pub table: Arc<RoutingTable>,
-    /// The routing decision, set by `request_filter` when the host has a route.
+    /// The router the request matched, set by `request_filter`. Indices into `table`.
+    pub matched: Option<Matched>,
+    /// The routing decision, set by `request_filter` once a revision and backend are chosen and
+    /// every admission passed.
     pub route: Option<Selected>,
+    /// Per-request state of the middleware chain (see [`crate::middleware`]).
+    pub chain: middleware::State,
+    /// Set when a middleware answered the request: it has a router but no revision or backend,
+    /// which the failure recorder needs to know.
+    pub chain_answered: bool,
     /// Keeps this request counted on its revision (see [`crate::inflight`]); set by
     /// `request_filter` with `route`, released when the request ends and the `Ctx` drops.
     pub inflight: Option<InflightGuard>,
@@ -115,7 +94,7 @@ pub struct Ctx {
     pub compression: Option<Gzip>,
     /// Pool partition state of the downstream connection, see [`pool`].
     pub pool: pool::State,
-    /// Failed-request capture, begun by `request_filter` for a routed request.
+    /// Failed-request capture, begun by `request_filter` for a matched request.
     pub failures: failures::Capture,
     /// Wake and idle state for apps that scale to zero.
     pub wake: wake::State,
@@ -203,6 +182,36 @@ impl Gateway {
         self.backends = backends;
         self
     }
+
+    /// Runs the router's middleware chain on the request. `true` when a middleware answered it.
+    async fn run_chain(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        matched: Matched,
+    ) -> pingora::Result<bool> {
+        let table = Arc::clone(&ctx.table);
+        let Some((app, router)) = table.router(matched) else {
+            return Ok(false);
+        };
+        if router.chain().is_empty() {
+            return Ok(false);
+        }
+        let tenant = table
+            .tenant_budget(app.tenant())
+            .map(|limits| self.budgets.tenant(app.tenant(), limits));
+        let mut cx = RequestCx {
+            session,
+            app,
+            tenant: tenant.as_ref(),
+            executor: &self.wasm,
+            capacity_refusal: &mut ctx.capacity_refusal,
+        };
+        let flow =
+            middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
+        ctx.chain_answered = flow == Flow::Respond;
+        Ok(ctx.chain_answered)
+    }
 }
 
 #[async_trait]
@@ -212,7 +221,10 @@ impl ProxyHttp for Gateway {
     fn new_ctx(&self) -> Ctx {
         Ctx {
             table: self.table.load(),
+            matched: None,
             route: None,
+            chain: middleware::State::default(),
+            chain_answered: false,
             inflight: None,
             tenant_slot: None,
             compression: None,
@@ -229,19 +241,43 @@ impl ProxyHttp for Gateway {
         if acme::serve_challenge(session, &ctx.table).await? {
             return Ok(true);
         }
-        // Before routing: a misdirected request learns nothing about the route it named.
-        if let Err(err) = sni::check(session, &ctx.table) {
+        // Before matching: the path that is matched is the path that is served.
+        let tls = entry::is_tls(session);
+        if let Err(refused) = entry::normalize_request(session.req_header_mut()) {
+            let err = AppError::BadRequest(refused.to_string().into());
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
-        // Before routing, whatever the SNI was: an mTLS app is never reached without its client CA.
-        if let Err(err) = clientauth::admit(session, &ctx.table) {
+        let found = route::matching(&ctx.table, session.req_header(), entry::of(tls), tls);
+        // Right after matching and before anything answers: a misdirected request gets `421`
+        // whether or not a router matched, and the matched app decides fronting.
+        if let Err(err) = sni::check(session, &ctx.table, found) {
             respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+        // Right after the match: the app the router really belongs to decides whether a client
+        // certificate is required, however the router matched (exact host, regexp, no host).
+        if let Err(err) = clientauth::admit(session, &ctx.table, found) {
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+        let Some(mut matched) = found else {
+            respond::write_error(session, &AppError::from(RouteError::NoRoute)).await?;
+            return Ok(true);
+        };
+        ctx.matched = Some(matched);
+        let keep_bodies = ctx
+            .table
+            .app(matched.app)
+            .is_some_and(crate::table::CompiledApp::record_bodies);
+        ctx.failures.begin(keep_bodies);
+        // The tenant's chain, before any slot is taken or app woken.
+        if self.run_chain(session, ctx, matched).await? {
             return Ok(true);
         }
         let mut attempts = 0;
         loop {
-            let selected = match route::resolve(&ctx.table, session.req_header()) {
+            let selected = match route::select(&ctx.table, matched, session.req_header()) {
                 Ok(selected) => selected,
                 Err(RouteError::NoUpstream) => {
                     let held = self.wake.hold(
@@ -249,13 +285,14 @@ impl ProxyHttp for Gateway {
                         &mut ctx.table,
                         &self.table,
                         &self.budgets,
-                        session.req_header(),
+                        &mut matched,
                     );
                     if let Err(err) = held.await {
                         ctx.capacity_refusal = err.is_capacity_refusal();
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
+                    ctx.matched = Some(matched);
                     continue;
                 }
                 Err(err) => {
@@ -285,33 +322,43 @@ impl ProxyHttp for Gateway {
                 }
                 ctx.route = Some(selected);
                 ctx.inflight = Some(guard);
-                let keep_bodies = ctx
-                    .table
-                    .app(selected.app)
-                    .is_some_and(CompiledApp::record_bodies);
-                ctx.failures.begin(keep_bodies);
-                // After routing and every admission: a filter-answered request releases its
-                // guards with the context.
-                let tenant = ctx.tenant_slot.as_ref().map(TenantSlot::tenant);
-                return wasm::run_filters(
-                    session,
-                    &ctx.table,
-                    selected.app,
-                    tenant,
-                    &self.wasm,
-                    &mut ctx.capacity_refusal,
-                )
-                .await;
+                return Ok(false);
             }
-            // The revision drained after this request loaded its table: route again with the
-            // live one. Repeated refusals mean snapshots are landing right now; give up.
+            // The revision drained after this request loaded its table: select again with the
+            // live one, on the same router (see `RoutingTable::rematch`). Repeated refusals
+            // mean snapshots are landing right now; give up.
             attempts += 1;
-            if attempts == MAX_ROUTE_ATTEMPTS {
-                respond::write_error(session, &AppError::from(RouteError::NoUpstream)).await?;
-                return Ok(true);
+            let live = self.table.load();
+            let rematched = live.rematch(&ctx.table, matched);
+            match rematched {
+                Some(next) if attempts < MAX_ROUTE_ATTEMPTS => {
+                    ctx.table = live;
+                    matched = next;
+                    ctx.matched = Some(matched);
+                }
+                _ => {
+                    respond::write_error(session, &AppError::from(RouteError::NoUpstream)).await?;
+                    return Ok(true);
+                }
             }
-            ctx.table = self.table.load();
         }
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            middleware::run_upstream_request(
+                app.stages(),
+                router.chain(),
+                upstream_request,
+                &mut ctx.chain,
+            )?;
+        }
+        Ok(())
     }
 
     async fn response_filter(
@@ -326,6 +373,14 @@ impl ProxyHttp for Gateway {
             ctx.compression =
                 compress::start(session.req_header(), upstream_response, slot.tenant());
         }
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            middleware::run_response(
+                app.stages(),
+                router.chain(),
+                upstream_response,
+                &mut ctx.chain,
+            )?;
+        }
         Ok(())
     }
 
@@ -339,6 +394,15 @@ impl ProxyHttp for Gateway {
         ctx.failures.response_chunk(body.as_ref());
         compress::filter(&mut ctx.compression, body, end_of_stream)
             .map_err(|err| Error::because(InternalError, "gzip encoding failed", err))?;
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            middleware::run_response_body(
+                app.stages(),
+                router.chain(),
+                body,
+                end_of_stream,
+                &mut ctx.chain,
+            )?;
+        }
         if end_of_stream {
             ctx.backend.release();
         }

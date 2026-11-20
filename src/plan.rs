@@ -1,38 +1,36 @@
 //! What a snapshot would change: the diff of the live table against a candidate compiled by the
 //! same compiler (`POST /v1/snapshot/plan`), and which apps a swap touched (for auto-revert).
 //!
-//! Hosts are compared as declared patterns (`a.test`, `*.a.test`). A host is *added* when only
-//! the candidate answers for it, *removed* when only the live table does, and *changed* when
-//! both do but what answers differs: the app, its tenant, its TLS policy, domain fronting, or
-//! any revision's id, upstreams, weight or state. `declared_by` is free text and never counts.
+//! Hosts are compared as declared patterns (`a.test`, `*.a.test`), the literal hosts the routers
+//! of an app claim. A host is *added* when only the candidate answers for it, *removed* when only
+//! the live table does, and *changed* when both do but what answers differs: the app's
+//! fingerprint (everything it declares except `declared_by`: routers, middlewares, services,
+//! revisions, TLS, canary) is not the same. So a change to any router marks every host of its
+//! app as changed.
 //!
-//! A *posture change* is a host that exists on both sides and got less strict. The kinds are
-//! [`PostureKind`]. A new host is not a relaxation of anything, and tightening is not listed.
+//! A *posture change* is a host that exists on both sides and got less strict. The built-in
+//! kinds are in [`kind`]; every security middleware reports its own through
+//! [`crate::middleware::Kind::posture`], and the plan only asks. A new host is not a relaxation
+//! of anything, and tightening is not listed.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::snapshot::TlsMode;
 use crate::table::{CompiledApp, RoutingTable};
 
-/// How a host's security got weaker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PostureKind {
+/// The `kind` strings of the built-in posture changes. Middleware kinds add their own, such as
+/// `filters_removed` and `filters_changed` from the `wasm` middleware.
+pub mod kind {
     /// The host required client certificates and no longer does.
-    ClientCaRemoved,
+    pub const CLIENT_CA_REMOVED: &str = "client_ca_removed";
     /// The CA that signs client certificates is a different one: whoever it trusts changed.
-    ClientCaChanged,
+    pub const CLIENT_CA_CHANGED: &str = "client_ca_changed";
     /// TLS requests whose `Host` differs from the SNI are now served.
-    DomainFrontingEnabled,
+    pub const DOMAIN_FRONTING_ENABLED: &str = "domain_fronting_enabled";
     /// Certificates for the host are now issued at the first handshake instead of in advance.
-    OnDemandTlsEnabled,
-    /// The app runs fewer WASM filters than before: a check some filter made is gone.
-    FiltersRemoved,
-    /// The app had filters and they differ now (a module or a limit) without fewer running: what they check
-    /// may have loosened, which a diff of compiled modules cannot tell. Adding filters to an app that had none is a tightening and is not listed.
-    FiltersChanged,
+    pub const ON_DEMAND_TLS_ENABLED: &str = "on_demand_tls_enabled";
 }
 
 /// One relaxation, for one host.
@@ -42,8 +40,8 @@ pub struct PostureChange {
     pub host: Box<str>,
     /// The app that answers for the host in the candidate.
     pub app: Box<str>,
-    /// What got weaker.
-    pub kind: PostureKind,
+    /// What got weaker: one of [`kind`], or a middleware's own.
+    pub kind: &'static str,
 }
 
 /// The difference between the live table and a candidate. Every list is sorted.
@@ -64,50 +62,55 @@ pub struct Plan {
 }
 
 fn by_host(table: &RoutingTable) -> BTreeMap<&str, &CompiledApp> {
-    (0..)
-        .map_while(|index| table.app(index))
+    table
+        .apps()
+        .iter()
         .flat_map(|app| app.hosts().iter().map(move |host| (&**host, app)))
         .collect()
 }
 
-/// Whether two apps serve the same way: everything but the hosts they declare and `declared_by`.
+/// Whether two apps serve the same way: everything but `declared_by`.
 fn same_serving(live: &CompiledApp, candidate: &CompiledApp) -> bool {
-    live.id() == candidate.id()
-        && live.tenant() == candidate.tenant()
-        && live.tls() == candidate.tls()
-        && live.allow_domain_fronting() == candidate.allow_domain_fronting()
-        && live.filters_digest() == candidate.filters_digest()
-        && live.canary_policy() == candidate.canary_policy()
-        && live.revisions().len() == candidate.revisions().len()
-        && live
-            .revisions()
-            .iter()
-            .zip(candidate.revisions())
-            .all(|(old, new)| {
-                old.id() == new.id()
-                    && old.upstreams() == new.upstreams()
-                    && old.weight() == new.weight()
-                    && old.state() == new.state()
-            })
+    live.fingerprint() == candidate.fingerprint()
 }
 
-fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<PostureKind> {
+/// The names of the middlewares some router of `app` actually runs.
+fn used_stages(app: &CompiledApp) -> HashSet<usize> {
+    app.routers()
+        .iter()
+        .flat_map(|router| router.chain().iter().copied())
+        .collect()
+}
+
+fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     match (&live.tls().client_ca_pem, &candidate.tls().client_ca_pem) {
-        (Some(_), None) => kinds.push(PostureKind::ClientCaRemoved),
-        (Some(old), Some(new)) if old != new => kinds.push(PostureKind::ClientCaChanged),
+        (Some(_), None) => kinds.push(kind::CLIENT_CA_REMOVED),
+        (Some(old), Some(new)) if old != new => kinds.push(kind::CLIENT_CA_CHANGED),
         _ => {}
     }
     if candidate.allow_domain_fronting() && !live.allow_domain_fronting() {
-        kinds.push(PostureKind::DomainFrontingEnabled);
+        kinds.push(kind::DOMAIN_FRONTING_ENABLED);
     }
     if candidate.tls().mode == TlsMode::OnDemand && live.tls().mode != TlsMode::OnDemand {
-        kinds.push(PostureKind::OnDemandTlsEnabled);
+        kinds.push(kind::ON_DEMAND_TLS_ENABLED);
     }
-    if candidate.filters().len() < live.filters().len() {
-        kinds.push(PostureKind::FiltersRemoved);
-    } else if !live.filters().is_empty() && live.filters_digest() != candidate.filters_digest() {
-        kinds.push(PostureKind::FiltersChanged);
+    let used_now = used_stages(candidate);
+    for index in used_stages(live) {
+        let Some(old) = live.stages().get(index) else {
+            continue;
+        };
+        let new = candidate
+            .stages()
+            .iter()
+            .enumerate()
+            .find(|(at, stage)| stage.name == old.name && used_now.contains(at))
+            .map(|(_, stage)| &stage.stage);
+        for posture in old.stage.posture(new) {
+            if !kinds.contains(&posture) {
+                kinds.push(posture);
+            }
+        }
     }
     kinds
 }
@@ -151,19 +154,18 @@ pub fn diff(live: &RoutingTable, candidate: &RoutingTable) -> Plan {
     plan
 }
 
-/// The ids of the apps `current` serves differently from `previous`: new apps, apps whose
-/// serving config changed (see the module docs) and apps that gained or lost a host.
+/// The ids of the apps `current` serves differently from `previous`: new apps and apps whose
+/// declaration changed in any way but `declared_by` (see the module docs).
 #[must_use]
 pub fn changed_apps(previous: &RoutingTable, current: &RoutingTable) -> Vec<Box<str>> {
-    let old: HashMap<&str, &CompiledApp> = (0..)
-        .map_while(|index| previous.app(index))
-        .map(|app| (app.id(), app))
-        .collect();
-    (0..)
-        .map_while(|index| current.app(index))
+    let old: HashMap<&str, &CompiledApp> =
+        previous.apps().iter().map(|app| (app.id(), app)).collect();
+    current
+        .apps()
+        .iter()
         .filter(|app| {
             old.get(app.id())
-                .is_none_or(|before| !same_serving(before, app) || before.hosts() != app.hosts())
+                .is_none_or(|before| !same_serving(before, app))
         })
         .map(|app| app.id().into())
         .collect()
@@ -178,9 +180,11 @@ mod test {
 
     fn app(id: &str, hosts: &[&str], port: u16, extra: &Value) -> Value {
         let mut app = json!({
-            "id": id, "tenant": "t", "declared_by": format!("test/{id}"), "hosts": hosts,
+            "id": id, "tenant": "t", "declared_by": format!("test/{id}"),
             "tls": {"mode": "acme"},
-            "revisions": [{"id": "r1", "upstreams": [format!("127.0.0.1:{port}")], "weight": 100, "state": "serving"}],
+            "routers": [{"name": "all", "match": {"host": hosts}, "service": "web"}],
+            "revisions": [{"id": "r1", "weight": 100, "state": "serving", "services": [
+                {"name": "web", "type": "loadbalancer", "servers": [{"url": format!("http://127.0.0.1:{port}")}]}]}],
         });
         if let (Some(base), Some(extra)) = (app.as_object_mut(), extra.as_object()) {
             base.extend(extra.clone());
@@ -299,7 +303,7 @@ mod test {
             ],
         );
         let plan = diff(&live, &candidate);
-        let listed: Vec<(String, PostureKind)> = plan
+        let listed: Vec<(String, &str)> = plan
             .posture_changes
             .iter()
             .map(|change| (change.host.to_string(), change.kind))
@@ -307,10 +311,10 @@ mod test {
         assert_eq!(
             listed,
             [
-                ("drop.test".to_owned(), PostureKind::ClientCaRemoved),
-                ("front.test".to_owned(), PostureKind::DomainFrontingEnabled),
-                ("lazy.test".to_owned(), PostureKind::OnDemandTlsEnabled),
-                ("swap.test".to_owned(), PostureKind::ClientCaChanged),
+                ("drop.test".to_owned(), kind::CLIENT_CA_REMOVED),
+                ("front.test".to_owned(), kind::DOMAIN_FRONTING_ENABLED),
+                ("lazy.test".to_owned(), kind::ON_DEMAND_TLS_ENABLED),
+                ("swap.test".to_owned(), kind::CLIENT_CA_CHANGED),
             ]
         );
     }

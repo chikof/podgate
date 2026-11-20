@@ -1,7 +1,9 @@
-//! Core host routing: which app, revision and backend a request goes to.
+//! Core routing: which router, revision and backend a request goes to.
 //!
-//! Pure functions over a [`RoutingTable`] and a request header, so they are testable without a
-//! running proxy. `proxy.rs` calls [`resolve`] and does nothing else about routing.
+//! Two steps, both pure functions over a [`RoutingTable`] and a request header, so they are
+//! testable without a running proxy: [`matching`] finds the router (and so the app and its
+//! middleware chain), and [`select`] picks a revision and a server for it. The proxy runs the
+//! middleware chain between the two; `proxy.rs` calls these and does nothing else about routing.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -10,6 +12,8 @@ use pingora::http::RequestHeader;
 use thiserror::Error;
 
 use crate::host;
+use crate::router::{Matched, View, path};
+use crate::service::PickCx;
 use crate::skew;
 use crate::table::RoutingTable;
 
@@ -19,6 +23,8 @@ use crate::table::RoutingTable;
 pub struct Selected {
     /// Index of the app, for [`RoutingTable::app`].
     pub app: usize,
+    /// Index of the matched router in [`crate::table::CompiledApp::routers`].
+    pub router: usize,
     /// Index of the revision, for [`crate::table::CompiledApp::revisions`].
     pub revision: usize,
     /// The backend to connect to.
@@ -31,10 +37,11 @@ pub struct Selected {
 /// Why a request has no route.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RouteError {
-    /// No app answers for the request's host, or the request names none.
-    #[error("unknown host")]
-    UnknownHost,
-    /// The app exists but no revision takes new requests.
+    /// No router matches the request: no app claims its host, or none of the app's routers
+    /// matches the rest of it.
+    #[error("not found")]
+    NoRoute,
+    /// The router matched but no revision takes new requests.
     #[error("no upstream available")]
     NoUpstream,
 }
@@ -50,27 +57,73 @@ pub fn request_host(request: &RequestHeader) -> Option<Cow<'_, str>> {
     Some(host::normalize(raw))
 }
 
-/// Routes a request against `table`. A valid session cookie (see [`crate::skew`]) pins it to
-/// the revision it names while that revision is `serving` or `retiring`; otherwise the weighted
-/// pick decides.
+/// The router that answers `request`, which arrived on entry point `entry_point` (over TLS when
+/// `tls`). `None` when the request names no host, its path cannot be normalized, or no router
+/// matches.
+#[must_use]
+pub fn matching(
+    table: &RoutingTable,
+    request: &RequestHeader,
+    entry_point: &str,
+    tls: bool,
+) -> Option<Matched> {
+    let host = request_host(request)?;
+    let path = path::normalize(request.uri.path()).ok()?;
+    let view = View {
+        host: &host,
+        path: &path,
+        entry_point,
+        tls,
+        request,
+    };
+    table.index().find(table.apps(), &view)
+}
+
+/// Picks a revision and a backend for a request that matched `matched`. A valid session cookie
+/// (see [`crate::skew`]) pins it to the revision it names while that revision is `serving` or
+/// `retiring`; otherwise the weighted pick decides.
 ///
 /// # Errors
 ///
-/// [`RouteError::UnknownHost`] when no app claims the host, [`RouteError::NoUpstream`] when the
-/// app has no revision that takes new requests.
-pub fn resolve(table: &RoutingTable, request: &RequestHeader) -> Result<Selected, RouteError> {
-    let host = request_host(request).ok_or(RouteError::UnknownHost)?;
-    let (index, app) = table.find_app(&host).ok_or(RouteError::UnknownHost)?;
-    let (pick, pinned) = match skew::pinned(table, app, request) {
+/// [`RouteError::NoRoute`] when `matched` points outside the table, [`RouteError::NoUpstream`]
+/// when no revision takes new requests or the router's service has no available server.
+pub fn select(
+    table: &RoutingTable,
+    matched: Matched,
+    request: &RequestHeader,
+) -> Result<Selected, RouteError> {
+    let app = table.app(matched.app).ok_or(RouteError::NoRoute)?;
+    let cx = PickCx { request };
+    let (pick, pinned) = match skew::pinned(table, app, matched.router, cx) {
         Some(pick) => (pick, true),
-        None => (app.pick().ok_or(RouteError::NoUpstream)?, false),
+        None => (
+            app.pick(matched.router, cx).ok_or(RouteError::NoUpstream)?,
+            false,
+        ),
     };
     Ok(Selected {
-        app: index,
+        app: matched.app,
+        router: matched.router,
         revision: pick.revision,
         upstream: pick.upstream,
         pinned,
     })
+}
+
+/// [`matching`] then [`select`]: the whole routing decision for a request with no middleware
+/// chain in between, for tests and tools.
+///
+/// # Errors
+///
+/// [`RouteError::NoRoute`] when no router matches, [`RouteError::NoUpstream`] as [`select`].
+pub fn resolve(
+    table: &RoutingTable,
+    request: &RequestHeader,
+    entry_point: &str,
+    tls: bool,
+) -> Result<Selected, RouteError> {
+    let matched = matching(table, request, entry_point, tls).ok_or(RouteError::NoRoute)?;
+    select(table, matched, request)
 }
 
 #[cfg(test)]
@@ -87,48 +140,73 @@ mod test {
         "version": 1,
         "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
         "apps": [{
-            "id": "a", "tenant": "t", "declared_by": "test", "hosts": ["a.test"],
+            "id": "a", "tenant": "t", "declared_by": "test",
             "tls": {"mode": "acme"},
-            "revisions": [{"id": "r", "upstreams": ["127.0.0.1:9000"], "weight": 1, "state": "serving"}]
+            "routers": [
+                {"name": "api", "match": {"all": [{"host": "a.test"}, {"path_prefix": "/api"}]}, "service": "api"},
+                {"name": "site", "match": {"host": "a.test"}, "service": "web"}
+            ],
+            "revisions": [{"id": "r", "weight": 1, "state": "serving", "services": [
+                {"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:9000"}]},
+                {"name": "api", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:9001"}]}
+            ]}]
         }]
     }"#;
 
-    fn request(host: Option<&str>) -> RequestHeader {
-        let mut request = RequestHeader::build("GET", b"/", None).expect("valid request line");
+    fn request(host: Option<&str>, path: &str) -> RequestHeader {
+        let mut request =
+            RequestHeader::build("GET", path.as_bytes(), None).expect("valid request line");
         if let Some(host) = host {
             request.insert_header("Host", host).expect("valid header");
         }
         request
     }
 
+    fn port(table: &RoutingTable, request: &RequestHeader) -> Result<u16, RouteError> {
+        resolve(table, request, "web", false).map(|selected| selected.upstream.port())
+    }
+
     #[test]
     fn routes_by_host_header_ignoring_case_and_port() {
         let table = table(ONE_APP);
-        let selected = resolve(&table, &request(Some("A.Test:8080"))).expect("routes");
-        assert_eq!(selected.upstream, SocketAddr::from(([127, 0, 0, 1], 9000)));
+        assert_eq!(port(&table, &request(Some("A.Test:8080"), "/")), Ok(9000));
+    }
+
+    #[test]
+    fn the_more_specific_router_wins_and_the_service_follows_it() {
+        let table = table(ONE_APP);
+        assert_eq!(port(&table, &request(Some("a.test"), "/api/x")), Ok(9001));
+        assert_eq!(port(&table, &request(Some("a.test"), "/apix")), Ok(9000));
+        assert_eq!(port(&table, &request(Some("a.test"), "/api")), Ok(9001));
     }
 
     #[test]
     fn prefers_the_uri_authority_over_the_host_header() {
         let table = table(ONE_APP);
-        let mut request = request(None);
+        let mut request = request(None, "/");
         request.set_uri("http://a.test/".parse().expect("valid uri"));
         request
             .insert_header("Host", "other.test")
             .expect("valid header");
-        assert!(resolve(&table, &request).is_ok());
+        assert!(resolve(&table, &request, "web", false).is_ok());
     }
 
     #[test]
-    fn unknown_or_missing_host_is_unknown() {
+    fn unknown_or_missing_host_has_no_route() {
         let table = table(ONE_APP);
         assert_eq!(
-            resolve(&table, &request(Some("nope.test"))),
-            Err(RouteError::UnknownHost)
+            port(&table, &request(Some("nope.test"), "/")),
+            Err(RouteError::NoRoute)
         );
+        assert_eq!(port(&table, &request(None, "/")), Err(RouteError::NoRoute));
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_normalized_has_no_route() {
+        let table = table(ONE_APP);
         assert_eq!(
-            resolve(&table, &request(None)),
-            Err(RouteError::UnknownHost)
+            port(&table, &request(Some("a.test"), "/a%2Fb")),
+            Err(RouteError::NoRoute)
         );
     }
 
@@ -136,7 +214,7 @@ mod test {
     fn app_without_a_serving_revision_has_no_upstream() {
         let table = table(&ONE_APP.replace("serving", "draining"));
         assert_eq!(
-            resolve(&table, &request(Some("a.test"))),
+            port(&table, &request(Some("a.test"), "/")),
             Err(RouteError::NoUpstream)
         );
     }

@@ -434,17 +434,27 @@ mod test {
             "version": 1,
             "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
             "apps": [{
-                "id": "a", "tenant": "t", "declared_by": "test", "hosts": ["a.test"],
+                "id": "a", "tenant": "t", "declared_by": "test",
                 "tls": {"mode": "acme"},
+                "routers": [{"name": "all", "match": {"host": "a.test"}, "service": "web"}],
                 "canary": canary,
                 "revisions": [
-                    {"id": "old", "upstreams": ["127.0.0.1:1"], "weight": 3, "state": "serving"},
-                    {"id": "new", "upstreams": ["127.0.0.1:2"], "weight": 1, "state": "serving"},
-                    {"id": "gone", "upstreams": ["127.0.0.1:3"], "weight": 1, "state": "draining"}
+                    {"id": "old", "weight": 3, "state": "serving", "services": [{"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:1"}]}]},
+                    {"id": "new", "weight": 1, "state": "serving", "services": [{"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:2"}]}]},
+                    {"id": "gone", "weight": 1, "state": "draining", "services": [{"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:3"}]}]}
                 ]
             }]
         }))
         .expect("valid snapshot")
+    }
+
+    /// Replaces the servers of revision `revision`'s `web` service in `snapshot`.
+    fn set_servers(snapshot: &mut Snapshot, revision: usize, urls: &[&str]) {
+        let servers: Vec<serde_json::Value> =
+            urls.iter().map(|url| json!({ "url": url })).collect();
+        snapshot.apps[0].revisions[revision].services[0]
+            .config
+            .insert("servers".to_owned(), serde_json::Value::Array(servers));
     }
 
     fn codes(canary: &serde_json::Value) -> Vec<&'static str> {
@@ -535,18 +545,18 @@ mod test {
         let app = table.app(0).expect("app");
         let on_canary = |app: &CompiledApp| {
             (0..1000)
-                .filter(|_| app.pick().is_some_and(|pick| pick.upstream.port() == 2))
+                .filter(|_| app.pick_any().is_some_and(|pick| pick.upstream.port() == 2))
                 .count()
         };
         assert!((190..=210).contains(&on_canary(app)));
-        assert!(app.pick_pinned("new").is_some());
+        assert!(app.pick_pinned_any("new").is_some());
 
         let runtime = app.canary_runtime().expect("canary");
         runtime.regressed.store(true, Ordering::Release);
         app.set_canary_share(0);
         assert_eq!(on_canary(app), 0);
-        assert!(app.pick_pinned("new").is_none());
-        assert!(app.pick_pinned("old").is_some());
+        assert!(app.pick_pinned_any("new").is_none());
+        assert!(app.pick_pinned_any("old").is_some());
     }
 
     fn regress(handle: &TableHandle) {
@@ -577,14 +587,14 @@ mod test {
         let mut with_other = with_version(2, first.clone());
         let mut other = with_other.apps[0].clone();
         other.id = "b".into();
-        other.hosts = vec!["b.test".into()];
+        other.routers[0].matcher = json!({"host": "b.test"});
         other.canary = None;
         with_other.apps.push(other);
         handle.apply(&with_other).expect("applies");
         let live = handle.load();
         let status = live.app(0).and_then(CompiledApp::canary).expect("canary");
         assert_eq!((status.share_percent, status.regressed), (0, true));
-        assert_eq!(live.app(0).map(|app| app.pick().is_some()), Some(true));
+        assert_eq!(live.app(0).map(|app| app.pick_any().is_some()), Some(true));
         let weights = |table: &RoutingTable| -> Vec<u16> {
             table.app(0).map_or_else(Vec::new, |app| {
                 app.revisions()
@@ -644,9 +654,11 @@ mod test {
 
         // A scale-out of the baseline keeps the verdict.
         let mut scaled = with_version(2, first.clone());
-        scaled.apps[0].revisions[0]
-            .upstreams
-            .push(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+        set_servers(
+            &mut scaled,
+            0,
+            &["http://127.0.0.1:1", "http://127.0.0.1:9"],
+        );
         handle.apply(&scaled).expect("applies");
         let table = handle.load();
         let status = table.app(0).and_then(CompiledApp::canary);
@@ -658,7 +670,7 @@ mod test {
 
         // The baseline loses every backend: it takes nothing, and the weights say so.
         let mut empty = with_version(3, first);
-        empty.apps[0].revisions[0].upstreams.clear();
+        set_servers(&mut empty, 0, &[]);
         handle.apply(&empty).expect("applies");
         let table = handle.load();
         let status = table.app(0).and_then(CompiledApp::canary);

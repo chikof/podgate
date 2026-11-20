@@ -3,10 +3,12 @@
 //!
 //! A request calls [`TableHandle::load`] once and keeps that [`Arc`] for its whole life, so a
 //! swap never changes the routing of a request in flight. A snapshot that does not compile
-//! leaves the live table untouched.
+//! leaves the live table untouched. The compile passes themselves are in [`crate::compile`]
+//! (`build`); this file holds what they produce and how it is used: the apps with their
+//! routers, middleware stages, services and revisions, the router index, and the weighted
+//! choice of a revision and server.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,32 +18,23 @@ use arc_swap::ArcSwap;
 use thiserror::Error;
 use tokio::sync::watch;
 
+use crate::acme::{Plan, PlanError};
 use crate::canary::{self, Runtime};
 use crate::clientauth::{self, ClientAuth};
-
-use crate::acme::{Plan, PlanError};
+use crate::compile::{self, Rejected};
 use crate::conflict::{self, Conflict};
-use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
+use crate::entry::CompileContext;
+use crate::middleware;
+use crate::router::{CompiledRouter, Index, Matched};
+use crate::service::{self, PickCx};
 use crate::skew::SkewSecret;
-use crate::snapshot::{
-    App, Budget, Filter, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy,
-};
+use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
 use crate::tls::{CertError, CertStore};
-use crate::wasm::{self, CompiledFilter};
 
 /// A snapshot the compiler refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompileError {
-    /// An app declares a host that is neither a name nor a `*.` wildcard.
-    #[error("app {app}: {source}")]
-    InvalidHost {
-        /// The declaring app.
-        app: Box<str>,
-        /// What is wrong with the host.
-        #[source]
-        source: InvalidHost,
-    },
     /// An app names a tenant the snapshot does not declare.
     #[error("app {app}: unknown tenant {tenant}")]
     UnknownTenant {
@@ -54,23 +47,22 @@ pub enum CompileError {
     /// conflict is listed.
     #[error("{}", conflict::join(.0))]
     Conflicts(Vec<Conflict>),
+    /// A matcher, middleware, service, entry point or other object is refused. Every problem of
+    /// the failing pass is listed.
+    #[error("{}", compile::join(.0))]
+    Rejected(Vec<Rejected>),
     /// A certificate cannot be served.
     #[error(transparent)]
     Certificate(#[from] CertError),
     /// The `skew_secret` is shorter than [`SkewSecret::MIN_LEN`] bytes.
     #[error("skew_secret must be at least {} bytes", SkewSecret::MIN_LEN)]
     SkewSecretTooShort,
-    /// A WASM filter module is invalid or imports something podgate does not provide. Every
-    /// rejected filter is listed.
-    #[error("{}", wasm::join(.0))]
-    Wasm(Vec<wasm::Rejection>),
     /// A canary policy is unsound. Every rejected policy is listed.
     #[error("{}", canary::join(.0))]
     Canary(Vec<canary::Rejection>),
     /// A client CA that cannot be used. Every rejected app is listed.
     #[error("{}", clientauth::join(.0))]
     ClientCa(Vec<clientauth::Rejection>),
-
     /// The ACME settings or a certificate's validity cannot be used.
     #[error(transparent)]
     Acme(#[from] PlanError),
@@ -106,26 +98,44 @@ pub struct Replaced {
     pub previous_snapshot: Option<Arc<Snapshot>>,
 }
 
+/// Where a router finds its service in one revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceRef {
+    /// Index into the revision's own services.
+    Own(usize),
+    /// Index into the app's services.
+    App(usize),
+}
+
 /// One revision of an app, ready for routing.
 #[derive(Debug)]
 pub struct CompiledRevision {
     id: Box<str>,
-    upstreams: Box<[SocketAddr]>,
     weight: u16,
     state: RevisionState,
     live: Arc<AtomicU16>,
-    next_upstream: AtomicU64,
+    services: Box<[service::Named]>,
+    /// For each router of the app, in order: the service it uses in this revision.
+    routes: Box<[Option<ServiceRef>]>,
+    /// Whether some router's service here has a server.
+    backed: bool,
 }
 
 impl CompiledRevision {
-    fn new(revision: &Revision) -> Self {
+    pub(crate) fn new(
+        revision: &Revision,
+        services: Vec<service::Named>,
+        routes: Vec<Option<ServiceRef>>,
+        backed: bool,
+    ) -> Self {
         Self {
             id: revision.id.clone(),
-            upstreams: revision.upstreams.clone().into_boxed_slice(),
             weight: revision.weight,
             state: revision.state,
             live: Arc::new(AtomicU16::new(0)),
-            next_upstream: AtomicU64::new(0),
+            services: services.into_boxed_slice(),
+            routes: routes.into_boxed_slice(),
+            backed,
         }
     }
 
@@ -159,42 +169,21 @@ impl CompiledRevision {
         self.live.load(Ordering::Relaxed)
     }
 
-    /// The revision's backends.
+    /// The revision's own services; the app's shared ones are in [`CompiledApp::services`].
     #[must_use]
-    pub fn upstreams(&self) -> &[SocketAddr] {
-        &self.upstreams
+    pub fn services(&self) -> &[service::Named] {
+        &self.services
     }
 
     /// Whether new requests may be sent here: serving, weighted, and with a backend.
     fn takes_new_requests(&self) -> bool {
-        self.state == RevisionState::Serving && self.weight > 0 && !self.upstreams.is_empty()
+        self.state == RevisionState::Serving && self.weight > 0 && self.backed
     }
 
     /// Whether the revision is `serving` and has a backend, whatever its weight.
     fn serving_with_backend(&self) -> bool {
-        self.state == RevisionState::Serving && !self.upstreams.is_empty()
+        self.state == RevisionState::Serving && self.backed
     }
-
-    /// The next backend, in turn; `None` without backends.
-    fn take_upstream(&self) -> Option<SocketAddr> {
-        if self.upstreams.is_empty() {
-            return None;
-        }
-        let turn = self.next_upstream.fetch_add(1, Ordering::Relaxed);
-        let slot = usize::try_from(turn % self.upstreams.len() as u64).ok()?;
-        self.upstreams.get(slot).copied()
-    }
-}
-
-/// The result of [`RoutingTable::lookup`].
-#[derive(Debug)]
-pub struct Lookup<'a> {
-    /// The app that answers for the host.
-    pub app: &'a CompiledApp,
-    /// Whether an exact host or a wildcard matched.
-    pub kind: MatchKind,
-    /// The declared host that matched, as written in the snapshot: `a.test` or `*.a.test`.
-    pub pattern: String,
 }
 
 /// An app ready for routing.
@@ -206,24 +195,27 @@ pub struct CompiledApp {
     allow_domain_fronting: bool,
     record_bodies: bool,
     scale_to_zero: Option<ScaleToZero>,
-    filters: Box<[CompiledFilter]>,
+    routers: Box<[CompiledRouter]>,
+    stages: Box<[middleware::Named]>,
+    services: Box<[service::Named]>,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
-    filters_digest: u64,
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
     client_auth: Option<Arc<ClientAuth>>,
     canary: Option<Arc<Runtime>>,
+    fingerprint: u64,
 }
 
-fn filters_digest(filters: &[Filter]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for filter in filters {
-        filter.wasm_base64.hash(&mut hasher);
-        filter.fuel.hash(&mut hasher);
-        filter.max_memory_bytes.hash(&mut hasher);
-    }
-    hasher.finish()
+/// What the compile passes hand to [`CompiledApp::assemble`].
+#[derive(Debug)]
+pub(crate) struct Parts {
+    pub(crate) routers: Vec<CompiledRouter>,
+    pub(crate) stages: Vec<middleware::Named>,
+    pub(crate) services: Vec<service::Named>,
+    pub(crate) revisions: Vec<CompiledRevision>,
+    pub(crate) fingerprint: u64,
+    pub(crate) client_auth: Option<Arc<ClientAuth>>,
 }
 
 /// What the effective weights of an app's revisions add up to while it has a canary.
@@ -242,9 +234,8 @@ pub struct Pick {
 }
 
 impl CompiledApp {
-    fn new(app: &App, filters: Box<[CompiledFilter]>) -> Self {
-        let revisions: Box<[CompiledRevision]> =
-            app.revisions.iter().map(CompiledRevision::new).collect();
+    pub(crate) fn assemble(app: &App, parts: Parts) -> Self {
+        let revisions: Box<[CompiledRevision]> = parts.revisions.into_boxed_slice();
         let canary = app.canary.as_ref().and_then(|policy| {
             let index = app
                 .revisions
@@ -258,25 +249,35 @@ impl CompiledApp {
                 Instant::now(),
             )))
         });
+        let mut hosts: Vec<Box<str>> = Vec::new();
+        for router in &parts.routers {
+            for pattern in router.patterns() {
+                let shown: Box<str> = match pattern {
+                    crate::host::HostPattern::Exact(name) => name.clone(),
+                    crate::host::HostPattern::Wildcard(base) => format!("*.{base}").into(),
+                };
+                if !hosts.contains(&shown) {
+                    hosts.push(shown);
+                }
+            }
+        }
         let compiled = Self {
-            filters,
             id: app.id.clone(),
             tenant: app.tenant.clone(),
             declared_by: app.declared_by.clone(),
             allow_domain_fronting: app.allow_domain_fronting,
             record_bodies: app.record_bodies,
             scale_to_zero: app.scale_to_zero,
+            routers: parts.routers.into_boxed_slice(),
+            stages: parts.stages.into_boxed_slice(),
+            services: parts.services.into_boxed_slice(),
             revisions,
             next_revision: AtomicU64::new(0),
-            hosts: app
-                .hosts
-                .iter()
-                .map(|host| host.to_ascii_lowercase().into())
-                .collect(),
-            filters_digest: filters_digest(&app.filters),
+            hosts: hosts.into_boxed_slice(),
             tls: app.tls.clone(),
             canary,
-            client_auth: None,
+            fingerprint: parts.fingerprint,
+            client_auth: parts.client_auth,
         };
         compiled.reweigh();
         compiled
@@ -339,6 +340,7 @@ impl CompiledApp {
         // takes no requests: recompute them from this table and the shared share.
         self.reweigh();
     }
+
     /// The canary's runtime state, for [`canary::judge`].
     pub(crate) fn canary_runtime(&self) -> Option<&Arc<Runtime>> {
         self.canary.as_ref()
@@ -364,17 +366,11 @@ impl CompiledApp {
         self.canary.as_deref().map(canary::Status::of)
     }
 
-    /// The app's WASM request filters, in the order they run.
+    /// A digest of everything the app declares except `declared_by`, to tell whether two tables
+    /// serve the app the same way. Equal inputs give equal digests within a process.
     #[must_use]
-    pub fn filters(&self) -> &[CompiledFilter] {
-        &self.filters
-    }
-
-    /// A digest of the declared filter modules and limits, to tell whether two tables run the
-    /// same filters without comparing modules. Equal inputs give equal digests within a process.
-    #[must_use]
-    pub fn filters_digest(&self) -> u64 {
-        self.filters_digest
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     /// Whether a TLS request may name a host other than its SNI.
@@ -383,7 +379,8 @@ impl CompiledApp {
         self.allow_domain_fronting
     }
 
-    /// The host patterns the app declares, lowercased: exact names and `*.` wildcards.
+    /// The literal host patterns the app's routers claim, lowercased: exact names and `*.`
+    /// wildcards, in declaration order.
     #[must_use]
     pub fn hosts(&self) -> &[Box<str>] {
         &self.hosts
@@ -400,11 +397,6 @@ impl CompiledApp {
     #[must_use]
     pub fn client_auth(&self) -> Option<&Arc<ClientAuth>> {
         self.client_auth.as_ref()
-    }
-
-    fn with_client_auth(mut self, client_auth: Option<Arc<ClientAuth>>) -> Self {
-        self.client_auth = client_auth;
-        self
     }
 
     /// Whether failed requests keep their bodies for replay.
@@ -437,20 +429,79 @@ impl CompiledApp {
         &self.declared_by
     }
 
+    /// The app's routers in snapshot order.
+    #[must_use]
+    pub fn routers(&self) -> &[CompiledRouter] {
+        &self.routers
+    }
+
+    /// The compiled middlewares, by declaration order; routers' chains index into this.
+    #[must_use]
+    pub fn stages(&self) -> &[middleware::Named] {
+        &self.stages
+    }
+
+    /// The app's own services, shared by every revision.
+    #[must_use]
+    pub fn services(&self) -> &[service::Named] {
+        &self.services
+    }
+
     /// The app's revisions in snapshot order.
     #[must_use]
     pub fn revisions(&self) -> &[CompiledRevision] {
         &self.revisions
     }
 
-    /// Chooses a revision and backend for a new request, or `None` when no revision takes new
-    /// requests.
+    /// The service router `router` uses in revision `revision`: the revision's own, else the
+    /// app's. `None` when either index is out of range or the revision does not define it.
+    #[must_use]
+    pub fn service(&self, revision: usize, router: usize) -> Option<&service::Service> {
+        let revision = self.revisions.get(revision)?;
+        match (*revision.routes.get(router)?)? {
+            ServiceRef::Own(index) => revision.services.get(index),
+            ServiceRef::App(index) => self.services.get(index),
+        }
+        .map(|named| &named.service)
+    }
+
+    /// Every server address the app can send to, in any revision.
+    pub fn upstream_addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.services
+            .iter()
+            .chain(self.revisions.iter().flat_map(|rev| rev.services.iter()))
+            .flat_map(|named| named.service.servers().iter().map(|server| server.addr))
+    }
+
+    /// The first server of revision `revision`, whichever service it belongs to: the revision's
+    /// own services first, then the app's. `None` when it has none.
+    #[must_use]
+    pub fn first_upstream(&self, revision: usize) -> Option<SocketAddr> {
+        let revision = self.revisions.get(revision)?;
+        revision
+            .services
+            .iter()
+            .chain(self.services.iter())
+            .find_map(|named| named.service.servers().first().map(|server| server.addr))
+    }
+
+    fn take(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {
+        Some(Pick {
+            revision,
+            upstream: self.service(revision, router)?.pick(cx)?,
+        })
+    }
+
+    /// Chooses a revision and backend for a new request that matched router `router`, or `None`
+    /// when no revision takes new requests or the router's service there has no available
+    /// server.
     ///
     /// Only `serving` revisions with a weight and a backend are candidates; `retiring` and
     /// `draining` ones never get new requests here. Revisions share traffic in proportion to
-    /// their [`CompiledRevision::effective_weight`], backends of one revision take turns.
+    /// their [`CompiledRevision::effective_weight`], the servers of a service are picked by its
+    /// algorithm.
     #[must_use]
-    pub fn pick(&self) -> Option<Pick> {
+    pub fn pick(&self, router: usize, cx: PickCx<'_>) -> Option<Pick> {
         let total: u64 = self
             .revisions
             .iter()
@@ -467,31 +518,25 @@ impl CompiledApp {
         for (index, revision) in self.revisions.iter().enumerate() {
             let weight = u64::from(revision.effective_weight());
             if ticket < weight {
-                return Some(Pick {
-                    revision: index,
-                    upstream: revision.take_upstream()?,
-                });
+                return self.take(index, router, cx);
             }
             ticket -= weight;
         }
         // A canary step landed between summing and walking: take the last revision in use.
-        let (index, revision) = self
+        let (index, _) = self
             .revisions
             .iter()
             .enumerate()
             .rev()
             .find(|(_, revision)| revision.effective_weight() > 0)?;
-        Some(Pick {
-            revision: index,
-            upstream: revision.take_upstream()?,
-        })
+        self.take(index, router, cx)
     }
 
     /// The pick for a session pinned to revision `id`: `serving` or `retiring` revisions with a
     /// backend only, weight ignored. `None` when the revision is `draining`, gone or has no
     /// backend, and the request must be routed by [`Self::pick`].
     #[must_use]
-    pub fn pick_pinned(&self, id: &str) -> Option<Pick> {
+    pub fn pick_pinned(&self, router: usize, id: &str, cx: PickCx<'_>) -> Option<Pick> {
         let (index, revision) = self
             .revisions
             .iter()
@@ -508,10 +553,22 @@ impl CompiledApp {
         {
             return None;
         }
-        Some(Pick {
-            revision: index,
-            upstream: revision.take_upstream()?,
-        })
+        self.take(index, router, cx)
+    }
+
+    /// [`Self::pick`] for the first router with a request that has no headers, for tests of the
+    /// weighted choice.
+    #[cfg(test)]
+    pub(crate) fn pick_any(&self) -> Option<Pick> {
+        let request = pingora::http::RequestHeader::build("GET", b"/", None).ok()?;
+        self.pick(0, PickCx { request: &request })
+    }
+
+    /// [`Self::pick_pinned`] for the first router, for tests.
+    #[cfg(test)]
+    pub(crate) fn pick_pinned_any(&self, id: &str) -> Option<Pick> {
+        let request = pingora::http::RequestHeader::build("GET", b"/", None).ok()?;
+        self.pick_pinned(0, id, PickCx { request: &request })
     }
 }
 
@@ -520,7 +577,8 @@ impl CompiledApp {
 pub struct RoutingTable {
     version: u64,
     apps: Box<[CompiledApp]>,
-    hosts: HostMap<usize>,
+    index: Index,
+    by_id: HashMap<Box<str>, usize>,
     certificates: CertStore,
     acme: Plan,
     budgets: HashMap<Box<str>, Budget>,
@@ -529,86 +587,41 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    /// Compiles a snapshot. Nothing is merged or repaired: any problem rejects it whole.
+    /// Compiles a snapshot with the default entry points. Nothing is merged or repaired: any
+    /// problem rejects it whole.
     ///
     /// # Errors
     ///
-    /// Returns [`CompileError`] for an invalid host, an unknown tenant, declarations that
-    /// conflict (every [`Conflict`] is reported at once), a certificate that cannot be served or a
-    /// `skew_secret` that is too short.
+    /// Returns [`CompileError`] for an unknown tenant, a matcher, middleware, service or entry
+    /// point that is refused, declarations that conflict (every [`Conflict`] is reported at
+    /// once), a certificate that cannot be served or a `skew_secret` that is too short.
     pub fn compile(snapshot: &Snapshot) -> Result<Self, CompileError> {
-        if snapshot
-            .skew_secret
-            .as_ref()
-            .is_some_and(|secret| !secret.is_long_enough())
-        {
-            return Err(CompileError::SkewSecretTooShort);
-        }
-        let tenants: HashSet<&str> = snapshot.tenants.iter().map(|tenant| &*tenant.id).collect();
-        let mut claims = Vec::new();
-        for (index, app) in snapshot.apps.iter().enumerate() {
-            if !tenants.contains(&*app.tenant) {
-                return Err(CompileError::UnknownTenant {
-                    app: app.id.clone(),
-                    tenant: app.tenant.clone(),
-                });
-            }
-            for raw in &app.hosts {
-                let pattern =
-                    HostPattern::parse(raw).map_err(|source| CompileError::InvalidHost {
-                        app: app.id.clone(),
-                        source,
-                    })?;
-                claims.push((pattern, index));
-            }
-        }
-        let conflicts = conflict::detect(&snapshot.apps, &claims);
-        if !conflicts.is_empty() {
-            return Err(CompileError::Conflicts(conflicts));
-        }
-        let unsound: Vec<_> = snapshot.apps.iter().flat_map(canary::validate).collect();
-        if !unsound.is_empty() {
-            return Err(CompileError::Canary(unsound));
-        }
-        let mut client_auth = Vec::with_capacity(snapshot.apps.len());
-        let mut bad_cas = Vec::new();
-        for app in &snapshot.apps {
-            match ClientAuth::compile(app) {
-                Ok(compiled) => client_auth.push(compiled),
-                Err(rejection) => bad_cas.push(rejection),
-            }
-        }
-        if !bad_cas.is_empty() {
-            return Err(CompileError::ClientCa(bad_cas));
-        }
-        let mut wasm = wasm::Compiler::default();
-        let mut filters = Vec::with_capacity(snapshot.apps.len());
-        let mut rejected = Vec::new();
-        for app in &snapshot.apps {
-            match wasm.compile_app(app) {
-                Ok(compiled) => filters.push(compiled),
-                Err(errors) => rejected.extend(errors),
-            }
-        }
-        if !rejected.is_empty() {
-            return Err(CompileError::Wasm(rejected));
-        }
-        let mut hosts = HostMap::default();
-        for (pattern, index) in claims {
-            hosts.insert(pattern, index);
-        }
+        Self::compile_with(snapshot, &CompileContext::default())
+    }
+
+    /// Like [`Self::compile`], for a process whose bound entry points are `context`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::compile`].
+    pub fn compile_with(
+        snapshot: &Snapshot,
+        context: &CompileContext,
+    ) -> Result<Self, CompileError> {
+        let built = compile::build(snapshot, context)?;
+        let index = Index::build(&built.apps);
         Ok(Self {
             version: snapshot.version,
-            apps: snapshot
+            by_id: built
                 .apps
                 .iter()
-                .zip(filters)
-                .zip(client_auth)
-                .map(|((app, filters), auth)| CompiledApp::new(app, filters).with_client_auth(auth))
+                .enumerate()
+                .map(|(index, app)| (Box::from(app.id()), index))
                 .collect(),
-            hosts,
-            certificates: CertStore::build(&snapshot.certificates)?,
-            acme: Plan::compile(snapshot)?,
+            index,
+            apps: built.apps.into_boxed_slice(),
+            certificates: built.certificates,
+            acme: built.acme,
             budgets: snapshot
                 .tenants
                 .iter()
@@ -629,37 +642,71 @@ impl RoutingTable {
         self.version
     }
 
-    /// The app that answers for `host`, and its index for [`Self::app`]. `host` must be
-    /// normalized (see [`crate::host::normalize`]).
+    /// The router index, for [`crate::route`].
     #[must_use]
-    pub fn find_app(&self, host: &str) -> Option<(usize, &CompiledApp)> {
-        let index = *self.hosts.lookup(host)?;
-        Some((index, self.apps.get(index)?))
+    pub fn index(&self) -> &Index {
+        &self.index
     }
 
-    /// Like [`Self::find_app`], and says which declared pattern matched and how. `host` must be
-    /// normalized.
+    /// The apps in snapshot order.
     #[must_use]
-    pub fn lookup(&self, host: &str) -> Option<Lookup<'_>> {
-        let matched = self.hosts.find(host)?;
-        Some(Lookup {
-            app: self.apps.get(*matched.value)?,
-            kind: matched.kind,
-            pattern: matched.pattern(),
-        })
+    pub fn apps(&self) -> &[CompiledApp] {
+        &self.apps
     }
 
-    /// The declared wildcard nearest to `host`, for explaining a miss; see
-    /// [`HostMap::nearest_wildcard`].
-    #[must_use]
-    pub fn nearest_wildcard(&self, host: &str) -> Option<String> {
-        self.hosts.nearest_wildcard(host)
-    }
-
-    /// The app at `index`, as returned by [`Self::find_app`].
+    /// The app at `index`, as in [`Matched::app`].
     #[must_use]
     pub fn app(&self, index: usize) -> Option<&CompiledApp> {
         self.apps.get(index)
+    }
+
+    /// The app with id `id`, and its index.
+    #[must_use]
+    pub fn app_by_id(&self, id: &str) -> Option<(usize, &CompiledApp)> {
+        let index = *self.by_id.get(id)?;
+        Some((index, self.apps.get(index)?))
+    }
+
+    /// The router `matched` points at, with its app.
+    #[must_use]
+    pub fn router(&self, matched: Matched) -> Option<(&CompiledApp, &CompiledRouter)> {
+        let app = self.apps.get(matched.app)?;
+        Some((app, app.routers.get(matched.router)?))
+    }
+
+    /// Finds, in this table, the router `matched` pointed at in `earlier`: the app with the same
+    /// id and tenant and TLS policy, and the router with the same name and the same middleware
+    /// chain. `None` when any of that differs, so a request that waited (for a wake, or after a
+    /// revision drained) never continues under a chain or a policy it did not start with.
+    #[must_use]
+    pub fn rematch(&self, earlier: &Self, matched: Matched) -> Option<Matched> {
+        let (old_app, old_router) = earlier.router(matched)?;
+        let (app_index, app) = self.app_by_id(old_app.id())?;
+        if app.tenant != old_app.tenant || app.tls != old_app.tls {
+            return None;
+        }
+        let router = app
+            .routers
+            .iter()
+            .position(|router| router.name() == old_router.name())?;
+        (app.routers.get(router)?.chain_digest() == old_router.chain_digest()).then_some(Matched {
+            app: app_index,
+            router,
+        })
+    }
+
+    /// The apps whose routers may serve `host` (normalized): those with a literal claim on it
+    /// and every app with a fallback router. A superset of what [`crate::route::matching`] can
+    /// pick; the TLS handshake uses it to decide whether to ask for a client certificate.
+    pub fn may_serve<'a>(&'a self, host: &str) -> impl Iterator<Item = &'a CompiledApp> {
+        self.index.may_serve(&self.apps, host)
+    }
+
+    /// The declared wildcard nearest to `host`, for explaining a miss; see
+    /// [`Index::nearest_wildcard`].
+    #[must_use]
+    pub fn nearest_wildcard(&self, host: &str) -> Option<String> {
+        self.index.nearest_wildcard(host)
     }
 
     /// The resource budget of tenant `id`, or `None` when the snapshot does not declare it.
@@ -705,13 +752,24 @@ pub struct TableHandle {
     source: Arc<Mutex<Option<Arc<Snapshot>>>>,
     // Canary state that outlives swaps; touched only by `swap`.
     canaries: Arc<canary::Registry>,
+    // The entry points this process bound; fixed for the life of the handle.
+    context: Arc<CompileContext>,
 }
 
 impl TableHandle {
-    /// A handle on the empty table: no apps, version `0`.
+    /// A handle on the empty table: no apps, version `0`, the default entry points.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A handle that compiles snapshots for a process with the entry points of `context`.
+    #[must_use]
+    pub fn with_context(context: CompileContext) -> Self {
+        Self {
+            context: Arc::new(context),
+            ..Self::default()
+        }
     }
 
     /// The live table. Call once per request and keep the result.
@@ -750,7 +808,7 @@ impl TableHandle {
                 offered: snapshot.version,
             });
         }
-        let table = RoutingTable::compile(snapshot)?;
+        let table = RoutingTable::compile_with(snapshot, &self.context)?;
         tracing::info!(
             version = table.version,
             apps = table.apps.len(),
@@ -765,6 +823,23 @@ impl TableHandle {
             current,
             previous_snapshot,
         })
+    }
+
+    /// Compiles `snapshot` as [`Self::apply`] would and swaps nothing in: what `POST
+    /// /v1/snapshot/plan` compares the live table with.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::apply`], including the version check.
+    pub fn compile_candidate(&self, snapshot: &Snapshot) -> Result<RoutingTable, ApplyError> {
+        let live = self.live.load().version();
+        if snapshot.version <= live {
+            return Err(ApplyError::Stale {
+                live,
+                offered: snapshot.version,
+            });
+        }
+        Ok(RoutingTable::compile_with(snapshot, &self.context)?)
     }
 
     /// Puts `previous`, the snapshot of an earlier live table, back in service, but only while
@@ -792,7 +867,7 @@ impl TableHandle {
         }
         let mut restored = previous.clone();
         restored.version = keep_version;
-        self.swap(RoutingTable::compile(&restored)?);
+        self.swap(RoutingTable::compile_with(&restored, &self.context)?);
         *self.source() = Some(Arc::new(restored));
         Ok(true)
     }
@@ -823,59 +898,61 @@ impl TableHandle {
 
 #[cfg(test)]
 mod test {
+    use serde_json::{Value, json};
+
     use super::*;
-    use crate::snapshot::{Budget, Tenant, TlsMode, TlsPolicy};
+    use crate::router::View;
 
-    fn revision(id: &str, port: u16, weight: u16, state: RevisionState) -> Revision {
-        Revision {
-            id: id.into(),
-            upstreams: vec![SocketAddr::from(([127, 0, 0, 1], port))],
-            weight,
-            state,
-        }
+    fn revision(id: &str, port: u16, weight: u16, state: &str) -> Value {
+        json!({
+            "id": id, "state": state, "weight": weight,
+            "services": [{ "name": "web", "type": "loadbalancer",
+                "servers": [{ "url": format!("http://127.0.0.1:{port}") }] }],
+        })
     }
 
-    fn app(id: &str, hosts: &[&str], revisions: Vec<Revision>) -> App {
-        App {
-            id: id.into(),
-            tenant: "t1".into(),
-            declared_by: format!("test/{id}").into(),
-            hosts: hosts.iter().map(|host| (*host).into()).collect(),
-            tls: TlsPolicy {
-                mode: TlsMode::Acme,
-                client_ca_pem: None,
-                pass_client_cert: false,
-            },
-            revisions,
-            allow_domain_fronting: false,
-            record_bodies: false,
-            scale_to_zero: None,
-            filters: Vec::new(),
-            canary: None,
-        }
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "test helper: callers pass fixtures by value"
+    )]
+    fn app(id: &str, hosts: &[&str], revisions: Vec<Value>) -> Value {
+        json!({
+            "id": id, "tenant": "t1", "declared_by": format!("test/{id}"),
+            "tls": { "mode": "acme" },
+            "routers": [{ "name": "all", "match": { "host": hosts }, "service": "web" }],
+            "revisions": revisions,
+        })
     }
 
-    fn snapshot(version: u64, apps: Vec<App>) -> Snapshot {
-        Snapshot {
-            version,
-            tenants: vec![Tenant {
-                id: "t1".into(),
-                weight: 1,
-                budget: Budget {
-                    max_inflight: 10,
-                    max_buffer_bytes: 1024,
-                },
-            }],
-            apps,
-            certificates: Vec::new(),
-            skew_secret: None,
-            revert_window_secs: None,
-            acme: None,
-        }
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "test helper: callers pass fixtures by value"
+    )]
+    fn snapshot(version: u64, apps: Vec<Value>) -> Snapshot {
+        serde_json::from_value(json!({
+            "version": version,
+            "tenants": [{ "id": "t1", "weight": 1, "budget": { "max_inflight": 10, "max_buffer_bytes": 1024 } }],
+            "apps": apps,
+        }))
+        .expect("snapshot")
     }
 
-    fn serving(port: u16) -> Vec<Revision> {
-        vec![revision("r1", port, 100, RevisionState::Serving)]
+    fn serving(port: u16) -> Vec<Value> {
+        vec![revision("r1", port, 100, "serving")]
+    }
+
+    fn find<'a>(table: &'a RoutingTable, host: &str, path: &str) -> Option<&'a CompiledApp> {
+        let request =
+            pingora::http::RequestHeader::build("GET", path.as_bytes(), None).expect("request");
+        let view = View {
+            host,
+            path,
+            entry_point: "web",
+            tls: false,
+            request: &request,
+        };
+        let matched = table.index().find(table.apps(), &view)?;
+        table.app(matched.app)
     }
 
     #[test]
@@ -888,24 +965,27 @@ mod test {
             ],
         ))
         .expect("compiles");
-        assert_eq!(table.find_app("a.test").map(|(_, a)| a.id()), Some("a"));
-        assert_eq!(table.find_app("x.w.test").map(|(_, a)| a.id()), Some("w"));
-        assert!(table.find_app("w.test").is_none());
-        assert!(table.find_app("nope.test").is_none());
+        assert_eq!(find(&table, "a.test", "/").map(CompiledApp::id), Some("a"));
+        assert_eq!(
+            find(&table, "x.w.test", "/").map(CompiledApp::id),
+            Some("w")
+        );
+        assert!(find(&table, "w.test", "/").is_none());
+        assert!(find(&table, "nope.test", "/").is_none());
     }
 
     #[test]
     fn only_serving_revisions_get_new_requests() {
         let revisions = vec![
-            revision("old", 1, 100, RevisionState::Draining),
-            revision("mid", 2, 100, RevisionState::Retiring),
-            revision("new", 3, 1, RevisionState::Serving),
+            revision("old", 1, 100, "draining"),
+            revision("mid", 2, 100, "retiring"),
+            revision("new", 3, 1, "serving"),
         ];
         let table = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], revisions)]))
             .expect("compiles");
-        let (_, app) = table.find_app("a.test").expect("known host");
+        let app = find(&table, "a.test", "/").expect("known host");
         for _ in 0..10 {
-            let pick = app.pick().expect("serving revision exists");
+            let pick = app.pick_any().expect("serving revision exists");
             assert_eq!(app.revisions()[pick.revision].id(), "new");
             assert_eq!(pick.upstream.port(), 3);
         }
@@ -913,40 +993,40 @@ mod test {
 
     #[test]
     fn no_serving_revision_means_no_pick() {
-        let revisions = vec![revision("old", 1, 100, RevisionState::Draining)];
+        let revisions = vec![revision("old", 1, 100, "draining")];
         let table = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], revisions)]))
             .expect("compiles");
-        let (_, app) = table.find_app("a.test").expect("known host");
-        assert_eq!(app.pick(), None);
+        let app = find(&table, "a.test", "/").expect("known host");
+        assert_eq!(app.pick_any(), None);
     }
 
     #[test]
     fn revisions_share_traffic_by_weight() {
         let revisions = vec![
-            revision("a", 1, 3, RevisionState::Serving),
-            revision("b", 2, 1, RevisionState::Serving),
+            revision("a", 1, 3, "serving"),
+            revision("b", 2, 1, "serving"),
         ];
         let table = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], revisions)]))
             .expect("compiles");
-        let (_, app) = table.find_app("a.test").expect("known host");
+        let app = find(&table, "a.test", "/").expect("known host");
         let on_a = (0..400)
-            .filter(|_| app.pick().is_some_and(|pick| pick.upstream.port() == 1))
+            .filter(|_| app.pick_any().is_some_and(|pick| pick.upstream.port() == 1))
             .count();
         assert_eq!(on_a, 300);
     }
 
     #[test]
-    fn upstreams_of_a_revision_take_turns() {
-        let mut revision = revision("r", 1, 1, RevisionState::Serving);
-        revision
-            .upstreams
-            .push(SocketAddr::from(([127, 0, 0, 1], 2)));
-        let table =
-            RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], vec![revision])]))
-                .expect("compiles");
-        let (_, app) = table.find_app("a.test").expect("known host");
+    fn servers_of_a_service_take_turns() {
+        let mut one = revision("r", 1, 1, "serving");
+        one["services"][0]["servers"]
+            .as_array_mut()
+            .expect("servers")
+            .push(json!({ "url": "http://127.0.0.1:2" }));
+        let table = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], vec![one])]))
+            .expect("compiles");
+        let app = find(&table, "a.test", "/").expect("known host");
         let ports: Vec<u16> = (0..4)
-            .filter_map(|_| app.pick().map(|pick| pick.upstream.port()))
+            .filter_map(|_| app.pick_any().map(|pick| pick.upstream.port()))
             .collect();
         assert_eq!(ports, [1, 2, 1, 2]);
     }
@@ -966,17 +1046,18 @@ mod test {
                 if matches!(conflicts.as_slice(), [Conflict::Host { .. }])
         ));
 
-        let mut unknown = snapshot(1, vec![app("a", &["a.test"], serving(1))]);
-        unknown.apps[0].tenant = "nobody".into();
+        let mut unknown = app("a", &["a.test"], serving(1));
+        unknown["tenant"] = json!("nobody");
         assert!(matches!(
-            RoutingTable::compile(&unknown),
+            RoutingTable::compile(&snapshot(1, vec![unknown])),
             Err(CompileError::UnknownTenant { .. })
         ));
 
         let bad = snapshot(1, vec![app("a", &["a b"], serving(1))]);
         assert!(matches!(
             RoutingTable::compile(&bad),
-            Err(CompileError::InvalidHost { .. })
+            Err(CompileError::Rejected(rejected))
+                if rejected.iter().all(|one| one.code() == "invalid_host")
         ));
     }
 
@@ -1004,7 +1085,7 @@ mod test {
             Arc::ptr_eq(&before, &handle.load()),
             "table must not change"
         );
-        assert!(handle.load().find_app("a.test").is_some());
+        assert!(find(&handle.load(), "a.test", "/").is_some());
     }
 
     #[test]
@@ -1028,16 +1109,16 @@ mod test {
         handle
             .apply(&snapshot(2, vec![app("b", &["b.test"], serving(2))]))
             .expect("applies");
-        assert!(in_flight.find_app("a.test").is_some());
-        assert!(handle.load().find_app("a.test").is_none());
+        assert!(find(&in_flight, "a.test", "/").is_some());
+        assert!(find(&handle.load(), "a.test", "/").is_none());
     }
 
     #[test]
-    fn table_lookup() {
+    fn revision_weights_follow_state_weight_and_backends() {
         let revisions = vec![
-            revision("old", 1, 50, RevisionState::Draining),
-            revision("new", 2, 70, RevisionState::Serving),
-            revision("zero", 3, 0, RevisionState::Serving),
+            revision("old", 1, 50, "draining"),
+            revision("new", 2, 70, "serving"),
+            revision("zero", 3, 0, "serving"),
         ];
         let table = RoutingTable::compile(&snapshot(
             1,
@@ -1047,25 +1128,14 @@ mod test {
             ],
         ))
         .expect("compiles");
-
-        let exact = table.lookup("a.test").expect("exact host");
-        assert_eq!(exact.app.id(), "a");
-        assert_eq!(exact.kind, MatchKind::Exact);
-        assert_eq!(exact.pattern, "a.test");
+        let exact = find(&table, "a.test", "/").expect("exact host");
         let weights: Vec<(u16, u16)> = exact
-            .app
             .revisions()
             .iter()
             .map(|revision| (revision.weight(), revision.effective_weight()))
             .collect();
         assert_eq!(weights, [(50, 0), (70, 70), (0, 0)]);
-
-        let wild = table.lookup("x.w.test").expect("wildcard host");
-        assert_eq!(wild.app.id(), "w");
-        assert_eq!(wild.kind, MatchKind::Wildcard);
-        assert_eq!(wild.pattern, "*.w.test");
-
-        assert!(table.lookup("w.test").is_none());
+        assert_eq!(exact.hosts(), [Box::<str>::from("a.test")]);
         assert_eq!(
             table.nearest_wildcard("w.test").as_deref(),
             Some("*.w.test")
@@ -1075,5 +1145,21 @@ mod test {
             Some("*.w.test")
         );
         assert_eq!(table.nearest_wildcard("nope.test"), None);
+    }
+
+    #[test]
+    fn a_waiting_request_keeps_only_a_router_with_the_same_chain() {
+        let before = RoutingTable::compile(&snapshot(1, vec![app("a", &["a.test"], serving(1))]))
+            .expect("compiles");
+        let same = RoutingTable::compile(&snapshot(2, vec![app("a", &["a.test"], serving(9))]))
+            .expect("compiles");
+        let matched = Matched { app: 0, router: 0 };
+        assert_eq!(same.rematch(&before, matched), Some(matched));
+
+        let mut changed = app("a", &["a.test"], serving(1));
+        changed["tls"] =
+            json!({ "mode": "acme", "client_ca_pem": crate::clientauth::test_ca_pem("ca") });
+        let stricter = RoutingTable::compile(&snapshot(3, vec![changed])).expect("compiles");
+        assert_eq!(stricter.rematch(&before, matched), None);
     }
 }

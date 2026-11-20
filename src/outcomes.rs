@@ -33,7 +33,6 @@ use arc_swap::ArcSwap;
 use pingora::proxy::Session;
 
 use crate::proxy::Ctx;
-use crate::route;
 use crate::table::RoutingTable;
 
 /// Seconds of history a series keeps; the longest window that can be asked for.
@@ -313,21 +312,13 @@ pub fn record_request(outcomes: &Outcomes, session: &Session, ctx: &Ctx) {
     if ctx.capacity_refusal {
         return;
     }
-    if let Some(selected) = ctx.route {
-        let revision = ctx
-            .table
-            .app(selected.app)
-            .and_then(|app| Some((app, app.revisions().get(selected.revision)?)));
-        if let Some((app, revision)) = revision {
-            outcomes.record(app.id(), Some(revision.id()), status);
-        }
+    let Some(app) = ctx.matched.and_then(|matched| ctx.table.app(matched.app)) else {
         return;
-    }
-    let app = route::request_host(session.req_header())
-        .and_then(|host| ctx.table.find_app(&host).map(|(_, app)| app));
-    if let Some(app) = app {
-        outcomes.record(app.id(), None, status);
-    }
+    };
+    let revision = ctx
+        .route
+        .and_then(|selected| app.revisions().get(selected.revision));
+    outcomes.record(app.id(), revision.map(|revision| revision.id()), status);
 }
 
 #[cfg(test)]
@@ -425,8 +416,9 @@ mod test {
         }
         let snapshot: Snapshot = serde_json::from_str(
             r#"{"version":1,"tenants":[{"id":"t","weight":1,"budget":{"max_inflight":1,"max_buffer_bytes":1}}],
-            "apps":[{"id":"a","tenant":"t","declared_by":"x","hosts":["a.test"],"tls":{"mode":"acme"},
-            "revisions":[{"id":"r1","upstreams":["127.0.0.1:1"],"weight":1,"state":"serving"}]}]}"#,
+            "apps":[{"id":"a","tenant":"t","declared_by":"x","tls":{"mode":"acme"},
+            "routers":[{"name":"r","match":{"host":"a.test"},"service":"web"}],
+            "revisions":[{"id":"r1","weight":1,"state":"serving","services":[{"name":"web","type":"loadbalancer","servers":[{"url":"http://127.0.0.1:1"}]}]}]}]}"#,
         )
         .expect("valid snapshot");
         outcomes.sync(&RoutingTable::compile(&snapshot).expect("compiles"));

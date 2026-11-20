@@ -3,19 +3,20 @@
 //!
 //! # Lifecycle
 //!
-//! A snapshot's `App.filters` are decoded, validated and compiled once, in
+//! The engine behind the `wasm` middleware ([`crate::middleware::wasm`]). Each `wasm` middleware
+//! of a snapshot is decoded, validated and compiled once, in
 //! [`RoutingTable::compile`](crate::table::RoutingTable::compile). A module that is not valid
 //! WebAssembly, lacks a required export, imports anything podgate does not provide, or declares
 //! more initial memory than its `max_memory_bytes` rejects the whole snapshot with `422`, code
 //! `wasm_invalid` or `wasm_forbidden_import`. Compiled modules live in the immutable routing
 //! table, so a request keeps the filters it started with.
 //!
-//! Per request, after routing, [`run_filters`] runs each filter of the app in order. Every run
-//! gets a fresh `Store` and instance: nothing carries over between requests or filters.
+//! Per request, in the middleware chain, [`run_filter`] runs the filter. Every run gets a fresh
+//! `Store` and instance: nothing carries over between requests or filters.
 //!
-//! - Fuel: the store starts with `Filter.fuel` units. Running out traps the guest.
+//! - Fuel: the store starts with `fuel` units. Running out traps the guest.
 //! - Memory: a `ResourceLimiter` ([`StoreLimits`]) caps every linear memory at
-//!   `Filter.max_memory_bytes`. A `memory.grow` past it traps the guest (it does not return
+//!   `max_memory_bytes`. A `memory.grow` past it traps the guest (it does not return
 //!   `-1`, so a filter that ignores the result is stopped too). Modules that declare a larger
 //!   initial memory never get past snapshot compile.
 //! - Any trap, failed call or `false` from `proxy_on_vm_start` or `proxy_on_configure` answers
@@ -87,7 +88,6 @@ use bytes::Bytes;
 use http::{HeaderName, HeaderValue, StatusCode};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
-use serde_json::{Value, json};
 use thiserror::Error;
 use wasmtime::{
     Caller, Config, Engine, ExternType, FuncType, Instance, InstancePre, Linker, Memory, Module,
@@ -95,10 +95,10 @@ use wasmtime::{
 };
 
 use crate::budget::TenantBudget;
+use crate::compile::Invalid;
 use crate::error::AppError;
+use crate::middleware::wasm::Config as FilterConfig;
 use crate::respond;
-use crate::snapshot::{App, Filter};
-use crate::table::RoutingTable;
 
 /// Module that provides the proxy-wasm host functions.
 const HOST_MODULE: &str = "env";
@@ -179,55 +179,25 @@ pub enum Reason {
     Engine(Box<str>),
 }
 
-/// A filter the compiler refuses, with where it was declared.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("app {app} ({declared_by}) filter {filter}: {reason}")]
-pub struct Rejection {
-    /// The declaring app.
-    pub app: Box<str>,
-    /// Its `declared_by` source.
-    pub declared_by: Box<str>,
-    /// Index into the app's `filters`.
-    pub filter: usize,
-    /// What is wrong.
-    pub reason: Reason,
-}
-
-impl Rejection {
-    /// The stable code: `wasm_forbidden_import` or `wasm_invalid`.
+impl Reason {
+    /// The refusal for the `422` body: code `wasm_forbidden_import` (with `module` and `name`)
+    /// or `wasm_invalid`.
     #[must_use]
-    pub fn code(&self) -> &'static str {
-        match self.reason {
-            Reason::ForbiddenImport { .. } => "wasm_forbidden_import",
-            _ => "wasm_invalid",
+    pub fn into_invalid(self) -> Invalid {
+        let invalid = Invalid::new(
+            match self {
+                Self::ForbiddenImport { .. } => "wasm_forbidden_import",
+                _ => "wasm_invalid",
+            },
+            self.to_string(),
+        );
+        match self {
+            Self::ForbiddenImport { module, name } => {
+                invalid.with("module", &*module).with("name", &*name)
+            }
+            _ => invalid,
         }
     }
-
-    /// The object in the `conflicts` list of a `422` body: `code`, `message`, `app`,
-    /// `declared_by`, `filter`, and `module` and `name` for a forbidden import.
-    #[must_use]
-    pub fn to_json(&self) -> Value {
-        let mut value = json!({
-            "code": self.code(), "message": self.to_string(),
-            "app": self.app, "declared_by": self.declared_by, "filter": self.filter,
-        });
-        if let (Reason::ForbiddenImport { module, name }, Some(object)) =
-            (&self.reason, value.as_object_mut())
-        {
-            object.insert("module".into(), json!(module));
-            object.insert("name".into(), json!(name));
-        }
-        value
-    }
-}
-
-/// The messages of `rejections`, separated by `; `.
-pub(crate) fn join(rejections: &[Rejection]) -> String {
-    rejections
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// A request header change a filter made, replayed on the real request after the run.
@@ -414,41 +384,32 @@ fn call_optional<P: WasmParams, R: WasmResults>(
 /// The engine and linker shared by every filter of one snapshot compile. Built on the first
 /// filter, so a snapshot without filters never starts an engine.
 #[derive(Default)]
-pub(crate) struct Compiler {
+pub struct Compiler {
     runtime: Option<(Engine, Linker<HostState>)>,
 }
 
+impl fmt::Debug for Compiler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Compiler")
+            .field("started", &self.runtime.is_some())
+            .finish()
+    }
+}
+
 impl Compiler {
-    /// Compiles the filters of `app`.
+    /// Compiles one filter of app `app`, owned by `tenant` (both only name the filter in log
+    /// lines).
     ///
     /// # Errors
     ///
-    /// Every filter that is refused, so one snapshot push reports all of them.
-    pub(crate) fn compile_app(
+    /// The [`Reason`] the module is refused for.
+    pub fn compile(
         &mut self,
-        app: &App,
-    ) -> Result<Box<[CompiledFilter]>, Vec<Rejection>> {
-        let mut compiled = Vec::with_capacity(app.filters.len());
-        let mut rejected = Vec::new();
-        for (index, filter) in app.filters.iter().enumerate() {
-            let result = self
-                .runtime()
-                .and_then(|(engine, linker)| compile_filter(engine, linker, app, filter));
-            match result {
-                Ok(filter) => compiled.push(filter),
-                Err(reason) => rejected.push(Rejection {
-                    app: app.id.clone(),
-                    declared_by: app.declared_by.clone(),
-                    filter: index,
-                    reason,
-                }),
-            }
-        }
-        if rejected.is_empty() {
-            Ok(compiled.into_boxed_slice())
-        } else {
-            Err(rejected)
-        }
+        app: (&str, &str),
+        filter: &FilterConfig,
+    ) -> Result<CompiledFilter, Reason> {
+        let (engine, linker) = self.runtime()?;
+        compile_filter(engine, linker, app, filter)
     }
 
     fn runtime(&mut self) -> Result<&(Engine, Linker<HostState>), Reason> {
@@ -472,8 +433,8 @@ fn engine() -> wasmtime::Result<Engine> {
 fn compile_filter(
     engine: &Engine,
     linker: &Linker<HostState>,
-    app: &App,
-    filter: &Filter,
+    (app, tenant): (&str, &str),
+    filter: &FilterConfig,
 ) -> Result<CompiledFilter, Reason> {
     if filter.fuel == 0 {
         return Err(Reason::Limits("fuel must be greater than 0".into()));
@@ -511,8 +472,8 @@ fn compile_filter(
         .instantiate_pre(&module)
         .map_err(|err| Reason::Invalid(err.to_string().into()))?;
     Ok(CompiledFilter {
-        app: Arc::from(&*app.id),
-        tenant: Arc::from(&*app.tenant),
+        app: Arc::from(app),
+        tenant: Arc::from(tenant),
         pre,
         fuel: filter.fuel,
         max_memory: usize::try_from(filter.max_memory_bytes).unwrap_or(usize::MAX),
@@ -1000,87 +961,72 @@ async fn write_local(session: &mut Session, local: LocalResponse) -> pingora::Re
     session.write_response_body(Some(local.body), true).await
 }
 
-/// Runs the WASM filters of app `app` (an index into `table`) on the request, in order.
+/// Runs one WASM filter on the request.
 ///
-/// Header changes a filter makes are applied to the request before the next filter runs. A
-/// filter that sends a local response ends the chain: the response is written and the request
-/// is not forwarded. A filter that traps, runs out of fuel or exceeds its memory limit answers
-/// `500`. Before each run `executor` takes a worker and charges the filter's `max_memory_bytes`
-/// to `tenant` (the request's tenant, `None` for no charge); when either is unavailable the
-/// request answers `503` with `retry-after` and the filter does not run; `capacity_refusal` is
-/// set when that refusal is one auto-revert must not count ([`AppError::is_capacity_refusal`]).
-/// Returns `true` when
-/// the request was answered here, so the caller returns `Ok(true)` from `request_filter`;
-/// `false` means forward it. An app without filters costs one slice length check.
+/// Header changes the filter makes are applied to the request. A filter that sends a local
+/// response ends the request: the response is written and the request is not forwarded. A
+/// filter that traps, runs out of fuel or exceeds its memory limit answers `500`. Before the run
+/// `executor` takes a worker and charges the filter's `max_memory_bytes` to `tenant` (the
+/// request's tenant, `None` for no charge); when either is unavailable the request answers
+/// `503` with `retry-after` and the filter does not run; `capacity_refusal` is set when that
+/// refusal is one auto-revert must not count ([`AppError::is_capacity_refusal`]). Returns `true`
+/// when the request was answered here and must not go on, `false` when it continues.
 ///
 /// # Errors
 ///
 /// Fails when a response cannot be written to the client or a header change cannot be applied.
-pub async fn run_filters(
+pub async fn run_filter(
     session: &mut Session,
-    table: &Arc<RoutingTable>,
-    app: usize,
+    filter: &Arc<CompiledFilter>,
     tenant: Option<&Arc<TenantBudget>>,
     executor: &Executor,
     capacity_refusal: &mut bool,
 ) -> pingora::Result<bool> {
-    let count = table.app(app).map_or(0, |app| app.filters().len());
-    for index in 0..count {
-        let headers = capture(session);
-        let end_of_stream = session.is_body_empty();
-        let run_table = Arc::clone(table);
-        let memory = table
-            .app(app)
-            .and_then(|app| app.filters().get(index))
-            .map_or(0, CompiledFilter::max_memory);
-        let slot = match executor.admit(tenant, memory).await {
-            Ok(slot) => slot,
-            Err(err) => {
-                let app_id = table.app(app).map_or("?", |app| app.id());
-                tracing::warn!(
-                    app = app_id,
-                    filter = index,
-                    "wasm filter refused: no worker or memory budget"
-                );
-                *capacity_refusal = err.is_capacity_refusal();
-                respond::write_error(session, &err).await?;
-                return Ok(true);
-            }
-        };
-        let outcome = tokio::task::spawn_blocking(move || {
-            // Held until the run ends, even when the request is gone.
-            let _slot = slot;
-            let filter = run_table
-                .app(app)
-                .and_then(|app| app.filters().get(index))
-                .ok_or_else(|| wasmtime::format_err!("filter {index} vanished"))?;
-            filter.run(headers, end_of_stream)
-        })
-        .await;
-        let verdict = match outcome {
-            Ok(Ok(verdict)) => verdict,
-            failed => {
-                let cause = match failed {
-                    Ok(Err(err)) => err.to_string(),
-                    Err(err) => err.to_string(),
-                    Ok(Ok(_)) => String::new(),
-                };
-                let app_id = table.app(app).map_or("?", |app| app.id());
-                tracing::warn!(app = app_id, filter = index, %cause, "wasm filter failed");
-                let err = AppError::Internal(anyhow::anyhow!("wasm filter failed"));
-                respond::write_error(session, &err).await?;
-                return Ok(true);
-            }
-        };
-        match verdict {
-            Verdict::Continue(ops) => apply(session.req_header_mut(), ops)?,
-            Verdict::Respond(local) => {
-                write_local(session, local).await?;
-                return Ok(true);
-            }
+    let headers = capture(session);
+    let end_of_stream = session.is_body_empty();
+    let slot = match executor.admit(tenant, filter.max_memory()).await {
+        Ok(slot) => slot,
+        Err(err) => {
+            tracing::warn!(
+                app = &*filter.app,
+                "wasm filter refused: no worker or memory budget"
+            );
+            *capacity_refusal = err.is_capacity_refusal();
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+    };
+    let run = Arc::clone(filter);
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Held until the run ends, even when the request is gone.
+        let _slot = slot;
+        run.run(headers, end_of_stream)
+    })
+    .await;
+    let verdict = match outcome {
+        Ok(Ok(verdict)) => verdict,
+        failed => {
+            let cause = match failed {
+                Ok(Err(err)) => err.to_string(),
+                Err(err) => err.to_string(),
+                Ok(Ok(_)) => String::new(),
+            };
+            tracing::warn!(app = &*filter.app, %cause, "wasm filter failed");
+            let err = AppError::Internal(anyhow::anyhow!("wasm filter failed"));
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+    };
+    match verdict {
+        Verdict::Continue(ops) => {
+            apply(session.req_header_mut(), ops)?;
+            Ok(false)
+        }
+        Verdict::Respond(local) => {
+            write_local(session, local).await?;
+            Ok(true)
         }
     }
-    Ok(false)
 }
 
 #[cfg(test)]

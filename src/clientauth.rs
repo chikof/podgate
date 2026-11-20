@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::error::AppError;
-use crate::route;
+use crate::router::Matched;
 use crate::snapshot::App;
 use crate::sni;
 use crate::table::RoutingTable;
@@ -222,21 +222,27 @@ impl ClientChain {
     }
 }
 
-/// Checks the client certificate of a request against the app it is routed to, and fills or
-/// clears [`SUBJECT_HEADER`]. Runs after the SNI check and before routing.
+/// Checks the client certificate of a request against the app of the router it matched, and
+/// fills or clears [`SUBJECT_HEADER`]. Runs right after the match and the SNI check, before the
+/// middleware chain and anything else that answers.
 ///
-/// A request for a host no app claims passes: routing answers it.
+/// The app is the one the v2 router actually matched, whatever kind of router it was (exact
+/// host, wildcard, `host_regexp`, no host at all): there is no second host lookup that could
+/// disagree with routing.
+///
+/// A request no router matched passes: routing answers it `404`.
 ///
 /// # Errors
 ///
-/// [`AppError::ClientCertRequired`] when the routed app has a client CA and the connection
+/// [`AppError::ClientCertRequired`] when the matched app has a client CA and the connection
 /// presented no certificate chain that it accepts, including every plain HTTP connection.
-pub fn admit(session: &mut Session, table: &RoutingTable) -> Result<(), AppError> {
+pub fn admit(
+    session: &mut Session,
+    table: &RoutingTable,
+    matched: Option<Matched>,
+) -> Result<(), AppError> {
     session.req_header_mut().remove_header(SUBJECT_HEADER);
-    let Some(host) = route::request_host(session.req_header()).map(|host| host.into_owned()) else {
-        return Ok(());
-    };
-    let Some((_, app)) = table.find_app(&host) else {
+    let Some(app) = matched.and_then(|matched| table.app(matched.app)) else {
         return Ok(());
     };
     let Some(auth) = app.client_auth() else {
@@ -367,7 +373,7 @@ mod test {
 
     fn app_with(ca: Option<&str>) -> App {
         serde_json::from_value(json!({
-            "id": "a", "tenant": "t", "declared_by": "test", "hosts": ["a.test"],
+            "id": "a", "tenant": "t", "declared_by": "test", "routers": [],
             "tls": {"mode": "acme", "client_ca_pem": ca},
             "revisions": [],
         }))

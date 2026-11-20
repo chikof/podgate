@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Podgate, Response, Upstream, app, snapshot};
+use common::{Podgate, Response, Upstream, app, revision_on, snapshot};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -16,12 +16,7 @@ use tokio::time::sleep;
 /// An app of tenant `t1` with the given `scale_to_zero` policy, one serving revision, and
 /// `upstreams` (empty: the app is asleep).
 fn sleepy(host: &str, upstreams: &[SocketAddr], idle_secs: u64, wake_timeout_secs: u64) -> Value {
-    let revision = json!({
-        "id": "r1",
-        "upstreams": upstreams.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "weight": 100,
-        "state": "serving",
-    });
+    let revision = revision_on("r1", upstreams, 100, "serving");
     let mut app = app("a", &[host], &[revision]);
     app["scale_to_zero"] =
         json!({ "idle_secs": idle_secs, "wake_timeout_secs": wake_timeout_secs });
@@ -182,15 +177,17 @@ async fn app_idle_event() {
 
     let explained = podgate.admin_get("/v1/explain?url=http://a.test/").await;
     assert_eq!(
-        explained.json()["middleware"],
+        explained.json()["pipeline"],
         json!([
-            "acme_http01",
-            "route",
-            "wake_hold",
-            "inflight_admit",
-            "tenant_admit",
-            "backend_admit",
-            "failure_capture"
+            {"stage": "acme_http01"},
+            {"stage": "entry_point"},
+            {"stage": "route"},
+            {"stage": "failure_capture"},
+            {"stage": "select"},
+            {"stage": "wake_hold"},
+            {"stage": "inflight_admit"},
+            {"stage": "tenant_admit"},
+            {"stage": "backend_admit"}
         ])
     );
     let served = podgate.get("a.test", "/").await;

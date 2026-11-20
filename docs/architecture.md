@@ -10,15 +10,20 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/lib.rs` | Module declarations, re-exports, `init_tracing`, and `run(config)`, which builds the Pingora `Server`. |
 | `src/config.rs` | `Config` and `LogFormat` read from environment variables; `ConfigError` names the bad variable. |
 | `src/error.rs` | `AppError`: the one error clients see, `{"error": "..."}` with a status. Conversions from `ApplyError` and `RouteError`; a rejected snapshot lists its `conflicts` as objects. |
-| `src/snapshot.rs` | `Snapshot` and the entities under it: the serde model of `PUT /v1/snapshot`. |
+| `src/snapshot.rs`, `src/snapshot/*.rs` | `Snapshot` and the entities under it (`App`, `Router`, `Declared`, `Revision`, entry point policies, L4 and observability models): the serde model of `PUT /v1/snapshot`. |
 | `src/host.rs` | Host patterns (`HostPattern`), request host normalization, `HostMap` (exact beats one-label wildcard). |
-| `src/table.rs` | `RoutingTable` (compiled snapshot, weighted pick over `serving` revisions), `TableHandle` (atomic swap, `apply`), `CompileError`, `ApplyError`. |
-| `src/conflict.rs` | `Conflict`: one typed variant per conflict code (`host_conflict`, `tls_policy_conflict`, `cross_tenant_wildcard`) and the pass that finds all of them in a snapshot. |
-| `src/route.rs` | Core host routing: `resolve(table, request) -> Selected`. Pure; no Pingora session. |
+| `src/table.rs` | `RoutingTable` (compiled snapshot: apps with routers, middleware stages, services and revisions; weighted pick over `serving` revisions; `rematch`), `TableHandle` (atomic swap, `apply`), `CompileError`, `ApplyError`. |
+| `src/conflict.rs` | `Conflict`: one typed variant per conflict code (`host_conflict`, `route_ambiguity`, `tls_policy_conflict`, `cross_tenant_wildcard`, `cross_tenant_catch_all`) and the pass that finds all of them in the routers of a snapshot. |
+| `src/route.rs` | Core routing: `matching(table, request, entry_point, tls) -> Option<Matched>` and `select(table, matched, request) -> Selected` (revision, skew pin, server). Pure; no Pingora session. |
+| `src/router.rs`, `src/router/*.rs` | Routers: `CompiledRouter`, the host `Index`, the order `Key` (priority, host rank, specificity, names), tenant isolation of fallback routers, path normalization (`path.rs`), the matcher tree (`matcher.rs`, one file per leaf in `matcher/`). |
+| `src/compile.rs` | The compile passes (`build`) and what they refuse with: `Invalid` (a kind's code and message) and `Rejected` (placed in the snapshot, listed in the `422`). |
+| `src/middleware.rs`, `src/middleware/*.rs` | The per-route middleware chain: the `Kind` trait, the `kinds!` registry that generates `Stage` and its dispatch, `run_request` and the response hooks; one file per kind (`wasm.rs` today). |
+| `src/service.rs`, `src/service/*.rs` | Services: `loadbalancer` with `round_robin` (`lb/`), `ServerState`; empty modules for health, outlier ejection, sticky, transports and DNS. |
+| `src/entry.rs`, `src/pipeline.rs`, `src/l4.rs`, `src/observe.rs` | Entry points (`CompileContext`, `normalize_request`), the platform stage list for explain, and the L4 and observability models with their `*_not_built` rejections. |
 | `src/events.rs` | `EventFeed` (bounded ring of 4096, `emit`, long-poll `poll`, per-process `boot_id`), `Event`, `EventKind`. Features emit into it. |
 | `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), lock-free atomics on the request path (one registry swap per `sync`), `InflightGuard`, and the `revision_drained` event. |
-| `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`), the per-request `Ctx`, and `middleware_chain`: the ordered request-path stages, which `GET /v1/explain` reports. A new stage adds one line there. |
-| `src/explain.rs` | `Target::parse` (the `url` and `method` of an explain query) and `explain(table, target)`: why a request goes where it goes, read from the live `RoutingTable` (`lookup`, `nearest_wildcard`, `effective_weight`). |
+| `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`) and the per-request `Ctx`. `request_filter` runs the platform stages in the order `src/pipeline.rs` documents and reports to explain. |
+| `src/explain.rs` | `Target::parse` (the `url`, `method` and `entry_point` of an explain query) and `explain(table, target)`: why a request goes where it goes, read from the live `RoutingTable` and its router index (`find_all`, `nearest_wildcard`, `effective_weight`). |
 | `src/outcomes.rs` | `Outcomes`: response outcomes (total, `5xx`) per (app id, revision id) over a sliding window, recorded in `Gateway::logging` by `record_request`. Read by auto-revert; the canary reads per revision. |
 | `src/plan.rs` | `diff(live, candidate) -> Plan` (added, removed, changed hosts, posture changes) and `changed_apps`: the diff of two compiled tables. |
 | `src/revert.rs` | `Reverter`: after every snapshot push, watches the `5xx` ratio of the apps it changed and restores the previous table on a spike. |
@@ -34,7 +39,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/pool.rs` | Upstream connection pool isolation: `isolate` sets the peer's `group_key` from `(tenant, app, revision)` (Pingora adds the upstream address), and pins connections that carried `Authorization: NTLM` or `Negotiate` to their downstream connection (`State`, carried across keepalive requests by `persist`/`restore`). Called from `upstream_peer`. |
 | `src/skew.rs` | Skew protection: `SkewSecret`, the signed `__podgate_rev` cookie, `pinned` (called by `route::resolve`) and `set_cookie` (called by `response_filter`). |
 | `src/wake.rs` | Scale to zero: `Wake` holds requests for an app with no upstream (`hold`, woken by `TableHandle::subscribe`), emits `wake_requested` once per wake cycle, hands the held tenant slot on in `admit`, and `sweep` emits `app_idle`; `WakeService` runs the sweep as a background service; `State` is the per-request field of `Ctx`. |
-| `src/wasm.rs` | WASM request filters: compile and validate the `App.filters` modules at snapshot compile, `run_filters` runs them per request with fuel and a memory limit, the proxy-wasm host functions. |
+| `src/wasm.rs` | The WASM engine behind the `wasm` middleware: `Compiler` validates and compiles a module at snapshot compile, `run_filter` runs it per request with fuel and a memory limit, the proxy-wasm host functions. |
 | `src/wasm/executor.rs` | `Executor`: the bounded filter pool (`WASM_MAX_CONCURRENT` permits, `WASM_QUEUE_TIMEOUT_MS` wait) and the per-run memory charge; `Gateway::with_wasm`. |
 | `src/wasm/wasi.rs` | The `wasi_snapshot_preview1` stubs a filter may import (clock, entropy, `proc_exit`, empty environment and arguments, `fd_write` to the log). |
 | `src/admin.rs` | The admin router (`router`), `AppState`, the unix socket (`bind`, mode `0600`) and `AdminService`, a Pingora background service. |
@@ -208,11 +213,11 @@ HTTP/3: Pingora 0.9 has no HTTP/3 server. Every other part of this section is bu
 
 ## Snapshot model v2
 
-Design of change 0022, the shared contract for the feature specs after it. Until its steps 2 to 4 land, the code and `### Snapshot` above still describe the v1 model (`App.hosts`, `App.revisions[].upstreams`, `App.filters`); the cutover replaces them in one change, with no v1 reader kept. Nothing in this section changes `## Target architecture`: one process per node, one writer, push only.
+Design of change 0022, the shared contract for the feature specs after it. The v1 model (`App.hosts`, `App.revisions[].upstreams`, `App.filters`) is gone; no v1 reader is kept. The sections `### Snapshot`, `### WASM filters` and `### Canary` above describe the v1 field names for their features; read `hosts` as the `host` matchers of routers and `filters` as `wasm` middlewares. Nothing in this section changes `## Target architecture`: one process per node, one writer, push only.
 
 ### Invariants
 
-1. **Push only, one writer.** A node's snapshot has exactly one writer, the PaaS agent. Providers (Docker labels, Kubernetes, a Traefik file) run outside podgate, on the node or in the control plane, and the agent merges their output into one snapshot. `declared_by` keeps the provenance of every merged piece. podgate never merges: conflicting declarations reject the snapshot whole.
+1. **Push only, one writer.** A node's snapshot has exactly one writer: either podkit's agent or `podgate-provider` (a program in this repository that merges Docker and Podman labels, Kubernetes Gateway API, Ingress and CRDs, Nomad and a file into one snapshot), never both on one node. Providers run outside the proxy, and `declared_by` keeps the provenance of every merged piece. podgate never merges: conflicting declarations reject the snapshot whole.
 2. **Fail closed.** A setting podgate cannot honour is rejected at compile with `422`, never ignored. An unknown middleware, service or matcher kind, an unknown field inside a kind's configuration, an unknown name, and a knob Pingora cannot apply are all rejections. Envelope entities (`Snapshot`, `App`, `Router`, `Revision`) still ignore unknown fields, so an older podgate accepts a newer snapshot that only adds optional envelope fields.
 3. **Tenancy is structural.** Every router, service, middleware and transport lives inside one app, and an app belongs to one tenant. Names resolve inside the app only. No object refers to an object of another app, so a tenant cannot reach another tenant's configuration, and the control plane copies a shared middleware into every app that uses it.
 4. **Absent means off.** An absent optional field turns its feature off, as in v1.
@@ -285,7 +290,7 @@ Every matcher is an object with exactly one key; anything else is `invalid_match
 |`{"client_ip": ["10.0.0.0/8", "::1"]}`|The peer address, or the address behind the trusted forwarded headers of the entry point.|`client_ip.rs`|
 |`{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}`|Boolean combination; nest freely, depth at most 8.|`combinator.rs`|
 
-L4 routers (below) use the same tree with the leaves `sni`, `sni_regexp`, `alpn` and `client_ip`. Each leaf file declares its dialect (`http` or `tcp`), and a leaf of the wrong dialect is `invalid_matcher`.
+L4 routers (below) use the same tree with the leaves `sni`, `sni_regexp`, `alpn` and `client_ip`. Built today: `host`, `host_regexp`, `path`, `path_prefix`, `path_regexp`, `method` and the combinators. `header`, `header_regexp`, `query`, `query_regexp` and `client_ip` are planned and refused with `matcher_not_built`; any other key is `invalid_matcher` (`invalid_host` for a bad host).
 
 Regular expressions use the Rust `regex` crate: linear time, no backreferences, no lookaround, so a tenant cannot write a ReDoS, and the syntax is close to the RE2 that Traefik's Go uses. Each regex has a compiled-size limit; over it is `invalid_matcher`.
 
@@ -301,14 +306,20 @@ Routers of all apps form one match structure per entry point, indexed by host fo
 
 **Ambiguity.** Two routers that share a host claim (or have none) and have the same `(priority, specificity)` are *ambiguous* unless they are provably disjoint. Disjoint means some leaf pair can never both match: two different exact paths, prefixes that are not nested, different exact values of one header, disjoint method sets or CIDR ranges. Each leaf file implements `disjoint(other)`; regular expressions are never provably disjoint. Ambiguity rejects the snapshot. It lists both routers and both `declared_by` values.
 
-Host ownership: a host pattern is claimed by the positive `host` leaves of routers (a leaf under `not` claims nothing). A tenant owns the patterns it claims.
+Host ownership: a literal host pattern is claimed by the positive `host` leaves of routers (a leaf under `not` claims nothing). A tenant owns the patterns it claims.
+
+**Priority never orders routers across tenants.** Two rules make that hold:
+
+- A literal host is claimed by one tenant only (`host_conflict`), and no tenant may claim a host under another's wildcard (`cross_tenant_wildcard`), so for any host all routers with a literal claim belong to one tenant, and priority only orders those.
+- A *fallback* router (a `host_regexp`, or no host constraint) matches only hosts that no other tenant claims with a literal host, so a tenant's catch-all cannot capture another tenant's host or paths, whatever its priority: with `{"host_regexp": ".*"}` at `i32::MAX`, tenant B still loses `a.test` (claimed by tenant A) on every path, including paths A has no router for (`404`). Fallbacks of two tenants on a shared entry point are refused (`cross_tenant_catch_all`), because no order between them would be fair; an operator gives such a tenant an entry point whose `tenants` policy names it alone, which lifts the first restriction there.
 
 |Code|When|v1 rule it extends|
 |---|---|---|
 |`host_conflict`|Two tenants claim the same pattern, whatever the other matchers. Or two apps of one tenant claim it with routers that are ambiguous.|Two apps claiming one host. Two apps of one tenant that share a host and split by path are now allowed.|
-|`route_ambiguity`|Two routers of one app are ambiguous, or two routers with no shared host claim are.|New.|
+|`route_ambiguity`|Two routers of one app are ambiguous, or two fallback routers of one tenant are.|New.|
 |`cross_tenant_wildcard`|A claim lies under another tenant's wildcard.|Unchanged.|
-|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, or two apps of one tenant share a pattern, and their `tls` differ (`mode`, `client_ca_pem`, any later TLS option, compared as written).|v1 compared only `client_ca_pem`. TLS is decided per host at the handshake, before any path is known, so it is a property of the app and cannot vary per router.|
+|`cross_tenant_catch_all`|Fallback routers of two tenants share an entry point.|New.|
+|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, or two apps of one tenant share a pattern, and their `tls.client_ca_pem` differ (compared as written). A later TLS option that restricts clients joins the comparison.|v1 compared the same field for wildcards only. TLS is decided per host at the handshake, before any path is known, so it is a property of the app and cannot vary per router.|
 
 ### Services
 
@@ -384,20 +395,21 @@ Platform behaviour that exists without being declared, and how a declaration rep
 
 ### Request pipeline
 
-Platform stages are fixed and not configurable; the chain is the tenant's. Order of `request_filter`:
+Platform stages are fixed and not configurable; the chain is the tenant's. Order of `request_filter` (`src/pipeline.rs` lists it for explain):
 
 1. `acme_http01`.
-2. `entry_point`: path normalization and refusals, forwarded-header sanitizing, entry point `redirect`.
-3. `sni_check`. It runs before routing, so it finds the apps that claim the request's host through the host index and applies the strictest answer: if any claimant does not set `allow_domain_fronting`, the request is refused.
-4. `route`: pick the router (`Matched {app, router}`). No match is `404`.
-5. `failure_capture` begins. A matched request that ends in `5xx` is recorded unless podgate refused it for capacity or for lack of an upstream (`503 no upstream available`), which is the v1 rule.
-6. `chain`: the effective chain's request hooks, before any slot is taken or any app is woken, so unauthenticated or rate-limited traffic cannot take a tenant slot, queue for a backend, or wake a sleeping app.
-7. `select`: pick the revision (skew cookie, canary share, weights), resolve the router's service in it, pick a server (balancer, sticky, health). No server in a `scale_to_zero` app: `wake_hold`. The result is `Selected {revision, server}`.
-8. `inflight_admit`, `tenant_admit`, `backend_admit`, as in v1.
+2. `entry_point`: path normalization (the request is rewritten to the path that is matched) and refusal of unsafe paths with `400`. Forwarded-header sanitizing and entry point `redirect` join here when built.
+3. `route`: pick the router (`Matched {app, router}`) with `route::matching`.
+4. `sni_check`, on the matched router's app: over TLS, a request whose host differs from the SNI is refused with `421` unless the matched app sets `allow_domain_fronting`. It runs for requests no router matched too, so a misdirected request gets `421` and never learns whether a route exists.
+5. `client_cert`, on the matched router's app, however the router matched (exact host, wildcard, `host_regexp`, no host): an app with a client CA gets `403` without a chain it accepts. No match is `404`, after this.
+6. `failure_capture` begins. A matched request that ends in `5xx` is recorded, unless podgate refused it for capacity or for lack of an upstream (`503 no upstream available`). A request a middleware answered is recorded with `revision` and `upstream` `null`.
+7. `chain`: the effective chain's request hooks, before any slot is taken or any app is woken, so unauthenticated or rate-limited traffic cannot take a tenant slot, queue for a backend, or wake a sleeping app.
+8. `select`: pick the revision (skew cookie, canary share, weights), resolve the router's service in it, pick a server (`route::select`). No server in a `scale_to_zero` app: `wake_hold`. When the revision drained or a request waited, the router is found again in the live table (`RoutingTable::rematch`) only if its app, tenant, TLS policy and middleware chain are unchanged; otherwise the request answers `503`, so a request never continues under a chain it did not start with.
+9. `inflight_admit`, `tenant_admit`, `backend_admit`, as in v1.
 
-Then `upstream_peer` (transport, pool key), the chain's `upstream_request` hooks, the response hooks in reverse order, body hooks, and `logging`. A request keeps the one `Arc<RoutingTable>` it loaded, as in v1.
+Then `upstream_peer` (pool key), the chain's `upstream_request` hooks, the response hooks in reverse order, body hooks, and `logging`. A request keeps the one `Arc<RoutingTable>` it loaded, as in v1.
 
-v1 ran `wasm_filters` after the admissions. It now runs in the chain, before them. Its memory is still charged to the tenant, looked up by the app's tenant instead of through a slot the request does not yet hold.
+v1 ran `wasm_filters` after the admissions. It now runs in the chain, before them: a filter run no longer holds a tenant in-flight slot, and its memory is charged to the tenant looked up by the app's tenant instead of through a slot the request does not yet hold.
 
 ### Compile and rejection codes
 
@@ -420,36 +432,39 @@ The feature specs rely on this. Everything per kind lives in that kind's file.
 
 ```rust
 /// Implemented by one type per file in `src/middleware/`.
-pub trait Kind: Sized + Send + Sync + 'static {
-    const TYPE: &'static str;
-    /// Per-request state, held in `Ctx.chain`; `Default` when the request starts.
-    type State: Default + Send;
-    fn compile(declared: &Declared, cx: &CompileCx<'_>) -> Result<Self, Invalid>;
-    // Hooks, all default to doing nothing. `Flow::Respond` answers and ends the request.
-    async fn request(&self, _req: &mut RequestCx<'_>, _state: &mut Self::State) -> Flow { Flow::Continue }
-    fn upstream_request(&self, _req: &mut UpstreamRequest<'_>, _state: &mut Self::State) {}
-    fn response(&self, _res: &mut ResponseCx<'_>, _state: &mut Self::State) {}
-    fn response_body(&self, _body: &mut Body<'_>, _state: &mut Self::State) {}
-    fn on_upstream_error(&self, _err: &UpstreamError, _state: &mut Self::State) -> Retry { Retry::No }
-    /// Relaxations a plan must list when `new` replaces `self`.
-    fn posture(&self, _new: &Self) -> Vec<Posture> { Vec::new() }
-    /// What explain shows for this stage.
-    fn describe(&self) -> serde_json::Value { serde_json::Value::Null }
+pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
+    /// Per-request state, created with `Default` when the chain starts.
+    type State: Default + Send + fmt::Debug;
+    fn compile(declared: &Declared, cx: &mut CompileCx<'_>) -> Result<Self, Invalid>;
+    // Hooks; every one defaults to doing nothing. `Flow::Respond` means the hook wrote the response.
+    fn request(&self, cx: &mut RequestCx<'_>, state: &mut Self::State)
+        -> impl Future<Output = pingora::Result<Flow>> + Send;
+    fn upstream_request(&self, request: &mut RequestHeader, state: &mut Self::State) -> pingora::Result<()>;
+    fn response(&self, response: &mut ResponseHeader, state: &mut Self::State) -> pingora::Result<()>;
+    fn response_body(&self, body: &mut Option<Bytes>, end_of_stream: bool, state: &mut Self::State)
+        -> pingora::Result<()>;
+    /// Relaxations a plan lists when `new` replaces `self`; `None`: the stage is gone.
+    fn posture(&self, new: Option<&Self>) -> Vec<&'static str>;
+    /// What explain shows for this stage besides its type.
+    fn describe(&self) -> serde_json::Value;
 }
 ```
 
-`src/middleware.rs` generates, from one list, the `Stage` enum, the per-request `StageState` enum and the dispatch, so there is no `dyn` and no boxed future on the request path:
+`RequestCx` holds the downstream `Session`, the matched `CompiledApp`, the tenant's `TenantBudget`, the WASM `Executor` and the `capacity_refusal` flag. `CompileCx` holds the declaring `App` and the shared WASM engine. A kind that needs more adds a field there, a shared one-line change. An upstream-error hook (for `retry`) is added by the spec that needs it, because it must decide what Pingora retries.
+
+`src/middleware.rs` generates, from one list, the `Stage` enum, the per-request state enum and the dispatch, so there is no `dyn` and no boxed future on the request path:
 
 ```rust
 kinds! {
-    wasm => wasm::Wasm,
-    add_prefix => unbuilt,
-    basic_auth => unbuilt,
-    // one line per kind; a spec replaces `unbuilt` with its type on its own line
+    "wasm" => Wasm(wasm::Wasm),
+
+    "add_prefix" => unbuilt,
+
+    "basic_auth" => unbuilt,
 }
 ```
 
-Services (`service::Kind`), balancers (`lb::Balancer`: `pick(&self, cx: &PickCx, servers: &[ServerState]) -> Option<usize>`, `done(...)`) and matcher leaves (`matcher::Leaf`: `parse`, `matches`, `specificity`, `disjoint`, `claims`) use the same `kinds!` pattern in `service.rs`, `service/lb.rs` and `router/matcher.rs`. An unbuilt entry rejects with its `*_not_built` code, so the foundation can list every planned kind while each spec only edits its own file and replaces `unbuilt` on one line.
+One entry per line, a blank line between entries; a spec replaces `unbuilt` on its own line with `Variant(path::Type)` and adds `mod <kind>;`. An unbuilt entry is refused with `middleware_not_built`. Services, balancers and matcher leaves have few variants and no per-request state, so each is a plain enum with `match` arms in `service.rs`, `service/lb.rs` and `router/matcher.rs`; an unbuilt name sits in that file's `UNBUILT` list and is refused with `service_not_built` or `matcher_not_built`. A spec edits its own file, one variant, one arm per `match`, and removes its name from the list.
 
 Rules for every kind:
 
@@ -457,11 +472,11 @@ Rules for every kind:
 2. **Bounded memory.** State per request or per key declares its cap and charges the tenant's `max_buffer_bytes` before allocating (change 0009's mechanism). The kind degrades or refuses as it documents; it never grows without a bound (`rate_limit.max_sources`, `buffering` limits, `compress` reservation).
 3. **No blocking and no unbounded waits.** Async hooks carry a deadline, from their config or `REQUEST_TIMEOUT_SECS`. CPU-heavy work (wasm) runs on the blocking pool through its bounded executor.
 4. **Outbound only to declared addresses.** `forward_auth`, `errors` and `mirroring` call addresses and services written in the same app's configuration, never an address derived from the request.
-5. **Runtime state outside the table.** Counters, buckets, health and ejection live in a registry keyed by (app, object name, fingerprint of its declaration) and are settled at the one swap site, like the canary: a push that does not change the object keeps its state, a changed object starts fresh.
-6. **Security kinds implement `posture`.** Removing or loosening an `ip_allow_list`, `basic_auth`, `digest_auth`, `forward_auth`, `rate_limit`, the security options of `headers`, `wasm`, a client CA, or turning on `insecure_skip_verify` appears in `posture_changes` of `POST /v1/snapshot/plan`. The plan's host diff compares one fingerprint per app (everything but `declared_by`), so a kind needs no diff code of its own.
+5. **Runtime state outside the table.** Counters, buckets, health and ejection live in a registry keyed by (app, object name, fingerprint of its declaration) and settled at the one swap site, like the canary: a push that does not change the object keeps its state, a changed object starts fresh. (`ServerState` and the round-robin counter still live in the table; the health and rate-limit specs move their state out.)
+6. **Security kinds implement `posture`.** Removing or loosening an `ip_allow_list`, `basic_auth`, `digest_auth`, `forward_auth`, `rate_limit`, the security options of `headers`, `wasm`, a client CA, or turning on `insecure_skip_verify` appears in `posture_changes` of `POST /v1/snapshot/plan`. The plan compares one fingerprint per app (everything but `declared_by`) for `changed` and asks each used stage for its `posture`, so a kind needs no diff code of its own. The `wasm` kind reports `filters_removed` and `filters_changed`.
 7. **One test file.** `tests/mw_<kind>.rs` (or `tests/lb_<name>.rs`, `tests/svc_<kind>.rs`), written against the `tests/common` v2 builders. A kind never reads another kind's `Ctx` state.
 
-The server state that a balancer, the health checker and the outlier detector share is fixed in `service/loadbalancer.rs` by 0022: per server `healthy`, `ejected_until`, `active` and `ewma_us`, all atomics, so each of those specs writes its own slot and none reshapes the struct.
+The server state that a balancer, the health checker and the outlier detector share is fixed in `service/loadbalancer.rs` by 0022: per server `healthy`, `ejected_until_ms`, `active` and `ewma_us`, all atomics, so each of those specs writes its own slot and none reshapes the struct.
 
 ### Runtime state outside the table
 
@@ -486,32 +501,33 @@ Already outside, keyed by app and revision: in-flight counters (`inflight.rs`), 
 
 ### Explain
 
-`GET /v1/explain?url=<url>&method=<m>` takes the path and query of `url` too, plus repeatable `header=<name>:<value>`, `client_ip=<ip>` and `entry_point=<name>`. `200` carries `matched {app, tenant, declared_by, router, entry_points, match, priority, specificity}`, `considered` (every router that matches, in routing order, so a shadowed route is visible), `pipeline` (every platform stage and every chain entry as `{"stage": "chain", "middleware": "<name>", "type": "<type>", ...describe()}`), and `service` with the revisions, their `effective_weight`, and each server's URL, weight and health. `404` keeps `nearest_wildcard` and adds `near_misses`: routers whose host matches and some other leaf does not, with the failing leaf. It reads the compiled table, so it cannot drift.
+`GET /v1/explain?url=<url>&method=<m>[&entry_point=<name>]` reads the path and query of `url` too. `200` carries `version`, `host`, `method`, `path`, `entry_point`, `app`, `tenant`, `declared_by`, `matched {router, priority, pattern, kind}` (`pattern` is the literal host that matched, `null` for a router with none; `kind` is `exact`, `wildcard`, `regexp` or `none`), `considered` (every router that matches, best first, so a shadowed route is visible), `service` (the matched router's service name), `revisions [{id, state, weight, effective_weight, servers [{url, weight, available}]}]` (the servers of that service in each revision), `canary` when the app has one, and `pipeline` (every platform stage as `{"stage": "<name>"}` and every chain entry as `{"stage": "chain", "middleware": "<name>", "type": "<type>", ...describe()}`). `404` keeps `nearest_wildcard`. Header and client-IP inputs arrive with the leaves that read them. It reads the compiled table and runs the same router index as the proxy, so it cannot drift.
 
 ### Ownership map
 
-0022 creates every file below, empty or `unbuilt`, so the feature specs after it edit only their own files. "Shared" files accept one-line additions: a line in a `kinds!` list, one `.merge(...)`, one field on `Ctx`.
+0022 creates every file below, filled or an empty module with its doc comment, so the feature specs after it edit only their own files. "Shared" files accept one-line additions: a line in the `kinds!` list, one `.merge(...)`, one field on `Ctx`.
 
 |Area|Files|Built by 0022|Feature specs that fill it|
 |---|---|---|---|
 |Model (shared)|`src/snapshot.rs`, `src/snapshot/{entry_point,l4,observe}.rs`|All envelope types; `Declared`|Add optional envelope fields only|
-|Compile (shared)|`src/compile.rs`, `src/table.rs`, `src/revision.rs`, `src/conflict.rs`, `src/error.rs`|Passes, `CompileContext`, v1 conflicts and codes, `route_ambiguity`|None; new codes go through `Invalid`|
-|Router|`src/router.rs`, `src/router/{tree,priority}.rs`|Match tree, ordering, ambiguity check|Specificity or ambiguity corrections|
-|Matcher leaves|`src/router/matcher.rs`, `src/router/matcher/*.rs`|`host`, combinators|One spec per leaf group: path family; method; header and query; client IP; host regexp|
-|Pipeline (shared)|`src/pipeline.rs`, `src/proxy.rs`, `src/route.rs`|Stages 1 to 8, chain runner, `Ctx.chain`, `route::matching`, `route::select`|Add a platform stage: one line each|
-|Middleware kinds|`src/middleware.rs`, `src/middleware/*.rs`|Registry, trait, `wasm` (moved), `compress` default, `chain`|One spec per row of the middleware table, grouped as you like: path rewriting, redirects, headers and content type, auth, limits, resilience, body and compression, errors and respond, `pass_tls_client_cert`, `grpc_web`|
-|Services|`src/service.rs`, `src/service/{loadbalancer,weighted,mirroring,failover}.rs`|`loadbalancer` with `round_robin`, `ServerState`, the state registry|`weighted` and `failover`; `mirroring`|
+|Compile (shared)|`src/compile.rs`, `src/table.rs`, `src/conflict.rs`, `src/error.rs`|The passes, `Invalid` and `Rejected`, `CompileContext`, all conflict codes|None; new codes go through `Invalid`|
+|Router|`src/router.rs`, `src/router/{tree,priority,path}.rs`|Index, order key, path normalization, tenant isolation of fallbacks|Specificity or ambiguity corrections|
+|Matcher leaves|`src/router/matcher.rs`, `src/router/matcher/*.rs`|`host`, `host_regexp`, `path`, `path_prefix`, `path_regexp`, `method`, `all`, `any`, `not`|One spec for `header`, `header_regexp`, `query`, `query_regexp`; one for `client_ip` (needs forwarded-header trust)|
+|Pipeline (shared)|`src/pipeline.rs`, `src/proxy.rs`, `src/route.rs`, `src/entry.rs`|Stages 1 to 9, chain runner, `Ctx.chain`, `route::matching`, `route::select`, `RoutingTable::rematch`|Add a platform stage: one line each|
+|Middleware kinds|`src/middleware.rs`, `src/middleware/*.rs`|Registry (`kinds!`), `Kind` trait, `chain` expansion, `wasm` (the adapter in `middleware/wasm.rs` over the engine in `src/wasm.rs`)|One spec per row of the middleware table, grouped as you like: path rewriting, redirects, headers and content type, auth, limits, resilience, body and compression, errors and respond, `pass_tls_client_cert`, `grpc_web`. The `retry` spec adds an upstream-error hook to `Kind`. Today's gzip stays a platform default until a `compress` spec replaces it.|
+|Services|`src/service.rs`, `src/service/{loadbalancer,weighted,mirroring,failover}.rs`|`loadbalancer` with `round_robin`, `ServerState`|`weighted` and `failover`; `mirroring`. A spec that needs health or outlier state outside the table adds the registry.|
 |Balancers|`src/service/lb.rs`, `src/service/lb/*.rs`|`round_robin`|`weighted_round_robin`, `least_conn`, `p2c_ewma`, the hashing group|
 |Health|`src/service/{health,outlier}.rs`|Empty|Active health checks; passive ejection|
 |Sticky|`src/service/sticky.rs`|Empty|Sticky cookie|
-|Transports|`src/service/transport.rs`|Default transport: plain, no TLS|Upstream TLS, h2 and h2c, timeouts, pool size; `resolve.rs` for DNS|
-|TLS|`src/tls.rs`, `src/sni.rs`|Reads `App.tls`|0021 client auth; TLS options; default certificate|
-|Entry points|`src/entry.rs`, `src/config.rs`|`web` and `websecure`, `CompileContext`|`ENTRY_POINTS`, policies, proxy protocol, forwarded headers, timeouts, HTTP/2|
-|L4|`src/l4.rs`, `src/l4/{tcp,udp}.rs`|Model and compile rejection only|TCP routers and services; UDP|
-|Observability|`src/observe.rs`, `src/observe/{access_log,metrics,tracing}.rs`, `src/admin/metrics.rs`|Existing series moved behind `render`|Access log; per-router metrics; OTLP tracing|
-|Admin API (shared)|`src/admin.rs`, `src/admin/*.rs`, `src/explain.rs`, `src/plan.rs`|`explain` v2 for the built parts; plan on fingerprints|`GET /v1/schema` (JSON Schema of the snapshot, generated from the types); `POST /v1/snapshot/validate` (compile without the version check)|
-|Providers|`providers/<name>/` (outside the daemon, each its own crate or example)|None|Traefik file to snapshot (sets explicit priorities); Docker labels; Kubernetes ingress. Extracting a `podgate-model` crate for them to depend on is the first provider spec's decision.|
-|Tests (shared)|`tests/common/mod.rs`|v2 builders: `app`, `router`, `service`, `revision`, `middleware`, `snapshot`|Each spec adds `tests/<area>.rs`|
+|Transports|`src/service/transport.rs`|Empty: every upstream is plain HTTP/1.1|Upstream TLS, h2 and h2c, timeouts, pool size|
+|Resolver and upstream policy|`src/service/resolve.rs`|Empty; IP literals only, host names are `dns_upstream_not_built`|DNS upstreams, and the upstream address policy: an allowlist of CIDRs per tenant and source in operator configuration, with link-local, loopback and the admin and agent addresses denied by default. It is checked at compile for literal IPs and on every DNS resolution before a connection is made. The resolver spec owns it.|
+|TLS|`src/tls.rs`, `src/sni.rs`, `src/clientauth.rs`|Client auth and the SNI check decide on the matched router's app|TLS options; default certificate|
+|Entry points|`src/entry.rs`, `src/config.rs`|`web` and `websecure`, `CompileContext`, policy `tenants` enforced|`ENTRY_POINTS`, the other policy fields, proxy protocol, forwarded headers, timeouts, HTTP/2|
+|L4|`src/l4.rs`, `src/l4/{tcp,udp}.rs`|Model and compile rejection (`l4_not_built`)|TCP routers and services; UDP|
+|Observability|`src/observe.rs`, `src/observe/{access_log,metrics,tracing}.rs`|Model and compile rejection (`observability_not_built`)|Access log; per-router metrics; OTLP tracing|
+|Admin API (shared)|`src/admin.rs`, `src/admin/*.rs`, `src/explain.rs`, `src/plan.rs`|`explain` v2; plan compares app fingerprints and asks each middleware for its posture|`GET /v1/schema` (JSON Schema of the snapshot, generated from the types); `POST /v1/snapshot/validate` (compile without the version check)|
+|Providers|One `podgate-provider` crate (a workspace member) with one sub-module per source (`docker`, `kubernetes`, `nomad`, `file`) and a shared core that merges them into one snapshot|None|The node's snapshot writer is either podkit's agent or `podgate-provider`, never both. Providers translate Traefik rules and set explicit priorities. Extracting a `podgate-model` crate for the daemon and the provider to share is the first provider spec's decision.|
+|Tests (shared)|`tests/common/mod.rs`|v2 builders: `app`, `router`, `service`, `revision`, `revision_on`, `middleware`, `with_filters`, `snapshot`|Each spec adds `tests/<area>.rs`|
 
 ### Deferred, with reasons
 

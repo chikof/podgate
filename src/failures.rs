@@ -138,10 +138,10 @@ pub struct FailedRequest {
     pub uri: String,
     /// Normalized request host.
     pub host: String,
-    /// The revision that was chosen.
-    pub revision: Box<str>,
-    /// The backend that was chosen.
-    pub upstream: SocketAddr,
+    /// The revision that was chosen; `null` for a request a middleware answered first.
+    pub revision: Option<Box<str>>,
+    /// The backend that was chosen; `null` for a request a middleware answered first.
+    pub upstream: Option<SocketAddr>,
     /// Request headers, secrets redacted.
     pub request_headers: Headers,
     /// Request body, when the app keeps bodies.
@@ -169,7 +169,7 @@ impl FailedRequest {
             "uri": self.uri,
             "host": self.host,
             "revision": self.revision,
-            "upstream": self.upstream.to_string(),
+            "upstream": self.upstream.map(|upstream| upstream.to_string()),
             "request_headers": headers_json(&self.request_headers),
             "request_body": self.request_body.text(),
             "request_body_too_large": self.request_body.too_large(),
@@ -265,19 +265,27 @@ impl Failures {
     /// Records the request of `session` when it was routed and got a 5xx. Call it from
     /// `ProxyHttp::logging`, which runs once per request after the response is written.
     pub fn log(&self, session: &Session, ctx: &mut Ctx) {
-        let Some(selected) = ctx.route else { return };
+        // A request answered by the middleware chain never reached `select`: it has a router but
+        // no revision or backend. One refused for capacity, or for lack of an upstream, has
+        // neither flag and is not recorded.
+        let Some(matched) = ctx
+            .matched
+            .filter(|_| ctx.route.is_some() || ctx.chain_answered)
+        else {
+            return;
+        };
         let Some(response) = session.response_written() else {
             return;
         };
         if !response.status.is_server_error() {
             return;
         }
-        let Some(app) = ctx.table.app(selected.app) else {
+        let Some(app) = ctx.table.app(matched.app) else {
             return;
         };
-        let Some(revision) = app.revisions().get(selected.revision) else {
-            return;
-        };
+        let revision = ctx
+            .route
+            .and_then(|selected| app.revisions().get(selected.revision));
         let capture = std::mem::take(&mut ctx.failures);
         let request = session.req_header();
         let failed = FailedRequest {
@@ -297,8 +305,8 @@ impl Failures {
             host: crate::route::request_host(request)
                 .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default(),
-            revision: revision.id().into(),
-            upstream: selected.upstream,
+            revision: revision.map(|revision| revision.id().into()),
+            upstream: ctx.route.map(|selected| selected.upstream),
             request_headers: redacted(&request.headers),
             request_body: capture.request.into_body(),
             status: response.status.as_u16(),
@@ -522,8 +530,8 @@ mod test {
             method: "GET".into(),
             uri: uri.into(),
             host: "a.test".into(),
-            revision: "r1".into(),
-            upstream: SocketAddr::from(([127, 0, 0, 1], 9000)),
+            revision: Some("r1".into()),
+            upstream: Some(SocketAddr::from(([127, 0, 0, 1], 9000))),
             request_headers: Vec::new(),
             request_body: Body::NotRecorded,
             status: 500,

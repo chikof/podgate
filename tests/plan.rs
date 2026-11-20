@@ -5,11 +5,20 @@ mod common;
 use common::{Podgate, TestCa, Upstream, app, serving, snapshot};
 use serde_json::{Value, json};
 
+/// `app` with the fields of `extra` set. A `filters` list becomes `wasm` middlewares.
 fn with(mut app: Value, extra: &Value) -> Value {
-    if let (Some(base), Some(extra)) = (app.as_object_mut(), extra.as_object()) {
-        base.extend(extra.clone());
+    let Some(extra) = extra.as_object() else {
+        return app;
+    };
+    let mut extra = extra.clone();
+    let filters = extra.remove("filters");
+    if let Some(base) = app.as_object_mut() {
+        base.extend(extra);
     }
-    app
+    match filters {
+        Some(Value::Array(filters)) => common::with_filters(app, &filters),
+        _ => app,
+    }
 }
 
 #[tokio::test]

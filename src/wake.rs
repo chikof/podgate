@@ -19,14 +19,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use pingora::http::RequestHeader;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 
 use crate::budget::{self, Budgets, TenantSlot};
 use crate::error::AppError;
 use crate::events::{EventFeed, EventKind};
-use crate::route::{self, RouteError};
+use crate::route::RouteError;
+use crate::router::Matched;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
 
 /// How often the background service looks for idle apps.
@@ -198,32 +198,33 @@ impl Wake {
     /// Holds a request that found its app without an upstream, until the live table gives the
     /// app one.
     ///
-    /// On `Ok` the request must route again: `table` now holds the live table. The app may
-    /// have an upstream, may be gone, or may have lost `scale_to_zero`; routing says which.
-    /// The first request held for an app emits `wake_requested`, and all of them take a tenant
-    /// slot, kept until [`Self::admit`] hands it on.
+    /// `matched` is the router the request matched in `table`. On `Ok` the request must select
+    /// again: `table` is the live table and `matched` the same router in it (see
+    /// [`RoutingTable::rematch`]; a request never continues under a different chain or TLS
+    /// policy than it started with). The first request held for an app emits `wake_requested`,
+    /// and all of them take a tenant slot, kept until [`Self::admit`] hands it on.
     ///
     /// # Errors
     ///
-    /// The usual no-upstream `503` when the app does not scale to zero. [`AppError::Overloaded`]
-    /// when the tenant has no slot for the held request. [`AppError::WakeTimeout`] when the
-    /// request's `wake_timeout_secs` pass without an upstream; the budget is per request, not
-    /// per hold.
+    /// The usual no-upstream `503` when the app does not scale to zero, or when a snapshot
+    /// changed the router's middleware chain or the app's TLS policy while the request waited.
+    /// `404` when a snapshot removed the app. [`AppError::Overloaded`] when the tenant has no
+    /// slot for the held request. [`AppError::WakeTimeout`] when the request's
+    /// `wake_timeout_secs` pass without an upstream; the budget is per request, not per hold.
     pub async fn hold(
         &self,
         state: &mut State,
         table: &mut Arc<RoutingTable>,
         live: &TableHandle,
         budgets: &Budgets,
-        request: &RequestHeader,
+        matched: &mut Matched,
     ) -> Result<(), AppError> {
         let asleep = || AppError::from(RouteError::NoUpstream);
-        let host: Box<str> = route::request_host(request).ok_or_else(asleep)?.into();
-        let (index, app) = table.find_app(&host).ok_or_else(asleep)?;
+        let app = table.app(matched.app).ok_or_else(asleep)?;
         let policy = app.scale_to_zero().ok_or_else(asleep)?;
         let id: Box<str> = app.id().into();
         if state.held.is_none() {
-            state.held = budget::admit(budgets, table, index)?.map(|slot| Held {
+            state.held = budget::admit(budgets, table, matched.app)?.map(|slot| Held {
                 tenant: app.tenant().into(),
                 slot,
             });
@@ -236,15 +237,25 @@ impl Wake {
         if first {
             self.shared
                 .events
-                .emit(EventKind::WakeRequested { app: id });
+                .emit(EventKind::WakeRequested { app: id.clone() });
         }
         // Subscribed before the first load: a swap in between is seen by `changed`.
         let mut swaps = live.subscribe();
         loop {
             let newest = live.load();
-            if is_awake_or_gone(&newest, &host) {
-                *table = newest;
-                return Ok(());
+            if is_awake_or_gone(&newest, &id) {
+                let found = newest.rematch(table, *matched);
+                let gone = newest.app_by_id(&id).is_none();
+                // On failure `table` and `matched` stay as they were, so they still agree.
+                return match found {
+                    Some(rematched) => {
+                        *table = newest;
+                        *matched = rematched;
+                        Ok(())
+                    }
+                    None if gone => Err(AppError::NotFound),
+                    None => Err(asleep()),
+                };
             }
             let left = deadline.saturating_duration_since(Instant::now());
             // A closed signal cannot happen while `live` is borrowed; it would end the wait too.
@@ -313,11 +324,11 @@ fn has_upstream(app: &CompiledApp) -> bool {
         .any(|revision| revision.effective_weight() > 0)
 }
 
-/// Whether a request for `host` should stop waiting: the app has an upstream, or it is gone or
-/// no longer scales to zero, in which case routing gives the final answer.
-fn is_awake_or_gone(table: &RoutingTable, host: &str) -> bool {
+/// Whether a request for app `id` should stop waiting: the app has an upstream, or it is gone
+/// or no longer scales to zero, in which case routing gives the final answer.
+fn is_awake_or_gone(table: &RoutingTable, id: &str) -> bool {
     table
-        .find_app(host)
+        .app_by_id(id)
         .is_none_or(|(_, app)| app.scale_to_zero().is_none() || has_upstream(app))
 }
 
@@ -356,16 +367,18 @@ mod test {
     use crate::events::EventFeed;
     use crate::snapshot::Snapshot;
 
-    fn table(upstreams: &str, idle_secs: u64) -> RoutingTable {
+    fn table(servers: &str, idle_secs: u64) -> RoutingTable {
         let json = format!(
             r#"{{
             "version": 1,
             "tenants": [{{"id": "t", "weight": 1, "budget": {{"max_inflight": 5, "max_buffer_bytes": 1}}}}],
             "apps": [{{
-                "id": "a", "tenant": "t", "declared_by": "test", "hosts": ["a.test"],
+                "id": "a", "tenant": "t", "declared_by": "test",
                 "tls": {{"mode": "acme"}},
                 "scale_to_zero": {{"idle_secs": {idle_secs}}},
-                "revisions": [{{"id": "r", "upstreams": {upstreams}, "weight": 1, "state": "serving"}}]
+                "routers": [{{"name": "all", "match": {{"host": "a.test"}}, "service": "web"}}],
+                "revisions": [{{"id": "r", "weight": 1, "state": "serving", "services": [
+                    {{"name": "web", "type": "loadbalancer", "servers": {servers}}}]}}]
             }}]
         }}"#
         );
@@ -387,7 +400,7 @@ mod test {
     fn idle_is_reported_once_per_period_and_rearmed_by_a_request() {
         let feed = EventFeed::new();
         let wake = Wake::new(feed.clone());
-        let table = table(r#"["127.0.0.1:9"]"#, 10);
+        let table = table(r#"[{"url": "http://127.0.0.1:9"}]"#, 10);
         let start = Instant::now();
         wake.sweep(&table, start);
         wake.sweep(&table, start + Duration::from_secs(9));

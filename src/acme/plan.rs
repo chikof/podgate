@@ -132,13 +132,14 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Compiles the ACME view of `snapshot`. `Snapshot.acme` absent gives the empty plan.
+    /// Compiles the ACME view of `snapshot`. `claims[i]` are the literal host patterns the
+    /// routers of `snapshot.apps[i]` claim. `Snapshot.acme` absent gives the empty plan.
     ///
     /// # Errors
     ///
     /// [`PlanError`] for an unusable `acme` field or a certificate whose validity cannot be
     /// read. Hosts are checked by the table compiler before this runs.
-    pub fn compile(snapshot: &Snapshot) -> Result<Self, PlanError> {
+    pub fn compile(snapshot: &Snapshot, claims: &[Vec<HostPattern>]) -> Result<Self, PlanError> {
         let Some(acme) = &snapshot.acme else {
             return Ok(Self::default());
         };
@@ -152,16 +153,13 @@ impl Plan {
             settings: Some(acme.clone()),
             ..Self::default()
         };
-        for app in &snapshot.apps {
+        for (app, patterns) in snapshot.apps.iter().zip(claims) {
             let mut exact = Vec::new();
-            for raw in &app.hosts {
-                let Ok(pattern) = HostPattern::parse(raw) else {
-                    continue;
-                };
-                if let HostPattern::Exact(name) = &pattern {
+            for pattern in patterns {
+                if let HostPattern::Exact(name) = pattern {
                     exact.push(name.clone());
                 }
-                plan.claimed.insert(pattern, app.tls.mode);
+                plan.claimed.insert(pattern.clone(), app.tls.mode);
             }
             plan.on_demand |= app.tls.mode == TlsMode::OnDemand;
             if app.tls.mode == TlsMode::Acme && !exact.is_empty() {
@@ -336,10 +334,30 @@ mod test {
 
     fn app(id: &str, mode: &str, hosts: &str) -> String {
         format!(
-            r#"{{"id": "{id}", "tenant": "t", "declared_by": "test", "hosts": [{hosts}],
+            r#"{{"id": "{id}", "tenant": "t", "declared_by": "test",
             "tls": {{"mode": "{mode}"}},
-            "revisions": [{{"id": "r", "upstreams": ["127.0.0.1:9000"], "weight": 1, "state": "serving"}}]}}"#
+            "routers": [{{"name": "r", "match": {{"host": [{hosts}]}}, "service": "web"}}],
+            "revisions": [{{"id": "r", "weight": 1, "state": "serving", "services": [
+                {{"name": "web", "type": "loadbalancer", "servers": [{{"url": "http://127.0.0.1:9000"}}]}}]}}]}}"#
         )
+    }
+
+    /// The plan of `snapshot`, with the hosts its apps' `host` matchers claim.
+    fn compiled(snapshot: &Snapshot) -> Result<Plan, PlanError> {
+        let claims: Vec<Vec<HostPattern>> = snapshot
+            .apps
+            .iter()
+            .map(|app| {
+                app.routers
+                    .iter()
+                    .filter_map(|router| router.matcher["host"].as_array())
+                    .flatten()
+                    .filter_map(|host| host.as_str())
+                    .filter_map(|host| HostPattern::parse(host).ok())
+                    .collect()
+            })
+            .collect();
+        Plan::compile(snapshot, &claims)
     }
 
     const ACME: &str = r#"{"issuer_node": "n1", "directory_url": "https://ca.test/dir"}"#;
@@ -357,7 +375,7 @@ mod test {
     fn acme_plan_is_empty_without_settings() {
         let snapshot: Snapshot =
             serde_json::from_str(r#"{"version": 1, "tenants": [], "apps": []}"#).expect("valid");
-        let plan = Plan::compile(&snapshot).expect("compiles");
+        let plan = Plan::compile(&snapshot, &[]).expect("compiles");
         assert!(plan.settings().is_none());
         assert!(!plan.on_demand_enabled());
         assert!(plan.missing().is_empty());
@@ -370,7 +388,7 @@ mod test {
             app("p", "on_demand", r#""*.p.test""#),
         ]
         .join(",");
-        let plan = Plan::compile(&snapshot(ACME, &apps, "")).expect("compiles");
+        let plan = compiled(&snapshot(ACME, &apps, "")).expect("compiles");
         assert_eq!(
             plan.missing(),
             vec![vec![Box::<str>::from("a.test"), "b.test".into()]]
@@ -388,8 +406,7 @@ mod test {
             "hosts": ["a.test"], "cert_pem": pem, "key_pem": "unused"
         });
         let apps = app("a", "acme", r#""a.test", "b.test""#);
-        let plan =
-            Plan::compile(&snapshot(ACME, &apps, &certificate.to_string())).expect("compiles");
+        let plan = compiled(&snapshot(ACME, &apps, &certificate.to_string())).expect("compiles");
         assert_eq!(plan.missing(), vec![vec![Box::<str>::from("b.test")]]);
         assert!(plan.cert_for("a.test").is_some());
         assert!(plan.renewable(plan.cert_for("a.test").expect("covered")));
@@ -402,7 +419,7 @@ mod test {
         let gone = serde_json::json!({"hosts": ["gone.test"], "cert_pem": pem, "key_pem": "k"});
         let apps = app("x", "on_demand", r#""*.x.test""#);
         let certs = format!("{wildcard},{gone}");
-        let plan = Plan::compile(&snapshot(ACME, &apps, &certs)).expect("compiles");
+        let plan = compiled(&snapshot(ACME, &apps, &certs)).expect("compiles");
         assert!(plan.certs().iter().all(|cert| !plan.renewable(cert)));
     }
 
@@ -420,7 +437,7 @@ mod test {
             r#"{"issuer_node": "n1", "directory_url": "https://ca.test/dir",
                 "requested_hosts": ["*.a.test"]}"#,
         ] {
-            let err = Plan::compile(&snapshot(acme, "", "")).expect_err("rejected");
+            let err = Plan::compile(&snapshot(acme, "", ""), &[]).expect_err("rejected");
             assert!(matches!(err, PlanError::Invalid { .. }), "{acme}: {err}");
         }
     }
@@ -429,7 +446,7 @@ mod test {
     fn acme_plan_serves_challenges_by_token() {
         let acme = r#"{"issuer_node": "n1", "directory_url": "https://ca.test/dir",
             "challenges": [{"token": "tok-1_A", "key_authorization": "tok-1_A.thumb"}]}"#;
-        let plan = Plan::compile(&snapshot(acme, "", "")).expect("compiles");
+        let plan = Plan::compile(&snapshot(acme, "", ""), &[]).expect("compiles");
         assert_eq!(plan.challenge("tok-1_A"), Some("tok-1_A.thumb"));
         assert_eq!(plan.challenge("other"), None);
     }

@@ -31,7 +31,8 @@ use crate::clientauth::ClientChain;
 use crate::error::AppError;
 use crate::host;
 use crate::route;
-use crate::table::RoutingTable;
+use crate::router::Matched;
+use crate::table::{CompiledApp, RoutingTable};
 
 /// What a TLS connection negotiated, stored in the connection's `SslDigest` extension by
 /// [`CaptureServerName`]: the SNI, normalized like a request host, and the client's chain.
@@ -74,14 +75,21 @@ pub(crate) fn client_chain(session: &Session) -> Option<&ClientChain> {
 
 /// Refuses a TLS request whose host differs from the connection's SNI.
 ///
-/// Plain HTTP connections pass. Runs before routing so a misdirected request learns nothing
-/// about the route it named.
+/// Plain HTTP connections pass. `matched` is the router the request matched, so the app that
+/// decides fronting is the one that would actually serve it, whatever kind of router (exact
+/// host, wildcard, `host_regexp`) got it there. Run it right after matching, before anything
+/// answers: a misdirected request gets `421` whether or not a router matched, so it learns
+/// nothing about the route it named.
 ///
 /// # Errors
 ///
-/// [`AppError::Misdirected`] when the SNI and the request host differ and the app the request
-/// names does not allow domain fronting.
-pub fn check(session: &Session, table: &RoutingTable) -> Result<(), AppError> {
+/// [`AppError::Misdirected`] when the SNI and the request host differ and the matched app does
+/// not allow domain fronting (or nothing matched).
+pub fn check(
+    session: &Session,
+    table: &RoutingTable,
+    matched: Option<Matched>,
+) -> Result<(), AppError> {
     let Some(tls) = session
         .digest()
         .and_then(|digest| digest.ssl_digest.as_ref())
@@ -92,7 +100,10 @@ pub fn check(session: &Session, table: &RoutingTable) -> Result<(), AppError> {
         .extension
         .get::<NegotiatedServerName>()
         .and_then(|name| name.0.as_deref());
-    verify(sni, session.req_header(), table)
+    let fronting_allowed = matched
+        .and_then(|matched| table.app(matched.app))
+        .is_some_and(CompiledApp::allow_domain_fronting);
+    verify(sni, session.req_header(), fronting_allowed)
 }
 
 /// The comparison behind [`check`]: `sni` is the connection's normalized SNI.
@@ -102,11 +113,11 @@ pub fn check(session: &Session, table: &RoutingTable) -> Result<(), AppError> {
 fn verify(
     sni: Option<&str>,
     request: &pingora::http::RequestHeader,
-    table: &RoutingTable,
+    fronting_allowed: bool,
 ) -> Result<(), AppError> {
-    let Some(routed) = route::request_host(request) else {
+    if route::request_host(request).is_none() {
         return Ok(());
-    };
+    }
     let authority = request
         .uri
         .authority()
@@ -120,13 +131,7 @@ fn verify(
         .into_iter()
         .chain(headers)
         .all(|named| named.as_deref().is_some_and(|name| Some(name) == sni));
-    if matches {
-        return Ok(());
-    }
-    let allowed = table
-        .find_app(&routed)
-        .is_some_and(|(_, app)| app.allow_domain_fronting());
-    if allowed {
+    if matches || fronting_allowed {
         Ok(())
     } else {
         Err(AppError::Misdirected)
@@ -138,26 +143,6 @@ mod test {
     use pingora::http::RequestHeader;
 
     use super::*;
-    use crate::snapshot::Snapshot;
-
-    fn table(allow_a: bool, allow_b: bool) -> RoutingTable {
-        let app = |id: &str, allow: bool| {
-            format!(
-                r#"{{"id": "{id}", "tenant": "t", "declared_by": "test", "hosts": ["{id}.test"],
-                "tls": {{"mode": "acme"}}, "allow_domain_fronting": {allow},
-                "revisions": [{{"id": "r", "upstreams": ["127.0.0.1:9000"], "weight": 1, "state": "serving"}}]}}"#
-            )
-        };
-        let json = format!(
-            r#"{{"version": 1,
-            "tenants": [{{"id": "t", "weight": 1, "budget": {{"max_inflight": 1, "max_buffer_bytes": 1}}}}],
-            "apps": [{}, {}]}}"#,
-            app("a", allow_a),
-            app("b", allow_b)
-        );
-        let snapshot: Snapshot = serde_json::from_str(&json).expect("valid snapshot");
-        RoutingTable::compile(&snapshot).expect("compiles")
-    }
 
     fn request(host: Option<&str>, authority: Option<&str>) -> RequestHeader {
         let mut request = RequestHeader::build("GET", b"/", None).expect("valid request line");
@@ -172,47 +157,40 @@ mod test {
 
     #[test]
     fn same_host_passes_ignoring_case_and_port() {
-        let table = table(false, false);
         let request = request(Some("A.Test:8443"), None);
-        assert!(verify(Some("a.test"), &request, &table).is_ok());
+        assert!(verify(Some("a.test"), &request, false).is_ok());
     }
 
     #[test]
     fn different_host_is_misdirected() {
-        let table = table(false, false);
         let request = request(Some("b.test"), None);
         assert!(matches!(
-            verify(Some("a.test"), &request, &table),
+            verify(Some("a.test"), &request, false),
             Err(AppError::Misdirected)
         ));
     }
 
     #[test]
     fn authority_and_host_must_both_match() {
-        let table = table(false, false);
         let request = request(Some("b.test"), Some("a.test"));
-        assert!(verify(Some("a.test"), &request, &table).is_err());
+        assert!(verify(Some("a.test"), &request, false).is_err());
     }
 
     #[test]
     fn missing_sni_is_misdirected() {
-        let table = table(false, false);
         let request = request(Some("a.test"), None);
-        assert!(verify(None, &request, &table).is_err());
+        assert!(verify(None, &request, false).is_err());
     }
 
     #[test]
-    fn the_target_app_decides_fronting() {
-        let table = table(false, true);
+    fn the_matched_app_decides_fronting() {
         let to_b = request(Some("b.test"), None);
-        assert!(verify(Some("a.test"), &to_b, &table).is_ok());
-        let to_a = request(Some("a.test"), None);
-        assert!(verify(Some("b.test"), &to_a, &table).is_err());
+        assert!(verify(Some("a.test"), &to_b, true).is_ok());
+        assert!(verify(Some("a.test"), &to_b, false).is_err());
     }
 
     #[test]
     fn a_request_without_a_host_is_left_to_routing() {
-        let table = table(false, false);
-        assert!(verify(Some("a.test"), &request(None, None), &table).is_ok());
+        assert!(verify(Some("a.test"), &request(None, None), false).is_ok());
     }
 }

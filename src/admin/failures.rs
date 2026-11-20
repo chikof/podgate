@@ -74,7 +74,7 @@ async fn replay(
     let revision = compiled
         .revisions()
         .iter()
-        .find(|revision| revision.id() == revision_id)
+        .position(|revision| revision.id() == revision_id)
         .ok_or(AppError::NotFound)?;
     if !matches!(failed.method.as_str(), "GET" | "HEAD") && !query.force {
         return Err(AppError::Conflict(
@@ -85,11 +85,10 @@ async fn replay(
             .into(),
         ));
     }
-    let upstream = revision
-        .upstreams()
-        .first()
+    let upstream = compiled
+        .first_upstream(revision)
         .ok_or_else(|| AppError::Unavailable("revision has no upstream".into()))?;
-    match failures::replay(&failed, *upstream).await {
+    match failures::replay(&failed, upstream).await {
         Ok(replayed) => Ok(Json(replayed.to_json()).into_response()),
         Err(err) => Ok((
             StatusCode::BAD_GATEWAY,

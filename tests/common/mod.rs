@@ -10,7 +10,7 @@
 //! - [`snapshot`], [`TestCert`]: build snapshot JSON and self-signed certificates.
 
 // Each test file compiles this module on its own and uses a different subset of it.
-#![allow(dead_code, unreachable_pub)]
+#![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -469,21 +469,76 @@ pub fn serving(id: &str, addr: SocketAddr) -> Value {
     revision(id, addr, 100, "serving")
 }
 
-/// A revision in any state.
-pub fn revision(id: &str, addr: SocketAddr, weight: u16, state: &str) -> Value {
-    json!({ "id": id, "upstreams": [addr.to_string()], "weight": weight, "state": state })
+/// A `loadbalancer` service called `name` over the plain HTTP servers `addrs`.
+pub fn service(name: &str, addrs: &[SocketAddr]) -> Value {
+    let servers: Vec<Value> = addrs
+        .iter()
+        .map(|addr| json!({ "url": format!("http://{addr}") }))
+        .collect();
+    json!({ "name": name, "type": "loadbalancer", "servers": servers })
 }
 
-/// One app named `id` of tenant `t1`, answering for `hosts`.
+/// A revision in any state, whose service `web` (the one [`app`]'s router uses) has one server
+/// on `addr`.
+pub fn revision(id: &str, addr: SocketAddr, weight: u16, state: &str) -> Value {
+    json!({ "id": id, "state": state, "weight": weight, "services": [service("web", &[addr])] })
+}
+
+/// Like [`revision`], with any number of servers (none: the revision has a backend of nobody,
+/// which is how an app sleeps).
+pub fn revision_on(id: &str, addrs: &[SocketAddr], weight: u16, state: &str) -> Value {
+    json!({ "id": id, "state": state, "weight": weight, "services": [service("web", addrs)] })
+}
+
+/// A router called `name` with the matcher `matcher`, answered by service `service`.
+pub fn router(name: &str, matcher: Value, service: &str) -> Value {
+    json!({ "name": name, "match": matcher, "service": service })
+}
+
+/// A middleware of type `kind`: `config` holds its own fields next to the name and type.
+pub fn middleware(name: &str, kind: &str, config: Value) -> Value {
+    let mut declared = json!({ "name": name, "type": kind });
+    if let (Some(object), Some(extra)) = (declared.as_object_mut(), config.as_object()) {
+        object.extend(extra.clone());
+    }
+    declared
+}
+
+/// One app named `id` of tenant `t1`, answering for `hosts` through one router, `default`,
+/// that sends everything to service `web`. Add `routers`, `middlewares` or `default_chain` on
+/// the returned value to change that.
 pub fn app(id: &str, hosts: &[&str], revisions: &[Value]) -> Value {
     json!({
         "id": id,
         "tenant": "t1",
         "declared_by": format!("tests/{id}"),
-        "hosts": hosts,
         "tls": { "mode": "acme" },
+        "routers": [router("default", json!({ "host": hosts }), "web")],
         "revisions": revisions,
     })
+}
+
+/// `app` with WASM filters: each of `filters` (`{wasm_base64, fuel, max_memory_bytes}`) becomes a
+/// `wasm` middleware, and all of them go in the app's `default_chain`, in order.
+pub fn with_filters(mut app: Value, filters: &[Value]) -> Value {
+    let named: Vec<(String, &Value)> = filters
+        .iter()
+        .enumerate()
+        .map(|(index, filter)| (format!("filter{index}"), filter))
+        .collect();
+    app["middlewares"] = Value::Array(
+        named
+            .iter()
+            .map(|(name, filter)| middleware(name, "wasm", (*filter).clone()))
+            .collect(),
+    );
+    app["default_chain"] = json!(
+        named
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+    );
+    app
 }
 
 /// A snapshot with tenant `t1`, the given apps and no certificates.

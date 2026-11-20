@@ -26,27 +26,33 @@ async fn explain_known_host() {
     assert_eq!(
         plain.json(),
         json!({
-            "version": 4, "host": "a.test", "method": "POST",
+            "version": 4, "host": "a.test", "method": "POST", "path": "/x",
+            "entry_point": "web",
             "app": "a", "tenant": "t1", "declared_by": "tests/a",
-            "matched": {"pattern": "a.test", "kind": "exact"},
+            "matched": {"router": "default", "priority": 0, "pattern": "a.test", "kind": "exact"},
+            "considered": ["default"],
+            "service": "web",
             "revisions": [
-                {"id": "r1", "state": "draining", "weight": 30, "effective_weight": 0, "upstreams": [old.addr.to_string()]},
-                {"id": "r2", "state": "serving", "weight": 70, "effective_weight": 70, "upstreams": [new.addr.to_string()]},
+                {"id": "r1", "state": "draining", "weight": 30, "effective_weight": 0,
+                 "servers": [{"url": format!("http://{}", old.addr), "weight": 1, "available": true}]},
+                {"id": "r2", "state": "serving", "weight": 70, "effective_weight": 70,
+                 "servers": [{"url": format!("http://{}", new.addr), "weight": 1, "available": true}]},
             ],
-            "middleware": ["acme_http01", "route", "inflight_admit", "tenant_admit", "backend_admit", "failure_capture"],
+            "pipeline": [
+                {"stage": "acme_http01"}, {"stage": "entry_point"}, {"stage": "route"},
+                {"stage": "failure_capture"}, {"stage": "select"}, {"stage": "inflight_admit"},
+                {"stage": "tenant_admit"}, {"stage": "backend_admit"}
+            ],
         })
     );
 
     let tls = podgate.admin_get("/v1/explain?url=https://a.test/").await;
     assert_eq!(
-        tls.json()["middleware"],
+        tls.json()["pipeline"],
         json!([
-            "sni_check",
-            "route",
-            "inflight_admit",
-            "tenant_admit",
-            "backend_admit",
-            "failure_capture"
+            {"stage": "entry_point"}, {"stage": "route"}, {"stage": "sni_check"},
+            {"stage": "failure_capture"}, {"stage": "select"}, {"stage": "inflight_admit"},
+            {"stage": "tenant_admit"}, {"stage": "backend_admit"}
         ])
     );
     assert_eq!(tls.json()["method"], "GET");
@@ -68,7 +74,7 @@ async fn explain_unknown_host() {
     assert_eq!(wildcard_hit.status, 200, "{wildcard_hit:?}");
     assert_eq!(
         wildcard_hit.json()["matched"],
-        json!({"pattern": "*.w.test", "kind": "wildcard"})
+        json!({"router": "default", "priority": 0, "pattern": "*.w.test", "kind": "wildcard"})
     );
 
     for (url, nearest) in [

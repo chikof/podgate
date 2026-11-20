@@ -9,7 +9,6 @@ use super::AppState;
 use crate::error::AppError;
 use crate::plan::{self, Plan};
 use crate::snapshot::Snapshot;
-use crate::table::{ApplyError, RoutingTable};
 
 /// Largest accepted snapshot body; the same as `PUT /v1/snapshot`.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -27,17 +26,10 @@ async fn post_plan(State(state): State<AppState>, body: Bytes) -> Result<Json<Pl
     let snapshot: Snapshot = serde_json::from_slice(&body)
         .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
     let live = state.table().load();
-    if snapshot.version <= live.version() {
-        return Err(ApplyError::Stale {
-            live: live.version(),
-            offered: snapshot.version,
-        }
-        .into());
-    }
     // Compiling can be slow (WASM filter modules): keep it off the admin runtime's workers.
-    let candidate = tokio::task::spawn_blocking(move || RoutingTable::compile(&snapshot))
+    let table = state.table().clone();
+    let candidate = tokio::task::spawn_blocking(move || table.compile_candidate(&snapshot))
         .await
-        .map_err(|err| AppError::Internal(err.into()))?
-        .map_err(ApplyError::from)?;
+        .map_err(|err| AppError::Internal(err.into()))??;
     Ok(Json(plan::diff(&live, &candidate)))
 }
