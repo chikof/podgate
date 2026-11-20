@@ -146,6 +146,7 @@ impl Reverter {
 
 impl Inner {
     async fn watch(self: Arc<Self>, armed: Armed) {
+        let armed = Arc::new(armed);
         let mut ticks = interval(CHECK_INTERVAL);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -155,7 +156,10 @@ impl Inner {
             }
             let now = Instant::now();
             if armed.breached(&self.outcomes, now) {
-                self.revert(&armed);
+                // Compiling can be slow (WASM filter modules): keep it off the runtime.
+                let (inner, armed) = (Arc::clone(&self), Arc::clone(&armed));
+                // A panicked revert task has already logged itself; there is nothing to add.
+                drop(tokio::task::spawn_blocking(move || inner.revert(&armed)).await);
                 return;
             }
             if now >= armed.armed_at + armed.window {

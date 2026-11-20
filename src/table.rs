@@ -6,6 +6,7 @@
 //! leaves the live table untouched.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -17,7 +18,9 @@ use tokio::sync::watch;
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::skew::SkewSecret;
-use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
+use crate::snapshot::{
+    App, Budget, Filter, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy,
+};
 use crate::tls::{CertError, CertStore};
 use crate::wasm::{self, CompiledFilter};
 
@@ -183,8 +186,19 @@ pub struct CompiledApp {
     filters: Box<[CompiledFilter]>,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
+    filters_digest: u64,
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
+}
+
+fn filters_digest(filters: &[Filter]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for filter in filters {
+        filter.wasm_base64.hash(&mut hasher);
+        filter.fuel.hash(&mut hasher);
+        filter.max_memory_bytes.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Where [`CompiledApp::pick`] sent a new request.
@@ -213,6 +227,7 @@ impl CompiledApp {
                 .iter()
                 .map(|host| host.to_ascii_lowercase().into())
                 .collect(),
+            filters_digest: filters_digest(&app.filters),
             tls: app.tls.clone(),
         }
     }
@@ -221,6 +236,13 @@ impl CompiledApp {
     #[must_use]
     pub fn filters(&self) -> &[CompiledFilter] {
         &self.filters
+    }
+
+    /// A digest of the declared filter modules and limits, to tell whether two tables run the
+    /// same filters without comparing modules. Equal inputs give equal digests within a process.
+    #[must_use]
+    pub fn filters_digest(&self) -> u64 {
+        self.filters_digest
     }
 
     /// Whether a TLS request may name a host other than its SNI.

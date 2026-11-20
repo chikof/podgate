@@ -139,3 +139,86 @@ async fn plan_posture_changes() {
     );
     assert_eq!(plan["added"], json!(["fresh.test"]));
 }
+
+/// A WASM filter that does nothing; `fuel` tells two of them apart.
+fn filter(fuel: u64) -> Value {
+    use base64::Engine as _;
+    let wasm = wat::parse_str(
+        r#"(module
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 1024))
+  (func (export "proxy_abi_version_0_2_1"))
+  (func (export "proxy_on_memory_allocate") (param i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $heap))
+    (global.set $heap (i32.add (global.get $heap) (local.get 0)))
+    (local.get $p))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (i32.const 0)))"#,
+    )
+    .expect("valid WAT");
+    json!({
+        "wasm_base64": base64::engine::general_purpose::STANDARD.encode(wasm),
+        "fuel": fuel,
+        "max_memory_bytes": 1_048_576,
+    })
+}
+
+#[tokio::test]
+async fn plan_filter_posture() {
+    let podgate = Podgate::start().await;
+    let up = Upstream::start("up").await;
+    let rev = [serving("r1", up.addr)];
+    let live = snapshot(
+        1,
+        &[
+            with(
+                app("gone", &["gone.test"], &rev),
+                &json!({ "filters": [filter(1000)] }),
+            ),
+            with(
+                app("tuned", &["tuned.test"], &rev),
+                &json!({ "filters": [filter(1000)] }),
+            ),
+            with(
+                app("same", &["same.test"], &rev),
+                &json!({ "filters": [filter(1000)] }),
+            ),
+            app("bare", &["bare.test"], &rev),
+        ],
+    );
+    assert_eq!(podgate.push_snapshot(&live).await.status, 200);
+
+    let candidate = snapshot(
+        2,
+        &[
+            app("gone", &["gone.test"], &rev),
+            with(
+                app("tuned", &["tuned.test"], &rev),
+                &json!({ "filters": [filter(9)] }),
+            ),
+            with(
+                app("same", &["same.test"], &rev),
+                &json!({ "filters": [filter(1000)] }),
+            ),
+            with(
+                app("bare", &["bare.test"], &rev),
+                &json!({ "filters": [filter(1000)] }),
+            ),
+        ],
+    );
+    let response = podgate.admin_post("/v1/snapshot/plan", &candidate).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let plan = response.json();
+    assert_eq!(
+        plan["posture_changes"],
+        json!([
+            { "host": "gone.test", "app": "gone", "kind": "filters_removed" },
+            { "host": "tuned.test", "app": "tuned", "kind": "filters_changed" },
+        ])
+    );
+    assert_eq!(
+        plan["changed"],
+        json!(["bare.test", "gone.test", "tuned.test"])
+    );
+}

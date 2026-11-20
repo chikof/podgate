@@ -34,6 +34,10 @@ async fn post_plan(State(state): State<AppState>, body: Bytes) -> Result<Json<Pl
         }
         .into());
     }
-    let candidate = RoutingTable::compile(&snapshot).map_err(ApplyError::from)?;
+    // Compiling can be slow (WASM filter modules): keep it off the admin runtime's workers.
+    let candidate = tokio::task::spawn_blocking(move || RoutingTable::compile(&snapshot))
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?
+        .map_err(ApplyError::from)?;
     Ok(Json(plan::diff(&live, &candidate)))
 }

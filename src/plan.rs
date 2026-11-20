@@ -28,6 +28,11 @@ pub enum PostureKind {
     DomainFrontingEnabled,
     /// Certificates for the host are now issued at the first handshake instead of in advance.
     OnDemandTlsEnabled,
+    /// The app runs fewer WASM filters than before: a check some filter made is gone.
+    FiltersRemoved,
+    /// The app had filters and they differ now (a module or a limit) without fewer running: what they check
+    /// may have loosened, which a diff of compiled modules cannot tell. Adding filters to an app that had none is a tightening and is not listed.
+    FiltersChanged,
 }
 
 /// One relaxation, for one host.
@@ -71,6 +76,7 @@ fn same_serving(live: &CompiledApp, candidate: &CompiledApp) -> bool {
         && live.tenant() == candidate.tenant()
         && live.tls() == candidate.tls()
         && live.allow_domain_fronting() == candidate.allow_domain_fronting()
+        && live.filters_digest() == candidate.filters_digest()
         && live.revisions().len() == candidate.revisions().len()
         && live
             .revisions()
@@ -96,6 +102,11 @@ fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<PostureKind> 
     }
     if candidate.tls().mode == TlsMode::OnDemand && live.tls().mode != TlsMode::OnDemand {
         kinds.push(PostureKind::OnDemandTlsEnabled);
+    }
+    if candidate.filters().len() < live.filters().len() {
+        kinds.push(PostureKind::FiltersRemoved);
+    } else if !live.filters().is_empty() && live.filters_digest() != candidate.filters_digest() {
+        kinds.push(PostureKind::FiltersChanged);
     }
     kinds
 }
