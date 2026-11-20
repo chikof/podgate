@@ -15,6 +15,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Per-tenant entry point access | none | none | 0028 |
 | TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 (parse), 0058, 0062 |
 | Forwarded-header trust | `forwardedHeaders.trustedIPs`, `insecure` | `trusted_proxies`, `client_ip_headers` | 0026 |
+| `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | 0097 (Traefik's set minus `-Server`, which is opt-in; found missing by the 0020 benchmark) |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | 0030 |
 | Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | 0030 (each knob works or is rejected as `unsupported_setting`) |
@@ -22,7 +23,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Underscore and alias header names | `aliasHeadersStrategy`, `underscoreHeadersStrategy` | none | 0030 (`underscore_headers`) |
 | Encoded characters policy | `http.encodedCharacters` | none | 0024 (normalization, refusal) and 0030 (`allow_encoded_slash` opt-in) |
 | Graceful shutdown | `transport.lifeCycle` | `grace_period` | built (`REQUEST_TIMEOUT_SECS`, SIGTERM) |
-| HTTP/3 | `http3` | default | deferred, see Deferred |
+| HTTP/3 and QUIC | `http3` | default | 0086 (a QUIC front inside the process, per-connection and per-tenant memory budgets; no mTLS or WebSockets over h3) |
 
 ## Routing
 
@@ -63,10 +64,10 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Scale to zero with wake | none | none | built |
 | Request shadow and replay of failures | none | none | built |
 | DNS names as servers | yes (dialer) | yes, plus dynamic upstreams | 0042 (A and AAAA, TTL, policy on every answer) |
-| SRV and other dynamic upstreams | none | `srv`, `a`, `aaaa`, `multi` | deferred: A and AAAA only in 0042; add SRV when a Consul or Nomad DNS setup needs it |
+| SRV upstreams | none | `srv` dynamic upstreams | 0096 (with a port deny list, because DNS then chooses the port); `multi` and other sources declined |
 | Upstream address policy (SSRF) | none | none | 0041 |
 | Response flush interval | `responseForwarding.flushInterval` | `flush_interval` | declined: Pingora streams chunks as they arrive |
-| Streams outliving a config change | n/a | `stream_close_delay` | deferred: podgate never kills tunnels on a timer (0063 states the drain rule); the control plane sets its own deadline. Recommend a `max_stream_lifetime_secs` transport field only if a PaaS needs forced closes |
+| Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport; default never closes a tunnel) |
 
 ## Transports
 
@@ -77,7 +78,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | HTTP/2 and h2c upstream | `h2c://`, `disableHTTP2` | `versions h2 h2c` | 0040 |
 | Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | 0040 (pool size works or is rejected) |
 | SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | deferred: needs a workload API client; recommend only when a mesh requires it |
-| PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | deferred: `X-Forwarded-For` serves HTTP; TCP upstreams get it in 0061 |
+| PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | 0098 (rejected as `unsupported_setting` if Pingora has no hook) |
 
 ## Middlewares
 
@@ -93,6 +94,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Forward auth | `forwardAuth` | `forward_auth` | 0048 (fail closed) |
 | IP allow list | `ipAllowList` | `remote_ip` plus `respond` | 0049 |
 | Rate limit | `rateLimit` | plugin | 0050 (bounded table, per node) |
+| Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | 0094 (Redis-compatible store, per-route `on_store_error: allow` with local fallback, or `deny`) |
 | In-flight request limit | `inFlightReq` | none | 0050 |
 | Circuit breaker | `circuitBreaker` (expression) | none | 0051 (structured, no expression language) |
 | Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | 0052 (memory only, charged) |
@@ -103,10 +105,11 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | gRPC-Web | `grpcWeb` | plugin | 0056 |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
 | Plugins | Yaegi (Go) plugins | Go modules | built as WASM filters; native plugins declined (memory safety) |
-| JWT or OIDC authentication | Traefik Hub only | plugins | declined in core: `forward_auth` to an auth service covers it. Recommend a `jwt_auth` middleware only if a tenant needs offline verification at the edge |
-| Response caching | Hub only | `cache` plugin | declined: not a PaaS ingress job; recommend a CDN in front |
+| JWT verification | Traefik Hub only | plugins | 0089 (JWKS fetched through the upstream policy) |
+| OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | 0090 (stateless encrypted cookie sessions; no refresh tokens) |
+| Response caching | Hub only | `cache` plugin | 0091 (memory only, charged to the tenant's `max_buffer_bytes`, capped share, purge API) |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
-| `try_files`, `file_server`, `php_fastcgi` | none | yes | deferred, see Deferred |
+| Static files: `file_server`, `try_files`, precompressed | none | yes | 0085 (operator-declared per-tenant roots, no symlink escape); `browse` and `php_fastcgi` declined there |
 
 ## TLS and certificates
 
@@ -114,12 +117,12 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 |---|---|---|---|
 | Certificates from the control plane | `tls.certificates` | `tls cert key` | built (`certificates`) |
 | ACME HTTP-01 | `httpChallenge` | default | built (HA, ARI, on-demand) |
-| ACME TLS-ALPN-01 | `tlsChallenge` | default | deferred: recommend a spec after 0057; works when port 80 is closed, needs no credentials, fits the ClientHello hook of 0014 |
-| ACME DNS-01, wildcard certificates | `dnsChallenge` | `acme_dns` plugins | deferred: needs DNS provider credentials in the proxy. Recommendation: the control plane obtains wildcards (it can hold DNS credentials) and pushes them in `certificates`; revisit if podkit wants podgate to do it |
+| ACME TLS-ALPN-01 | `tlsChallenge` | default | 0084 (needs the `acme-tls/1` ALPN on Pingora's listener; rejected with the finding if impossible) |
+| ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | 0081 (no DNS credential in podgate: the control plane publishes the TXT record and confirms in the snapshot), 0082 (provider ACME broker), 0083 (RFC 2136 and webhook solvers) |
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
 | Internal CA, self-signed (`tls internal`) | none | yes | declined: the control plane issues private certificates and pushes them |
-| OCSP stapling | none | automatic | deferred: needs outbound OCSP fetches (outside the outbound allow list); Let's Encrypt ended OCSP, revisit if a CA requires it |
+| OCSP stapling | none | automatic | 0092 (verified staples, fetched through the upstream policy; must-staple by default) |
 | Mutual TLS (client auth) | `clientAuth` | `client_auth` | 0021 (enforcement), 0057 (modes) |
 | Min and max version, cipher suites, curves, ALPN | `tls.options` | `protocols`, `ciphers`, `curves`, `alpn` | 0057 (rustls-supported values only) |
 | Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | 0057 |
@@ -134,7 +137,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | 0058, 0059 |
 | TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | 0058, 0061 |
 | TCP middlewares | `inFlightConn`, `ipAllowList` | none | 0061 |
-| TCP health checks | `healthCheck` (v3) | `layer4` passive | deferred: connect failover only; recommend an L4 health check when a database service asks |
+| TCP health checks | `healthCheck` (v3) | `layer4` passive | 0095 (connect, send and expect, TLS) |
 | UDP routers and services | `udp.*` | `layer4` | 0062 |
 
 ## Providers and discovery
@@ -148,7 +151,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Kubernetes custom resources | `IngressRoute` and friends | none | 0076 (`PodgateRoute`, `PodgateMiddleware`) |
 | Nomad | Nomad provider | none | 0077 |
 | File | File provider (watch, templates) | Caddyfile, JSON | 0078; Traefik files via 0079 (also a migration linter) |
-| Consul Catalog, ECS, Docker Swarm, Marathon, etcd, Redis, HTTP provider | yes | none | declined: podgate has no discovery in the daemon; a source for any of them is a new module of `podgate-provider`. Recommend Consul only if Nomad users need it |
+| Consul Catalog | yes | none | 0093 |
+| ECS, Docker Swarm, Marathon, etcd, Redis, HTTP provider | yes | none | not planned: each is a new `podgate-provider` module and trust analysis; add on demand |
 | One writer per node | not applicable (providers merge in-process) | not applicable | 0068 (refused, not conventional), 0069, 0080 |
 | Tenants, budgets, host claims | none | none | built, providers 0069 |
 
@@ -163,31 +167,28 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | JSON schema of the configuration | none | `caddy adapt`, JSON docs | 0068 (`GET /v1/schema`) |
 | Validate without applying | none | `caddy validate` | 0068 (`POST /v1/snapshot/validate`), plan built |
 | Explain a route | none | none | built, extended by 0022 |
-| Dashboard and API | `api`, `dashboard` | admin API | deferred, see Deferred |
+| Read-only overview API | `/api/*` | admin API | 0087 |
+| Dashboard (web UI) | `dashboard` | none | 0088 (embedded, read-only, separate listener, never shows events or secrets) |
 | Config reload without dropping connections | yes | yes | built (atomic swap) |
 | Auto-revert of a bad config | none | none | built |
 | Benchmark against both | n/a | n/a | 0020 |
 
-## Deferred or declined, with a recommendation
+## Not planned, with a recommendation
 
-For the human to decide. Nothing here is built or planned unless a spec id appears above.
+Everything the first parity pass deferred now has a spec above. What remains is declined or unplanned on purpose. For the human to decide.
 
-| Item | Why it is not in the plan | Recommendation |
+| Item | Why it is not planned | Recommendation |
 |---|---|---|
-| ACME DNS-01 | Would put DNS provider credentials into a proxy that runs tenant-influenced configuration; HTTP-01 only by design | Keep. Let the control plane issue wildcard certificates and push them as `certificates`. Revisit only if podkit asks podgate to order wildcards itself, and then only on the issuer node |
-| Static file serving (Caddy `file_server`, `try_files`, `php_fastcgi`) | A PaaS app serves its own files; podgate keeps no disk state | Keep declined. A static site is an app container (or a CDN origin) behind podgate |
-| HTTP/3 and QUIC | Pingora 0.9 has no HTTP/3 server; Caddy and Traefik ship one | Wait for Pingora. If demand appears first, a spec for a QUIC terminator in front (separate crate, `h3` and `quinn`) with an explicit memory budget per connection, and do not advertise `Alt-Svc` before it exists |
-| Web dashboard | Traefik's dashboard is a UI on its API | Do not build a UI in the daemon. A read-only `GET /v1/overview` (compiled routers, services, server health, middleware descriptions, from the same table as explain, 0006) is a small spec after 0066; the UI belongs in podkit |
-| ACME TLS-ALPN-01 | Not needed while port 80 is open | Small spec after 0057 if a deployment cannot open port 80 |
-| SRV and dynamic DNS upstreams | A and AAAA cover container DNS | Add SRV to 0042's resolver when a Consul or Nomad DNS setup needs it |
-| Cluster-wide rate limits | State is per node (as Traefik without Redis) | Divide a global limit by node count in the control plane; a shared store would put a network dependency on the request path |
 | Native plugins (Yaegi, Go modules) | Native code in the proxy breaks the memory-safety goal | Keep declined; WASM filters with fuel and capability limits are the extension point |
-| JWT and OIDC middleware | Hub only in Traefik; plugins in Caddy | `forward_auth` to an auth service first; an edge `jwt_auth` kind only on demand |
-| Response caching | Not an ingress job | Keep declined; put a CDN in front |
-| OCSP stapling, internal CA | Outbound fetches and a CA are out of the outbound allow list and the trust model | Keep declined |
-| Consul, ECS, Swarm, etcd, Redis, HTTP providers | Each is a new source module and a new trust analysis | Add as `podgate-provider` modules on demand; Consul first if Nomad users need it |
-| SPIFFE, mesh identity | Needs a workload API client | On demand |
-| WebSockets over HTTP/2 (RFC 8441) | Depends on Pingora support; 0063 records the result | Follow the finding of 0063 |
-| `stream_close_delay` for tunnels | podgate never kills tunnels on a timer | A transport `max_stream_lifetime_secs` if a PaaS needs forced drain |
-| L4 health checks | Connect failover covers the common case | Add when a database or queue service needs it |
-| PROXY protocol to HTTP upstreams | No known consumer | Add to `servers_transport` when one appears |
+| `php_fastcgi` and `fastcgi` | A second protocol that runs application code behind a socket the operator supervises | Keep declined; a PHP application is a container behind podgate |
+| Directory listings (`browse`) | Leaks file names | Keep declined |
+| Cluster-wide `in_flight_req` | A concurrency count needs a release that a crashed node never sends | Keep per node; a lease design would be its own spec |
+| Internal CA (`tls internal`) | A CA in the proxy widens the trust model | The control plane issues private certificates and pushes them |
+| SPIFFE and `peerCertURI` | Needs a workload API client | On demand, with a mesh |
+| Expression matchers (CEL) and the `protocol` matcher | A typed tree can be analysed for ambiguity and host claims; header leaves cover `protocol` | Revisit only for a case the tree cannot express |
+| Rule strings, templating, `map`, `vars` | Providers translate rules; snapshots are generated data | Keep declined |
+| Per-route TLS options | TLS is decided before routing | Per-app policy; separate hosts for different policies |
+| ECS, Swarm, Marathon, etcd, Redis, HTTP providers | Each is a new source and a new trust analysis | Add as `podgate-provider` modules on demand |
+| WebSockets over HTTP/2 and HTTP/3 | Depends on Pingora and the h3 crate; 0063 records the HTTP/2 result | Follow the finding of 0063 |
+| `flush_interval` | Pingora streams chunks as they arrive | Nothing to do |
+| OTLP over gRPC | OTLP over HTTP is built | Add when a collector requires it |
