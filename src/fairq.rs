@@ -20,9 +20,11 @@
 //! upstream" to "upstream response headers" (a [`Slot`] measures it):
 //!
 //! - Every `WINDOW` samples the mean latency `short` is compared with the baseline `min_rtt`,
-//!   the lowest window mean seen. The baseline creeps up by `BASELINE_DRIFT` per window, so a
-//!   backend that is permanently slower is accepted as the new normal, and it follows a faster
-//!   backend down at once.
+//!   the lowest window mean seen. The baseline creeps up by `BASELINE_DRIFT` per window, slowly
+//!   enough that queueing caused by a too high limit is not mistaken for the normal latency, and
+//!   follows a faster backend down at once. When the limit sits at `MIN_LIMIT` the backend has
+//!   no concurrency to queue behind, so the baseline adopts `short`: a backend that became
+//!   permanently slower is accepted as the new normal.
 //! - `gradient = clamp(TOLERANCE * min_rtt / short, MIN_GRADIENT, 1)`.
 //! - `target = limit * gradient + sqrt(limit)`: the limit shrinks while latency is more than
 //!   `TOLERANCE` times the baseline and grows by the queue allowance `sqrt(limit)` otherwise.
@@ -77,13 +79,13 @@ pub const MAX_LIMIT: u32 = 2048;
 /// Latency samples per estimate update.
 const WINDOW: u32 = 16;
 /// How far latency may rise over the baseline before the limit shrinks.
-const TOLERANCE: f64 = 1.5;
+const TOLERANCE: f64 = 1.25;
 /// The strongest shrink of one update: the limit halves before smoothing.
 const MIN_GRADIENT: f64 = 0.5;
 /// Share of the new target taken by each update.
 const SMOOTHING: f64 = 0.2;
-/// Per-window upward creep of the baseline.
-const BASELINE_DRIFT: f64 = 1.002;
+/// Per-window upward creep of the baseline while the limit is above the floor.
+const BASELINE_DRIFT: f64 = 1.0001;
 /// Most requests one tenant may have waiting for one backend; the next one gets `503`.
 pub const QUEUE_CAP: usize = 512;
 /// Longest a request waits for a backend slot before it gets `503`.
@@ -113,7 +115,11 @@ impl Estimator {
     /// it. Returns the new limit.
     fn update(&mut self, short_rtt: f64, peak_inflight: u32) -> u32 {
         if short_rtt > 0.0 {
-            self.min_rtt = if self.min_rtt > 0.0 {
+            // At the floor the backend has almost no concurrency to queue behind, so its latency
+            // is its own: adopt it. Above the floor the baseline only creeps up, so queueing
+            // caused by too high a limit is not mistaken for the normal latency.
+            let at_floor = self.current() <= MIN_LIMIT;
+            self.min_rtt = if self.min_rtt > 0.0 && !at_floor {
                 short_rtt.min(self.min_rtt * BASELINE_DRIFT)
             } else {
                 short_rtt
@@ -734,9 +740,31 @@ mod test {
     fn adaptive_limit_stays_in_bounds() {
         let mut estimator = Estimator::new();
         assert_eq!(feed(&mut estimator, 10.0, 5000), MAX_LIMIT);
+
         let mut estimator = Estimator::new();
         feed(&mut estimator, 10.0, 1);
-        assert_eq!(feed(&mut estimator, 10_000.0, 500), MIN_LIMIT);
+        let lowest = (0..500)
+            .map(|_| estimator.update(10_000.0 * MS, MAX_LIMIT))
+            .min();
+        assert_eq!(lowest, Some(MIN_LIMIT));
+    }
+
+    #[test]
+    fn adaptive_limit_accepts_a_permanently_slower_backend() {
+        let mut estimator = Estimator::new();
+        let fast = feed(&mut estimator, 100.0, 40);
+
+        // The backend becomes 4x slower for good: the limit first falls to the floor, where
+        // that latency is the backend's own, then the baseline follows and the limit grows again.
+        let lowest = (0..100)
+            .map(|_| estimator.update(400.0 * MS, MAX_LIMIT))
+            .min();
+        assert_eq!(lowest, Some(MIN_LIMIT), "it fell from {fast}");
+        let regrown = feed(&mut estimator, 400.0, 200);
+        assert!(
+            regrown > 3 * MIN_LIMIT,
+            "the slower latency is the new normal: {regrown}"
+        );
     }
 
     #[test]

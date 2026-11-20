@@ -114,11 +114,30 @@ oha_run() { # host rate connections outfile
   oha --no-tui -z "$DURATION" -q "$2" -c "$3" -H "Host: $1.test" "http://127.0.0.1:$proxy_port/" >"$4" 2>&1
 }
 
+ticks() { awk '{ print $14 + $15 }' "/proc/$1/stat"; }
+cpu_report() { # CPU of podgate, the upstreams and the load generators, mid-flood
+  sleep 5
+  local watch=("${pids[@]}") before=() pid i=0 now hz
+  mapfile -t loadgen < <(pgrep -x oha)
+  watch+=("${loadgen[@]}")
+  hz=$(getconf CLK_TCK)
+  for pid in "${watch[@]}"; do before+=("$(ticks "$pid")"); done
+  sleep 3
+  for pid in "${watch[@]}"; do
+    now=$(ticks "$pid")
+    printf '%s pid %s: %d%% of one core\n' "$(cat "/proc/$pid/comm")" "$pid" \
+      $(((now - before[i]) * 100 / (3 * hz)))
+    i=$((i + 1))
+  done
+}
+
 oha_run b "$QUIET_RPS" 20 "$work/b-alone.txt"
 oha_run a "$FLOOD_RPS" 400 "$work/a-flood.txt" &
 flood=$!
+cpu_report >"$work/cpu.txt" &
+sampler=$!
 oha_run b "$QUIET_RPS" 20 "$work/b-flood.txt"
-wait "$flood"
+wait "$flood" "$sampler"
 
 verdict() { # file label
   awk -v label="$2" '
@@ -140,3 +159,5 @@ echo "== verdict"
 verdict "$work/b-alone.txt" "B alone      "
 verdict "$work/b-flood.txt" "B under flood"
 verdict "$work/a-flood.txt" "A flooding   "
+echo "== cpu during the flood (what limits the run)"
+cat "$work/cpu.txt"
