@@ -99,8 +99,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Circuit breaker | `circuitBreaker` (expression) | none | built: `src/middleware/circuit_breaker.rs`; structured `trip_when`, no expression language; `min_requests` floor |
 | Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | built: memory only, charged to `max_buffer_bytes` (no `mem_*`, no disk spill); `buffer_request` holds a body of at most 64 KiB before the upstream request starts; response limits need `buffer_response`; a chunked response over its limit is reset, not a `502` (Pingora sends the head first) |
 | Compression | `compress` (gzip, brotli, zstd) | `encode` | built (gzip 0009; gzip, brotli, zstd 0053, pure Rust, bounded; `min_bytes` not applied to unknown-length bodies) |
-| Custom error pages | `errors` | `handle_errors` | 0054 |
-| Fixed response | none | `respond`, `error`, `abort` | 0054 (`respond`) |
+| Custom error pages | `errors` | `handle_errors` | built: `src/middleware/errors.rs`; the page comes from a service of the same app, with only `Host` and `Accept` sent (Traefik forwards the request headers), a bounded body charged to the tenant, and the original response kept on any failure |
+| Fixed response | none | `respond`, `error`, `abort` | built (`respond`): `src/middleware/respond.rs`; `1xx` refused, header values checked at compile |
 | Pass TLS client certificate | `passTLSClientCert` | placeholders | built: `pass_tls_client_cert` middleware, Traefik's two headers; forged headers are always stripped |
 | gRPC-Web | `grpcWeb` | plugin | 0056 |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
