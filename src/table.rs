@@ -457,10 +457,16 @@ impl TableHandle {
             apps = table.apps.len(),
             "snapshot applied"
         );
+        self.swap(table);
+        Ok(())
+    }
+
+    /// The one place the live table is replaced: stores `table` and fires the [`Self::subscribe`]
+    /// signal. Every path that changes the live table goes through here.
+    fn swap(&self, table: RoutingTable) {
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
-        Ok(())
     }
 
     /// A signal that fires after every swap of the live table, carrying the new table's
