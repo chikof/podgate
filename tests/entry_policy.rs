@@ -180,10 +180,8 @@ async fn redirect_entry_point_keeps_path_and_query() {
         Some(format!("https://ex.test:{secure}/a/b/c?q=1&r=%20x").as_str())
     );
     assert_eq!(moved.body, "", "a redirect has no body");
-    for method in ["POST", "HEAD", "PUT"] {
-        let other = podgate.request(method, "a.test", "/x", &[]).await;
-        assert_eq!(other.status, 302, "{method}: {other:?}");
-    }
+    let get_head = podgate.request("GET", "a.test", "/x", &[]).await;
+    assert_eq!(get_head.status, 302, "{get_head:?}");
 
     let permanent = json!([{ "name": "plain", "redirect": { "to": "secure", "permanent": true } }]);
     push_ok(
@@ -958,4 +956,32 @@ async fn explain_reports_the_entry_point_redirect() {
         "{}",
         over_tls.body
     );
+}
+
+#[tokio::test]
+async fn entry_redirect_post_keeps_method() {
+    let podgate = start().await;
+    let up = Upstream::start("never").await;
+    let apps = [plain_app(up.addr)];
+    let temporary = json!([{ "name": "plain", "redirect": { "to": "secure" } }]);
+    push_ok(&podgate, &with_policies(1, &apps, &temporary)).await;
+    for method in ["POST", "PUT", "PATCH", "DELETE", "HEAD"] {
+        let moved = podgate.request(method, "a.test", "/x", &[]).await;
+        assert_eq!(moved.status, 307, "{method}: {moved:?}");
+        assert!(moved.header("location").is_some(), "{method}: {moved:?}");
+    }
+    assert_eq!(podgate.get("a.test", "/x").await.status, 302);
+
+    let permanent = json!([{ "name": "plain", "redirect": { "to": "secure", "permanent": true } }]);
+    push_ok(&podgate, &with_policies(2, &apps, &permanent)).await;
+    for method in ["POST", "PUT", "HEAD"] {
+        let moved = podgate.request(method, "a.test", "/x", &[]).await;
+        assert_eq!(moved.status, 308, "{method}: {moved:?}");
+    }
+    assert_eq!(podgate.get("a.test", "/x").await.status, 301);
+
+    let explained = podgate
+        .admin_get("/v1/explain?url=http://a.test/x&entry_point=plain&method=POST")
+        .await;
+    assert_eq!(explained.json()["entry_redirect"]["status"], 308);
 }

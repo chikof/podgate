@@ -15,7 +15,14 @@ The status codes were checked against Traefik 3.7.16, the binary pinned in `deve
 |`redirectRegex {replacement: "//evil.test$2"}`|same|`302`, `Location: //evil.test/z` (protocol-relative target, no check)|
 |`redirectScheme` on `GET /p2/a%0d%0ab`|`Host: 127.0.0.1`|`302`, `Location: https://127.0.0.1/p2/a%0D%0Ab` (the escape is kept; podgate refuses it)|
 
-So podgate sends `301` for `permanent: true` and `302` otherwise ([`podgate::middleware::redirect::status`](../../src/middleware/redirect.rs)). Change 0030's entry point redirect is to call the same function. Both codes let a client change a `POST` into a `GET`; that is Traefik's behaviour too. `permanent` defaults to `false`, because a cached permanent redirect is hard to take back (Traefik's `redirectScheme` without `permanent` answered `302` in the check above).
+Those rows are all `GET`. A second check sent `POST`, `PUT` and `HEAD` to the same middlewares, with and without `permanent`:
+
+|Middleware|`GET`|`POST`, `PUT`, `HEAD`|
+|---|---|---|
+|`redirectScheme`, `redirectRegex`|`302`|`307`|
+|`redirectScheme`, `redirectRegex` with `permanent: true`|`301`|`308`|
+
+So podgate answers `GET` with `301` for `permanent: true` and `302` otherwise, and every other method, `HEAD` included, with the method-preserving `308` and `307` ([`podgate::middleware::redirect::status_for`](../../src/middleware/redirect.rs)), so a client does not replay a `POST` as a `GET`. The entry point redirect of change 0030 calls the same function, and Traefik's entry point redirection answers the same way. `permanent` defaults to `false`, because a cached permanent redirect is hard to take back (Traefik's `redirectScheme` without `permanent` answered `302` in the check above).
 
 ## The URL
 
@@ -36,7 +43,7 @@ A redirect works on `scheme://host[:port]/path?query`:
 |---|---|
 |`scheme`|`http` or `https`. Required.|
 |`port`|Target port, 1 to 65535. A port that is the scheme's default (`443` for `https`, `80` for `http`) is not written in the URL.|
-|`permanent`|`301` instead of `302`. Default `false`.|
+|`permanent`|`301` instead of `302` for a `GET`, `308` instead of `307` for other methods. Default `false`.|
 
 The target is the request's host, path and query on `scheme` (and `port`). The port the request named is dropped (a request for `a.test:8080` goes to `https://a.test/`), as in Traefik.
 
@@ -52,7 +59,7 @@ A request that already has the target scheme is passed on, so the redirect canno
 |---|---|
 |`regex`|Pattern over the URL above. Unanchored; write `^` and `$` when you mean them. Rust `regex` syntax: linear time, no look-around, no back-references. A pattern whose compiled form exceeds 1 MiB is refused.|
 |`replacement`|Target. `$1`, `${1}`, `$name`, `${name}` insert a group (`$0` the whole match), `$$` is a dollar sign.|
-|`permanent`|`301` instead of `302`. Default `false`.|
+|`permanent`|`301` instead of `302` for a `GET`, `308` instead of `307` for other methods. Default `false`.|
 
 Every match of the regex in the URL is replaced, like Go's `ReplaceAllString` that Traefik uses. A request the regex does not match, or whose result equals the original URL, is passed on. A group that did not take part in the match inserts nothing.
 

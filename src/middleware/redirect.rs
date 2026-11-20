@@ -12,8 +12,8 @@
 //! trusted either: only `http` and `https` targets, no userinfo, a bounded length, and bytes a
 //! browser could read as a different URL are percent-encoded.
 
-use http::StatusCode;
 use http::uri::Authority;
+use http::{Method, StatusCode};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
 use thiserror::Error;
@@ -27,15 +27,28 @@ use crate::respond;
 /// head, but a replacement can repeat a capture for every match.
 pub const MAX_LOCATION: usize = 8 * 1024;
 
-/// The status of a redirect: `301` when `permanent`, else `302`. These are the codes Traefik
-/// v3.7.16 sends for `redirectScheme` and `redirectRegex` (checked against the binary pinned in
-/// `devenv.nix`). Both let a client turn a `POST` into a `GET`; so does Traefik.
+/// The status of a redirect to a `GET`: `301` when `permanent`, else `302`. These are the codes
+/// Traefik v3.7.16 sends for `GET` (checked against the binary pinned in `devenv.nix`).
 #[must_use]
 pub fn status(permanent: bool) -> StatusCode {
     if permanent {
         StatusCode::MOVED_PERMANENTLY
     } else {
         StatusCode::FOUND
+    }
+}
+
+/// The status of a redirect of a request with `method`: [`status`] for `GET`, and the
+/// method-preserving `308` (`permanent`) or `307` for every other method, `HEAD` included, which
+/// is what Traefik v3.7.16 does for `redirectScheme`, `redirectRegex` and the entry point
+/// redirection (checked with `POST`, `PUT` and `HEAD`). A client keeps the method and the body
+/// of a `POST` instead of replaying it as a `GET`.
+#[must_use]
+pub fn status_for(method: &Method, permanent: bool) -> StatusCode {
+    match (method == Method::GET, permanent) {
+        (true, _) => status(permanent),
+        (false, true) => StatusCode::PERMANENT_REDIRECT,
+        (false, false) => StatusCode::TEMPORARY_REDIRECT,
     }
 }
 
@@ -304,7 +317,10 @@ pub async fn answer(
             Ok(Flow::Respond)
         }
         Decision::Redirect(location) => {
-            let mut header = ResponseHeader::build(status(permanent), Some(2))?;
+            let mut header = ResponseHeader::build(
+                status_for(&session.req_header().method, permanent),
+                Some(2),
+            )?;
             header.insert_header("location", location)?;
             header.insert_header("content-length", "0")?;
             session

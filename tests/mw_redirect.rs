@@ -492,3 +492,32 @@ async fn redirect_regex_trusted_lb_origin() {
         "without the reported scheme and host the regex does not match: {without:?}"
     );
 }
+
+#[tokio::test]
+async fn redirect_post_keeps_method() {
+    let cases = [
+        ("redirect_scheme", json!({"scheme": "https"}), 307),
+        (
+            "redirect_scheme",
+            json!({"scheme": "https", "permanent": true}),
+            308,
+        ),
+        (
+            "redirect_regex",
+            json!({"regex": "^http://", "replacement": "https://"}),
+            307,
+        ),
+        (
+            "redirect_regex",
+            json!({"regex": "^http://", "replacement": "https://", "permanent": true}),
+            308,
+        ),
+    ];
+    for (kind, config, status) in cases {
+        let (podgate, _upstream) = start(kind, config.clone()).await;
+        for method in ["POST", "PUT", "HEAD"] {
+            let response = podgate.request(method, "a.test", "/p", &[]).await;
+            assert_redirect(&response, status, "https://a.test/p");
+        }
+    }
+}

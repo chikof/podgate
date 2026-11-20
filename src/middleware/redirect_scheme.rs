@@ -12,7 +12,7 @@
 //!   client, where Traefik sends it there.
 //! - The port the request named is dropped from the target; `port` adds one, except the
 //!   scheme's default (`443` for `https`, `80` for `http`), which is left out of the URL.
-//! - `permanent` answers `301`, otherwise `302` ([`super::redirect::status`]).
+//! - `permanent` answers `301`, otherwise `302` for a `GET`, and `308` or `307` for every other method ([`super::redirect::status_for`]).
 
 use serde::Deserialize;
 use serde_json::{Value, json};

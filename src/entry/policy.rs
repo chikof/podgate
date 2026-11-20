@@ -26,6 +26,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use http::Method;
 use pingora::http::RequestHeader;
 use pingora::protocols::http::v2::server::{H2Options, default_h2_options};
 use pingora::proxy::Session;
@@ -77,10 +78,10 @@ impl Redirect {
         &self.to
     }
 
-    /// The status the redirect answers with: [`redirect::status`].
+    /// The status the redirect answers a request with `method` with: [`redirect::status_for`].
     #[must_use]
-    pub fn status(&self) -> u16 {
-        redirect::status(self.permanent).as_u16()
+    pub fn status_for(&self, method: &Method) -> u16 {
+        redirect::status_for(method, self.permanent).as_u16()
     }
 
     /// The scheme of the target, `http` or `https`.
@@ -666,12 +667,21 @@ mod test {
         let compiled = build(&snapshot, &context());
         let to_sec = compiled["web"].redirect_to().expect("redirect");
         assert_eq!(
-            (to_sec.to(), to_sec.scheme(), to_sec.port(), to_sec.status()),
+            (
+                to_sec.to(),
+                to_sec.scheme(),
+                to_sec.port(),
+                to_sec.status_for(&Method::GET)
+            ),
             ("sec", "https", Some(8443), 302)
         );
         let to_web = compiled["other"].redirect_to().expect("redirect");
         assert_eq!(
-            (to_web.scheme(), to_web.port(), to_web.status()),
+            (
+                to_web.scheme(),
+                to_web.port(),
+                to_web.status_for(&Method::GET)
+            ),
             ("http", None, 301)
         );
     }

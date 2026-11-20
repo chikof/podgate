@@ -424,7 +424,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
             .redirect_to()
             .map(|redirect| RedirectView {
                 to: redirect.to(),
-                status: redirect.status(),
+                status: redirect.status_for(&target.method),
                 scheme: redirect.scheme(),
                 port: redirect.port(),
             }),
