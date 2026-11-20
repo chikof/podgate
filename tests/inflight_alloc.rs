@@ -69,6 +69,7 @@ fn inflight_no_alloc() {
         app: 0,
         revision: 0,
         upstream: "127.0.0.1:9000".parse().expect("addr"),
+        pinned: false,
     };
     // Warm up: first use may initialise lazily.
     drop(inflight.acquire("a", "r").expect("counted"));
