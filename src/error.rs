@@ -136,6 +136,28 @@ impl AppError {
         )
     }
 
+    /// The `reason` an access log line gives when podgate answers with this error itself. A new
+    /// variant names its reason here, next to its status.
+    #[must_use]
+    pub fn log_reason(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::Misdirected => "misdirected",
+            Self::ClientCertRequired => "client_cert_required",
+            Self::NotFound => "no_route",
+            Self::Overloaded | Self::FilterOverBudget | Self::BufferingOverBudget => "over_budget",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::ExpectationFailed => "expectation_failed",
+            Self::RequestTimeout => "request_timeout",
+            Self::UpstreamResponseTooLarge => "upstream_response_too_large",
+            Self::Saturated => "backend_saturated",
+            Self::WakeTimeout => "wake_timeout",
+            Self::FilterBusy => "filter_busy",
+            Self::Unavailable(_) => "no_upstream",
+            Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
+        }
+    }
+
     /// The JSON body: `{"error": "<message>"}`, plus `conflicts` for a rejected snapshot.
     #[must_use]
     pub fn body(&self) -> Value {

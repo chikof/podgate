@@ -101,7 +101,7 @@ impl Pending {
 
     /// Notes why podgate answers with `err` itself.
     pub fn refused(&mut self, err: &AppError) {
-        self.reason = Some(reason_of(err));
+        self.reason = Some(err.log_reason());
     }
 
     fn upstream_duration(&self) -> Option<Duration> {
@@ -143,29 +143,6 @@ pub fn effective(snapshot: Option<&Arc<Policy>>, router: Option<bool>) -> Option
         Some(false) => None,
         Some(true) => Some(snapshot.unwrap_or(&ENABLED)),
         None => snapshot,
-    }
-}
-
-/// The `reason` an access log line gives for a request podgate answered with `err`.
-#[must_use]
-pub fn reason_of(err: &AppError) -> &'static str {
-    match err {
-        AppError::BadRequest(_) => "bad_request",
-        AppError::Misdirected => "misdirected",
-        AppError::ClientCertRequired => "client_cert_required",
-        AppError::NotFound => "no_route",
-        AppError::Overloaded | AppError::FilterOverBudget | AppError::BufferingOverBudget => {
-            "over_budget"
-        }
-        AppError::PayloadTooLarge => "payload_too_large",
-        AppError::ExpectationFailed => "expectation_failed",
-        AppError::RequestTimeout => "request_timeout",
-        AppError::UpstreamResponseTooLarge => "upstream_response_too_large",
-        AppError::Saturated => "backend_saturated",
-        AppError::WakeTimeout => "wake_timeout",
-        AppError::FilterBusy => "filter_busy",
-        AppError::Unavailable(_) => "no_upstream",
-        AppError::Conflict(_) | AppError::SnapshotRejected(_) | AppError::Internal(_) => "internal",
     }
 }
 
