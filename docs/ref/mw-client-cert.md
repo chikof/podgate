@@ -89,7 +89,7 @@ A header value over 8 KiB (8192 bytes, after base64 or URL-escaping) is not sent
 
 ## Replaces `tls.pass_client_cert`
 
-Change 0021 added `tls.pass_client_cert`, which sent the subject in `x-forwarded-tls-client-cert-subject`. It is gone: a snapshot that still sets it is accepted and the field is ignored, like any unknown field. The equivalent is a `pass_tls_client_cert` middleware with `info: {"subject": {...}}`, which writes `X-Forwarded-Tls-Client-Cert-Info`. The old header is stripped like the others, so an app that still reads it gets nothing and cannot be fed a forged value.
+Change 0021 added `tls.pass_client_cert`, which sent the subject in `x-forwarded-tls-client-cert-subject`. It is gone, and a snapshot that sets it to `true` is refused: `422`, code `unsupported_setting`, a message that names `tls.pass_client_cert` and the `pass_tls_client_cert` middleware, so an upstream that read the old header does not lose it silently. `false` or absent is accepted and means nothing. The equivalent is a `pass_tls_client_cert` middleware with `info: {"subject": {...}}`, which writes `X-Forwarded-Tls-Client-Cert-Info`. The old header is stripped like the others, so an app that still reads it gets nothing and cannot be fed a forged value.
 
 ## Explain and plan
 

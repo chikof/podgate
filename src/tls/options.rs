@@ -113,6 +113,12 @@ impl Options {
     pub fn compile(app: &App, floor: TlsVersion) -> Result<Option<Arc<Self>>, Vec<Invalid>> {
         let tls = &app.tls;
         let mut problems = Vec::new();
+        if tls.pass_client_cert == Some(true) {
+            problems.push(unsupported(
+                "pass_client_cert",
+                "was replaced by the `pass_tls_client_cert` middleware: declare one with `info.subject` (it writes `X-Forwarded-Tls-Client-Cert-Info`; the old `x-forwarded-tls-client-cert-subject` header is no longer sent)",
+            ));
+        }
         if tls.max_version.is_some() {
             problems.push(unsupported(
                 "max_version",

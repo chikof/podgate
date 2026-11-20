@@ -28,7 +28,7 @@ Every list is `{"total": n, "items": [...]}`. `total` counts what the filters se
 | `entry_points` | Per listener: `name`, `protocol`, `address`, `proxy_protocol` (only when on), `forwarded_headers` (`nobody`, `listed_peers` or `everyone`). |
 | `tenants` | `id`, `weight`, `budget`, `apps`, and live `inflight` and `buffer_bytes`. |
 | `certificates` | `hosts`, `issuer`, `not_after` (seconds since the Unix epoch), `source` (`acme` when the issuer renews it, else `snapshot`). Never a chain or a key. |
-| `apps` | Sorted by id. Per app: `id`, `tenant`, `declared_by`, `tls` (`mode`, `challenge`, `client_auth`, `pass_client_cert`), `hosts`, `allow_domain_fronting`, `scale_to_zero`, `canary`, `routers`, `revisions`, `services`, `middlewares`, `recent`. |
+| `apps` | Sorted by id. Per app: `id`, `tenant`, `declared_by`, `tls` (`mode`, `challenge`, `client_auth`), `hosts`, `allow_domain_fronting`, `scale_to_zero`, `canary`, `routers`, `revisions`, `services`, `middlewares`, `recent`. |
 
 An app has:
 

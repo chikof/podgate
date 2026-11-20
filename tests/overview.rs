@@ -177,7 +177,7 @@ async fn overview_lists_apps_routers_services() {
     );
     assert_eq!(
         a["tls"],
-        json!({"mode": "acme", "challenge": "http-01", "client_auth": false, "pass_client_cert": false})
+        json!({"mode": "acme", "challenge": "http-01", "client_auth": false})
     );
     assert_eq!(a["hosts"], json!(["a.test", "*.a.test"]));
     assert_eq!(
@@ -511,6 +511,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"trip_when": {"network_error_ratio": 0.3}}),
         ),
         ("buffering", json!({"max_request_body_bytes": 1024})),
+        (
+            "pass_tls_client_cert",
+            json!({"pem": true, "info": {"subject": {"common_name": true}}}),
+        ),
         ("compress", json!({})),
         ("ip_allow_list", json!({"source_range": ["203.0.113.0/24"]})),
     ];
@@ -638,7 +642,7 @@ async fn overview_redacts_secrets() {
     let document: Value = serde_json::from_str(&bodies[0]).expect("JSON");
     let a = app_of(&document, "a");
     assert_eq!(a["tls"]["client_auth"], true);
-    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(16));
+    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(17));
     assert_eq!(
         a["routers"][0]["match"]["all"][1],
         json!({"header": {"name": "x-0", "value": "[value]"}})

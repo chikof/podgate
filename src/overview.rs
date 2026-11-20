@@ -448,7 +448,6 @@ struct TlsView {
     mode: TlsMode,
     challenge: ChallengeKind,
     client_auth: bool,
-    pass_client_cert: bool,
 }
 
 #[derive(Serialize)]
@@ -593,7 +592,6 @@ fn app_view<'a>(app: &'a CompiledApp, runtime: &Runtime<'_>) -> AppView<'a> {
             mode: app.tls().mode,
             challenge: app.tls().challenge,
             client_auth: app.client_auth().is_some(),
-            pass_client_cert: app.tls().pass_client_cert,
         },
         hosts: app.hosts(),
         allow_domain_fronting: app.allow_domain_fronting(),

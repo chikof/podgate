@@ -521,3 +521,34 @@ async fn client_cert_middleware_needs_an_app_that_verifies() {
         200
     );
 }
+
+#[tokio::test]
+async fn pass_client_cert_field_rejected_with_pointer() {
+    let podgate = Podgate::start().await;
+    let echo = echo_upstream().await;
+    let ca = TestCa::new("trusted ca");
+    let with_field = |value: Value| {
+        let mut built = mtls_app("old.test", echo, &ca, None);
+        built["tls"]["pass_client_cert"] = value;
+        built
+    };
+
+    let rejected = podgate
+        .push_snapshot(&snapshot(1, &[with_field(json!(true))]))
+        .await;
+    assert_eq!(rejected.status, 422, "{rejected:?}");
+    let conflict = &rejected.json()["conflicts"][0];
+    assert_eq!(conflict["code"], "unsupported_setting", "{rejected:?}");
+    let message = conflict["message"].as_str().expect("message");
+    assert!(
+        message.contains("tls.pass_client_cert") && message.contains("pass_tls_client_cert"),
+        "the message names the field and its replacement: {message}"
+    );
+
+    for (version, value) in (2_u64..).zip([json!(false), Value::Null]) {
+        let accepted = podgate
+            .push_snapshot(&snapshot(version, &[with_field(value.clone())]))
+            .await;
+        assert_eq!(accepted.status, 200, "{value}: {accepted:?}");
+    }
+}

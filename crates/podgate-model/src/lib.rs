@@ -247,6 +247,11 @@ pub struct TlsPolicy {
     /// PEM of the CA that must sign client certificates. Absent: no client authentication.
     #[serde(default)]
     pub client_ca_pem: Option<String>,
+    /// Removed in change 0055; a snapshot that sets it to `true` is rejected with
+    /// `unsupported_setting`, which names the `pass_tls_client_cert` middleware as the
+    /// replacement. `false` and absent are accepted and mean nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_client_cert: Option<bool>,
     /// How the issuer proves the app's hosts to the CA. Absent: `http-01`.
     #[serde(default)]
     pub challenge: ChallengeKind,
