@@ -12,10 +12,20 @@
       "id": "a",
       "tenant": "bench",
       "declared_by": "bench/podgate-snapshot.json.in",
-      "hosts": ["a.test"],
       "tls": { "mode": "acme" },
+      "routers": [
+        { "name": "default", "match": { "host": "a.test" }, "service": "web" }
+      ],
       "revisions": [
-        { "id": "r1", "upstreams": ["127.0.0.1:@BACKEND_PORT@"], "weight": 100, "state": "serving" }
+        {
+          "id": "r1", "weight": 100, "state": "serving",
+          "services": [
+            {
+              "name": "web", "type": "loadbalancer",
+              "servers": [{ "url": "http://127.0.0.1:@BACKEND_PORT@" }]
+            }
+          ]
+        }
       ]
     }
   ]

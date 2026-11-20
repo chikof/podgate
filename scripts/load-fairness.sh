@@ -94,7 +94,7 @@ tenant() {
   printf '{"id":"%s","weight":1,"budget":{"max_inflight":10000,"max_buffer_bytes":1048576}}' "$1"
 }
 app() {
-  printf '{"id":"%s","tenant":"%s","declared_by":"scripts/load-fairness.sh","hosts":["%s.test"],"tls":{"mode":"acme"},"revisions":[{"id":"r1","upstreams":["127.0.0.1:%s"],"weight":100,"state":"serving"}]}' \
+  printf '{"id":"%s","tenant":"%s","declared_by":"scripts/load-fairness.sh","tls":{"mode":"acme"},"routers":[{"name":"default","match":{"host":"%s.test"},"service":"web"}],"revisions":[{"id":"r1","weight":100,"state":"serving","services":[{"name":"web","type":"loadbalancer","servers":[{"url":"http://127.0.0.1:%s"}]}]}]}' \
     "$1" "$1" "$1" "$2"
 }
 snapshot="{\"version\":1,\"tenants\":[$(tenant a),$(tenant b)],\"apps\":[$(app a "$upstream_a_port"),$(app b "$upstream_b_port")]}"
