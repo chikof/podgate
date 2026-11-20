@@ -33,7 +33,9 @@ use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, Lease, PickCx, Upstream};
 use crate::tls::{CertError, CertStore, Options};
 use podgate_model::SkewSecret;
-use podgate_model::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
+use podgate_model::{
+    App, Budget, Forwarded, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy,
+};
 
 /// A snapshot the compiler refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -198,6 +200,7 @@ pub struct CompiledApp {
     declared_by: Box<str>,
     allow_domain_fronting: bool,
     record_bodies: bool,
+    forwarded: Forwarded,
     scale_to_zero: Option<ScaleToZero>,
     routers: Box<[CompiledRouter]>,
     stages: Box<[middleware::Named]>,
@@ -275,6 +278,7 @@ impl CompiledApp {
             declared_by: app.declared_by.clone(),
             allow_domain_fronting: app.allow_domain_fronting,
             record_bodies: app.record_bodies,
+            forwarded: app.forwarded.unwrap_or_default(),
             scale_to_zero: app.scale_to_zero,
             routers: parts.routers.into_boxed_slice(),
             stages: parts.stages.into_boxed_slice(),
@@ -419,6 +423,12 @@ impl CompiledApp {
     #[must_use]
     pub fn record_bodies(&self) -> bool {
         self.record_bodies
+    }
+
+    /// The forwarding headers the app's upstreams receive.
+    #[must_use]
+    pub fn forwarded(&self) -> Forwarded {
+        self.forwarded
     }
 
     /// The app's scale-to-zero policy; `None` when it never sleeps.

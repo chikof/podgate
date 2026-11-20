@@ -181,6 +181,10 @@ async fn wasm_filter_runs() {
             {"stage": "entry_point"},
             {"stage": "route"},
             {"stage": "failure_capture"},
+            {"stage": "forwarded_headers", "headers": [
+                "X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Forwarded-Port",
+                "X-Real-IP"
+            ]},
             {"stage": "chain", "middleware": "filter0", "type": "wasm",
              "fuel": 1_000_000, "max_memory_bytes": 262_144},
             {"stage": "select"},

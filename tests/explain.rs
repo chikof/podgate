@@ -5,6 +5,14 @@ mod common;
 use common::{Podgate, Upstream, app, revision, serving, simple_snapshot, snapshot};
 use serde_json::json;
 
+/// The `forwarded_headers` stage of an app with no `forwarded` object.
+fn forwarded_stage() -> serde_json::Value {
+    json!({"stage": "forwarded_headers", "headers": [
+        "X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Forwarded-Port",
+        "X-Real-IP"
+    ]})
+}
+
 #[tokio::test]
 async fn explain_known_host() {
     let podgate = Podgate::start().await;
@@ -40,7 +48,8 @@ async fn explain_known_host() {
             ],
             "pipeline": [
                 {"stage": "acme_http01"}, {"stage": "entry_point"}, {"stage": "route"},
-                {"stage": "failure_capture"}, {"stage": "select"}, {"stage": "inflight_admit"},
+                {"stage": "failure_capture"}, forwarded_stage(), {"stage": "select"},
+                {"stage": "inflight_admit"},
                 {"stage": "tenant_admit"}, {"stage": "backend_admit"}
             ],
         })
@@ -51,7 +60,8 @@ async fn explain_known_host() {
         tls.json()["pipeline"],
         json!([
             {"stage": "entry_point"}, {"stage": "route"}, {"stage": "sni_check"},
-            {"stage": "failure_capture"}, {"stage": "select"}, {"stage": "inflight_admit"},
+            {"stage": "failure_capture"}, forwarded_stage(), {"stage": "select"},
+            {"stage": "inflight_admit"},
             {"stage": "tenant_admit"}, {"stage": "backend_admit"}
         ])
     );

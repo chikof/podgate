@@ -390,7 +390,7 @@ async fn redirect_scheme_explain_and_plan_posture() {
     .await;
     let explained = podgate.admin_get("/v1/explain?url=http://a.test/").await;
     assert_eq!(
-        explained.json()["pipeline"][4],
+        explained.json()["pipeline"][5],
         json!({"stage": "chain", "middleware": "m", "type": "redirect_scheme",
                "scheme": "https", "port": null, "permanent": true})
     );

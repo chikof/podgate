@@ -183,6 +183,10 @@ async fn app_idle_event() {
             {"stage": "entry_point"},
             {"stage": "route"},
             {"stage": "failure_capture"},
+            {"stage": "forwarded_headers", "headers": [
+                "X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Forwarded-Port",
+                "X-Real-IP"
+            ]},
             {"stage": "select"},
             {"stage": "wake_hold"},
             {"stage": "inflight_admit"},

@@ -344,6 +344,8 @@ pub struct ForwardedView {
     pub chain: Vec<IpAddr>,
     /// Whether the peer was trusted to speak for the client.
     pub trusted: bool,
+    /// Whether `port` is the one a trusted peer reported, not the local port.
+    pub port_reported: bool,
 }
 
 impl Default for ForwardedView {
@@ -357,6 +359,7 @@ impl Default for ForwardedView {
             port: None,
             chain: Vec::new(),
             trusted: false,
+            port_reported: false,
         }
     }
 }
@@ -412,16 +415,17 @@ impl ForwardedView {
             .or(chain.first())
             .copied()
             .unwrap_or(peer_or_unknown);
+        let reported_port = last_token(request, "x-forwarded-port", |token| token.parse().ok());
         Self {
             peer: peer_or_unknown,
             client_ip,
             proto: last_token(request, "x-forwarded-proto", Proto::parse)
                 .unwrap_or_else(|| Proto::of(tls)),
             host: last_token(request, "x-forwarded-host", forwarded_host),
-            port: last_token(request, "x-forwarded-port", |token| token.parse().ok())
-                .or(local_port),
+            port: reported_port.or(local_port),
             chain,
             trusted: true,
+            port_reported: reported_port.is_some(),
         }
     }
 

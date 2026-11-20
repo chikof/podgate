@@ -60,6 +60,7 @@ pub fn render(
     out.push_str(&tracer.render());
     out.push_str(&crate::service::outlier::render(&live));
     crate::middleware::pass_tls_client_cert::render(&mut out);
+    crate::forwarded::render(&mut out);
     out.push_str(&crate::middleware::limits::render(&live));
     table.metrics().render(&mut out, &live);
     out

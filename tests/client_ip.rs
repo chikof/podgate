@@ -150,13 +150,18 @@ async fn xff_from_untrusted_peer_ignored() {
         "plain",
         "the forged address routed nothing"
     );
-    for name in ["x-forwarded-for", "x-real-ip", "forwarded"] {
-        assert!(
-            !has_header(&response, name),
-            "{name} reached the upstream: {}",
-            response.body
-        );
-    }
+    // Change 0097: the upstream gets the connection's address, never the forged one.
+    assert!(
+        echoed(&response).1.contains(&"x-forwarded-for: 127.0.0.1")
+            && echoed(&response).1.contains(&"x-real-ip: 127.0.0.1"),
+        "forwarded values must come from the connection: {}",
+        response.body
+    );
+    assert!(
+        !has_header(&response, "forwarded") && !response.body.contains("203.0.113.7"),
+        "forged values reached the upstream: {}",
+        response.body
+    );
 }
 
 #[tokio::test]
@@ -192,7 +197,18 @@ async fn forwarded_proto_from_untrusted_ignored() {
         .1
         .into_iter()
         .filter(|line| line.starts_with("x-forwarded-"))
+        .filter(|line| {
+            ![
+                "x-forwarded-for: 127.0.0.1",
+                "x-forwarded-proto: http",
+                "x-forwarded-host: a.test",
+            ]
+            .contains(line)
+                && !line.starts_with("x-forwarded-port: ")
+        })
         .collect();
+    // Change 0097: the upstream now gets podgate's own `x-forwarded-*` values, built from the
+    // connection; anything else, forged values included, must be gone.
     assert!(
         leaked.is_empty(),
         "forged headers reached the upstream: {leaked:?}"
@@ -251,7 +267,8 @@ async fn trusted_peer_view_keeps_proto_and_host() {
     assert_eq!(echoed(&response).0, "matched", "{}", response.body);
     let lines = echoed(&response).1;
     for kept in [
-        "x-forwarded-for: 203.0.113.7",
+        // Change 0097: a trusted peer's chain is kept and the peer appended.
+        "x-forwarded-for: 203.0.113.7, 127.0.0.1",
         "x-forwarded-proto: https",
         "x-forwarded-host: shop.example",
     ] {

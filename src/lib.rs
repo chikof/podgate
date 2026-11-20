@@ -56,6 +56,7 @@ pub mod events;
 pub mod explain;
 pub mod failures;
 pub mod fairq;
+pub mod forwarded;
 pub mod host;
 pub mod inflight;
 pub mod l4;
@@ -175,6 +176,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_access_log(access_log.clone())
         .with_tracer(tracer.clone())
         .with_events(events.clone())
+        .with_node_name(config.node_name.as_deref())
         .with_wasm(wasm::Executor::new(
             config.wasm_max_concurrent.get(),
             config.wasm_queue_timeout(),

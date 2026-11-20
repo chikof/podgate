@@ -18,15 +18,19 @@
 //! 4. `sni_check`: over TLS, the matched app decides whether a request may name a host other
 //!    than the SNI. It runs for requests no router matched too (they get `421`, not `404`).
 //! 5. `failure_capture`: a request that reaches here and ends in a `5xx` may be recorded.
-//! 6. `chain`: the router's middlewares, before any slot is taken or app woken, so
+//! 6. `forwarded_headers`: writes the forwarding headers the app's upstreams receive
+//!    from the client decision of stage 2. Before the chain, so a `headers` middleware can
+//!    override them and a `wasm` filter sees them.
+//! 7. `chain`: the router's middlewares, before any slot is taken or app woken, so
 //!    unauthenticated or rate-limited traffic cannot hold a tenant slot, queue for a backend or
 //!    wake a sleeping app.
-//! 7. `select`: revision (skew cookie, canary, weights), service and server; `wake_hold` when a
+//! 8. `select`: revision (skew cookie, canary, weights), service and server; `wake_hold` when a
 //!    `scale_to_zero` app has none.
-//! 8. `inflight_admit`, `tenant_admit`, `backend_admit`.
+//! 9. `inflight_admit`, `tenant_admit`, `backend_admit`.
 
 use serde_json::{Value, json};
 
+use crate::forwarded;
 use crate::router::CompiledRouter;
 use crate::table::CompiledApp;
 
@@ -53,6 +57,10 @@ pub fn describe(app: &CompiledApp, router: &CompiledRouter, tls: bool) -> Vec<Va
         stages.push(stage("client_cert"));
     }
     stages.push(stage("failure_capture"));
+    stages.push(json!({
+        "stage": "forwarded_headers",
+        "headers": forwarded::names(app.forwarded()),
+    }));
     for index in router.chain() {
         let Some(named) = app.stages().get(*index) else {
             continue;

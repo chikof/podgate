@@ -847,6 +847,7 @@ mod test {
                 canary: None,
                 tcp: None,
                 udp: None,
+                forwarded: None,
             };
             let mut engine = engine::Compiler::default();
             Stage::compile(

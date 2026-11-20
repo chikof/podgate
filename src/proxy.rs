@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::Method;
+use http::{HeaderValue, Method};
 use pingora::Error;
 use pingora::ErrorSource;
 use pingora::ErrorType::{ConnectionClosed, HTTPStatus, InternalError, ReadError, WriteError};
@@ -65,6 +65,7 @@ use crate::error::AppError;
 use crate::events::EventFeed;
 use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
+use crate::forwarded;
 use crate::inflight::{Inflight, InflightGuard};
 use crate::middleware::{self, Flow, RequestCx, errors};
 use crate::observe::access_log::{self, AccessLog};
@@ -171,6 +172,7 @@ pub struct Gateway {
     access_log: Option<AccessLog>,
     tracer: trace::Tracer,
     page_fetcher: errors::fetch::Fetcher,
+    node: Option<HeaderValue>,
 }
 
 impl Gateway {
@@ -198,6 +200,7 @@ impl Gateway {
             page_fetcher: errors::fetch::Fetcher::default(),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
+            node: None,
         }
     }
 
@@ -297,6 +300,14 @@ impl Gateway {
     #[must_use]
     pub fn with_tracer(mut self, tracer: trace::Tracer) -> Self {
         self.tracer = tracer;
+        self
+    }
+
+    /// Names this node in `X-Forwarded-Server` for apps that ask for it. A name that is not a
+    /// valid header value, or none, leaves that header out.
+    #[must_use]
+    pub fn with_node_name(mut self, name: Option<&str>) -> Self {
+        self.node = name.and_then(|name| HeaderValue::from_str(name).ok());
         self
     }
 
@@ -521,6 +532,28 @@ impl ProxyHttp for Gateway {
             .app(matched.app)
             .is_some_and(crate::table::CompiledApp::record_bodies);
         ctx.failures.begin(keep_bodies);
+        // Before the chain, so a `headers` middleware can still override the headers and a
+        // `wasm` filter sees them.
+        let set = ctx
+            .table
+            .app(matched.app)
+            .map(crate::table::CompiledApp::forwarded)
+            .unwrap_or_default();
+        match forwarded::apply(
+            session.req_header_mut(),
+            &ctx.forwarded,
+            set,
+            self.node.as_ref(),
+        ) {
+            Ok(()) => {}
+            Err(forwarded::Error::Set(err)) => return Err(err),
+            Err(refused @ forwarded::Error::Nominated(_)) => {
+                let err = AppError::BadRequest(refused.to_string().into());
+                ctx.access.refused(&err);
+                respond::write_error(session, &err).await?;
+                return Ok(true);
+            }
+        }
         // The tenant's chain, before any slot is taken or app woken.
         if self.run_chain(session, ctx, matched).await? {
             return Ok(true);

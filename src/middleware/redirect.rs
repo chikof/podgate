@@ -117,7 +117,7 @@ impl Origin {
         }
         // The port a trusted peer reported; its default for the scheme is not written. For any
         // other request the port is the one the client put in `Host`.
-        let port = if forwarded.trusted && request.headers.contains_key("x-forwarded-port") {
+        let port = if forwarded.trusted && forwarded.port_reported {
             forwarded
                 .port
                 .filter(|port| *port != if https { 443 } else { 80 })
@@ -359,6 +359,7 @@ mod test {
             proto: Proto::Https,
             host: Some("App.Test".into()),
             port: Some(8443),
+            port_reported: true,
             trusted: true,
             ..ForwardedView::default()
         };

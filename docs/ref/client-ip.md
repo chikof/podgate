@@ -37,6 +37,7 @@ The result is `Ctx.forwarded: ForwardedView`:
 |`port`|The port a trusted peer reported, else the local port.|
 |`chain`|The addresses a trusted peer forwarded, leftmost first, without the peer. Empty for an untrusted peer.|
 |`trusted`|Whether the peer was trusted.|
+|`port_reported`|Whether `port` is the one a trusted peer reported in `X-Forwarded-Port`, not the local port. Readers use this, not the presence of the header: podgate writes `X-Forwarded-Port` itself before the middleware chain.|
 
 Change 0097 writes the headers the upstream sees from this view.
 

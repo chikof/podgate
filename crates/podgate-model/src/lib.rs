@@ -133,6 +133,49 @@ pub struct App {
     /// UDP routers and services. Not built yet.
     #[serde(default)]
     pub udp: Option<Udp>,
+    /// Which forwarding headers the app's upstreams receive. Absent: the default set,
+    /// [`Forwarded::default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded: Option<Forwarded>,
+}
+
+/// The forwarding headers an app's upstreams receive. Every field is optional; an absent one has
+/// the default below, so `{}` is the same as no object at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four independent switches of one JSON object; an enum would be a worse wire format"
+)]
+pub struct Forwarded {
+    /// Write `X-Forwarded-For`, `-Proto`, `-Host` and `-Port`. Default `true`.
+    #[serde(default = "enabled")]
+    pub x_forwarded: bool,
+    /// Write `X-Real-IP`. Default `true`.
+    #[serde(default = "enabled")]
+    pub real_ip: bool,
+    /// Also write the RFC 7239 `Forwarded` header. Default `false`.
+    #[serde(default)]
+    pub rfc7239: bool,
+    /// Write `X-Forwarded-Server` with the node's name. Default `false`: the header tells the
+    /// app which host proxies it, which it does not need.
+    #[serde(default)]
+    pub server: bool,
+}
+
+impl Default for Forwarded {
+    fn default() -> Self {
+        Self {
+            x_forwarded: true,
+            real_ip: true,
+            rfc7239: false,
+            server: false,
+        }
+    }
+}
+
+fn enabled() -> bool {
+    true
 }
 
 /// One router: a matcher, a middleware chain and a service.
@@ -600,6 +643,7 @@ mod test {
                 }],
                 "allow_domain_fronting": true,
                 "record_bodies": true,
+                "forwarded": {"x_forwarded": false, "real_ip": false, "rfc7239": true, "server": true},
                 "scale_to_zero": {"idle_secs": 300, "wake_timeout_secs": 12},
                 "canary": {"revision": "r8", "step_percent": 10, "interval_secs": 30, "max_error_permille": 20},
                 "tcp": {
