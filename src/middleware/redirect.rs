@@ -1,10 +1,11 @@
 //! What `redirect_scheme` and `redirect_regex` share: the URL a redirect is computed from, the
 //! status pair and the one place where a request-derived string becomes a `Location` header.
 //!
-//! The URL is `scheme://host[:port]/path?query`. The scheme is the connection's real one (a TLS
-//! digest on the session), never `X-Forwarded-Proto`; the host is the URI authority or `Host`
-//! header, lowercase, no trailing dot, and only host characters; the path is the one the path
-//! normalization already rewrote the request to.
+//! The URL is `scheme://host[:port]/path?query`. The scheme, and the host and port a trusted
+//! proxy reported, come from the request's [`ForwardedView`], which believes `X-Forwarded-*`
+//! only from peers the entry point trusts, so a client cannot choose them; the host
+//! is otherwise the URI authority or `Host` header, lowercase, no trailing dot, and only host
+//! characters; the path is the one the path normalization already rewrote the request to.
 //!
 //! [`finish`] is the header-injection guard: a control byte, a DEL, or a percent escape of one
 //! anywhere in the target refuses the request (`400`), and nothing else about the target is
@@ -18,7 +19,7 @@ use pingora::proxy::Session;
 use thiserror::Error;
 
 use super::Flow;
-use crate::entry;
+use crate::client_ip::{ForwardedView, Proto};
 use crate::error::AppError;
 use crate::respond;
 
@@ -64,24 +65,31 @@ pub enum Refused {
 /// What a request looks like to a redirect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
-    tls: bool,
+    https: bool,
     host: String,
     port: Option<u16>,
     target: String,
 }
 
 impl Origin {
-    /// The origin of the session's request.
+    /// The origin of the session's request as `forwarded` sees it: the scheme is the
+    /// connection's TLS state unless a trusted peer said otherwise, and `X-Forwarded-Host` and
+    /// `X-Forwarded-Port` count only when it did. Change 0026 removed those headers from every
+    /// other peer before routing, so a client cannot choose any of this.
     ///
     /// # Errors
     ///
     /// [`Refused::Host`] when the request names no host or one with characters a host cannot
     /// have.
-    pub fn of(session: &Session) -> Result<Self, Refused> {
-        Self::from_request(session.req_header(), entry::is_tls(session))
+    pub fn of(session: &Session, forwarded: &ForwardedView) -> Result<Self, Refused> {
+        Self::from_request(session.req_header(), forwarded)
     }
 
-    pub(super) fn from_request(request: &RequestHeader, tls: bool) -> Result<Self, Refused> {
+    pub(super) fn from_request(
+        request: &RequestHeader,
+        forwarded: &ForwardedView,
+    ) -> Result<Self, Refused> {
+        let https = forwarded.proto == Proto::Https;
         let authority = match request.uri.authority() {
             Some(authority) => authority.clone(),
             None => {
@@ -92,7 +100,11 @@ impl Origin {
         if authority.as_str().contains('@') {
             return Err(Refused::Host);
         }
-        let mut host = authority.host().to_ascii_lowercase();
+        let (name, own_port) = match (&forwarded.host, forwarded.trusted) {
+            (Some(reported), true) => (reported.to_string(), None),
+            _ => (authority.host().to_owned(), authority.port_u16()),
+        };
+        let mut host = name.to_ascii_lowercase();
         if let Some(trimmed) = host.strip_suffix('.') {
             host.truncate(trimmed.len());
         }
@@ -103,29 +115,38 @@ impl Origin {
         if !valid {
             return Err(Refused::Host);
         }
+        // The port a trusted peer reported; its default for the scheme is not written. For any
+        // other request the port is the one the client put in `Host`.
+        let port = if forwarded.trusted && request.headers.contains_key("x-forwarded-port") {
+            forwarded
+                .port
+                .filter(|port| *port != if https { 443 } else { 80 })
+        } else {
+            own_port
+        };
         let target = request
             .uri
             .path_and_query()
             .map_or("/", |target| target.as_str())
             .to_owned();
         Ok(Self {
-            tls,
+            https,
             host,
-            port: authority.port_u16(),
+            port,
             target,
         })
     }
 
-    /// The scheme of the connection: `https` over TLS, `http` otherwise.
+    /// The scheme of the client's request: `https` over TLS or when a trusted peer said so.
     #[must_use]
     pub fn scheme(&self) -> &'static str {
-        if self.tls { "https" } else { "http" }
+        if self.https { "https" } else { "http" }
     }
 
     /// The port the request names, or its scheme's default.
     #[must_use]
     pub fn effective_port(&self) -> u16 {
-        self.port.unwrap_or(if self.tls { 443 } else { 80 })
+        self.port.unwrap_or(if self.https { 443 } else { 80 })
     }
 
     /// `scheme://host[:port]/path?query`, the string `redirect_regex` matches.
@@ -306,18 +327,72 @@ mod test {
         request
     }
 
+    fn view(tls: bool) -> ForwardedView {
+        ForwardedView {
+            proto: if tls { Proto::Https } else { Proto::Http },
+            ..ForwardedView::default()
+        }
+    }
+
     #[test]
     fn the_origin_is_the_connection_scheme_with_a_normalized_host() {
-        let origin =
-            Origin::from_request(&request(Some("Ex.Test.:8080"), "/a?b=1"), false).expect("origin");
+        let origin = Origin::from_request(&request(Some("Ex.Test.:8080"), "/a?b=1"), &view(false))
+            .expect("origin");
         assert_eq!(origin.url(), "http://ex.test:8080/a?b=1");
         assert_eq!(origin.effective_port(), 8080);
-        let secure = Origin::from_request(&request(Some("ex.test"), "/"), true).expect("origin");
+        let secure =
+            Origin::from_request(&request(Some("ex.test"), "/"), &view(true)).expect("origin");
         assert_eq!(
             (secure.url().as_str(), secure.effective_port()),
             ("https://ex.test/", 443)
         );
         assert_eq!(secure.with("http", Some(81)), "http://ex.test:81/");
+    }
+
+    #[test]
+    fn a_trusted_peer_reports_scheme_host_and_port() {
+        let mut request = request(Some("backend.internal:8080"), "/a?b=1");
+        request
+            .insert_header("x-forwarded-port", "8443")
+            .expect("port");
+        let trusted = ForwardedView {
+            proto: Proto::Https,
+            host: Some("App.Test".into()),
+            port: Some(8443),
+            trusted: true,
+            ..ForwardedView::default()
+        };
+        let origin = Origin::from_request(&request, &trusted).expect("origin");
+        assert_eq!(origin.url(), "https://app.test:8443/a?b=1");
+        assert_eq!(origin.effective_port(), 8443);
+
+        let mut default_port = request.clone();
+        default_port
+            .insert_header("x-forwarded-port", "443")
+            .expect("port");
+        let origin = Origin::from_request(
+            &default_port,
+            &ForwardedView {
+                port: Some(443),
+                ..trusted
+            },
+        )
+        .expect("origin");
+        assert_eq!(origin.url(), "https://app.test/a?b=1");
+    }
+
+    #[test]
+    fn a_view_that_is_not_trusted_reports_nothing() {
+        let origin = Origin::from_request(
+            &request(Some("a.test:8080"), "/"),
+            &ForwardedView {
+                host: Some("evil.test".into()),
+                port: Some(9),
+                ..view(false)
+            },
+        )
+        .expect("origin");
+        assert_eq!(origin.url(), "http://a.test:8080/");
     }
 
     #[test]
@@ -329,7 +404,7 @@ mod test {
             Some("a.test@evil.test"),
         ] {
             assert_eq!(
-                Origin::from_request(&request(host, "/"), false),
+                Origin::from_request(&request(host, "/"), &view(false)),
                 Err(Refused::Host),
                 "{host:?}"
             );

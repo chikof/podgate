@@ -196,7 +196,7 @@ impl Kind for RedirectRegex {
     }
 
     async fn request(&self, cx: &mut RequestCx<'_>, _state: &mut ()) -> pingora::Result<Flow> {
-        let decision = match Origin::of(cx.session) {
+        let decision = match Origin::of(cx.session, cx.forwarded) {
             Ok(origin) => self.decide(&origin),
             Err(refused) => Decision::Refuse(refused),
         };
@@ -217,6 +217,7 @@ mod test {
     use pingora::http::RequestHeader;
 
     use super::*;
+    use crate::client_ip::ForwardedView;
 
     fn kind(regex: &str, replacement: &str) -> Result<RedirectRegex, String> {
         let regex = Regex::new(regex).map_err(|err| err.to_string())?;
@@ -235,7 +236,7 @@ mod test {
     fn origin(host: &str, target: &str) -> Origin {
         let mut request = RequestHeader::build("GET", target.as_bytes(), None).expect("request");
         request.insert_header("Host", host).expect("host");
-        Origin::from_request(&request, false).expect("origin")
+        Origin::from_request(&request, &ForwardedView::default()).expect("origin")
     }
 
     fn decide(regex: &str, replacement: &str, host: &str, target: &str) -> Decision {

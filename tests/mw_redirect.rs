@@ -403,3 +403,92 @@ async fn redirect_scheme_explain_and_plan_posture() {
         json!([{"host": "a.test", "app": "a", "kind": "https_redirect_removed"}])
     );
 }
+
+/// Like [`start`], with the `web` entry point trusting the test client (`127.0.0.1`) as a proxy.
+async fn start_behind_trusted_lb(kind: &str, config: Value) -> (Podgate, Upstream) {
+    let podgate = Podgate::start().await;
+    let upstream = Upstream::start("upstream body").await;
+    let a = with_middleware(
+        app("a", &["a.test"], &[serving("r1", upstream.addr)]),
+        "m",
+        kind,
+        config,
+    );
+    let mut pushed = snapshot(1, &[a]);
+    pushed["entry_points"] =
+        json!([{"name": "web", "forwarded_headers": {"trusted_ips": ["127.0.0.0/8"]}}]);
+    let response = podgate.push_snapshot(&pushed).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    (podgate, upstream)
+}
+
+#[tokio::test]
+async fn redirect_scheme_trusted_lb_no_loop() {
+    let (podgate, _upstream) =
+        start_behind_trusted_lb("redirect_scheme", json!({"scheme": "https"})).await;
+
+    let behind_lb = podgate
+        .get_with_headers("a.test", "/x", &[("X-Forwarded-Proto", "https")])
+        .await;
+    assert_eq!(
+        (behind_lb.status, behind_lb.body.as_str()),
+        (200, "upstream body"),
+        "a trusted load balancer already terminated TLS: {behind_lb:?}"
+    );
+
+    let plain_behind_lb = podgate
+        .get_with_headers("a.test", "/x", &[("X-Forwarded-Proto", "http")])
+        .await;
+    assert_redirect(&plain_behind_lb, 302, "https://a.test/x");
+    let no_header = podgate.get("a.test", "/x").await;
+    assert_redirect(&no_header, 302, "https://a.test/x");
+
+    let (podgate, _upstream) =
+        start_behind_trusted_lb("redirect_scheme", json!({"scheme": "https", "port": 8443})).await;
+    let right_port = podgate
+        .get_with_headers(
+            "a.test",
+            "/x",
+            &[("X-Forwarded-Proto", "https"), ("X-Forwarded-Port", "8443")],
+        )
+        .await;
+    assert_eq!(right_port.status, 200, "{right_port:?}");
+    let other_port = podgate
+        .get_with_headers(
+            "a.test",
+            "/x",
+            &[("X-Forwarded-Proto", "https"), ("X-Forwarded-Port", "443")],
+        )
+        .await;
+    assert_redirect(&other_port, 302, "https://a.test:8443/x");
+}
+
+#[tokio::test]
+async fn redirect_regex_trusted_lb_origin() {
+    let (podgate, _upstream) = start_behind_trusted_lb(
+        "redirect_regex",
+        json!({
+            "regex": "^https://shop\\.example/(.*)$",
+            "replacement": "https://new.example/$1",
+        }),
+    )
+    .await;
+    let seen_by_the_regex = podgate
+        .get_with_headers(
+            "a.test",
+            "/p?q=1",
+            &[
+                ("X-Forwarded-Proto", "https"),
+                ("X-Forwarded-Host", "Shop.Example"),
+            ],
+        )
+        .await;
+    assert_redirect(&seen_by_the_regex, 302, "https://new.example/p?q=1");
+
+    let without = podgate.get("a.test", "/p").await;
+    assert_eq!(
+        (without.status, without.body.as_str()),
+        (200, "upstream body"),
+        "without the reported scheme and host the regex does not match: {without:?}"
+    );
+}

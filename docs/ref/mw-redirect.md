@@ -21,7 +21,7 @@ So podgate sends `301` for `permanent: true` and `302` otherwise ([`podgate::mid
 
 A redirect works on `scheme://host[:port]/path?query`:
 
-- `scheme` is the connection's: `https` over TLS, `http` otherwise. `X-Forwarded-Proto`, `Forwarded` and `X-Forwarded-*` are never read, so a client cannot choose it.
+- `scheme` is the client's, from the request's `ForwardedView`: `https` over TLS, `http` otherwise, unless the peer is listed in the entry point's `forwarded_headers.trusted_ips`, in which case its `X-Forwarded-Proto` counts. A TLS-terminating load balancer therefore does not loop: it reaches podgate over plain HTTP with `X-Forwarded-Proto: https`, and a `redirect_scheme` to `https` passes that request on. The same trusted peer's `X-Forwarded-Host` replaces the host and its `X-Forwarded-Port` the port (the scheme's default port is not written). For any other peer these headers were removed before routing, so a client cannot choose any of them.
 - `host` is the URI authority (HTTP/2, absolute-form) or else the `Host` header, lowercase, without a trailing dot. A host with anything but letters, digits, `-`, `.`, `_` (and the brackets and colons of an IPv6 literal), or with `user@`, is `400`.
 - `:port` is written when the request named one.
 - `path?query` is the path the request was normalized to (dot segments and duplicate slashes removed, unreserved escapes decoded), then the query as sent.

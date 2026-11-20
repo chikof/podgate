@@ -260,6 +260,7 @@ impl Gateway {
         let mut cx = RequestCx {
             session,
             app,
+            forwarded: &ctx.forwarded,
             tenant: tenant.as_ref(),
             executor: &self.wasm,
             capacity_refusal: &mut ctx.capacity_refusal,

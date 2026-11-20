@@ -26,6 +26,7 @@ use pingora::proxy::Session;
 use serde_json::Value;
 
 use crate::budget::TenantBudget;
+use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
 use crate::table::CompiledApp;
 use crate::wasm as engine;
@@ -68,6 +69,8 @@ pub struct RequestCx<'a> {
     pub session: &'a mut Session,
     /// The app the request was matched to.
     pub app: &'a CompiledApp,
+    /// What the request's peer is trusted to say: scheme, host, port and client address.
+    pub forwarded: &'a ForwardedView,
     /// The tenant's budget, to charge memory before allocating.
     pub tenant: Option<&'a Arc<TenantBudget>>,
     /// The bounded pool for WASM runs.

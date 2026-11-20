@@ -5,7 +5,7 @@
 //! { "name": "to-https", "type": "redirect_scheme", "scheme": "https", "port": 8443, "permanent": true }
 //! ```
 //!
-//! - The scheme a request has is the connection's own, never `X-Forwarded-Proto`.
+//! - The scheme a request has is the client's: the connection's own, or `X-Forwarded-Proto` from a peer the entry point trusts (`forwarded_headers.trusted_ips`), so a request that a TLS-terminating load balancer forwards as `https` is passed on. Every other peer's `X-Forwarded-*` was removed before routing.
 //! - A request that already has the target scheme (and, when `port` is set, the target port) is
 //!   passed on, so the redirect cannot loop. Without `port` the scheme alone decides: behind a
 //!   port mapping (`Host: a.test:8443` on TLS) a redirect to the default port would break the
@@ -95,7 +95,7 @@ impl Kind for RedirectScheme {
     }
 
     async fn request(&self, cx: &mut RequestCx<'_>, _state: &mut ()) -> pingora::Result<Flow> {
-        let decision = match Origin::of(cx.session) {
+        let decision = match Origin::of(cx.session, cx.forwarded) {
             Ok(origin) => self.decide(&origin),
             Err(refused) => Decision::Refuse(refused),
         };
@@ -122,6 +122,7 @@ mod test {
     use pingora::http::RequestHeader;
 
     use super::*;
+    use crate::client_ip::{ForwardedView, Proto};
 
     fn kind(scheme: &str, port: Option<u16>) -> RedirectScheme {
         RedirectScheme {
@@ -134,7 +135,11 @@ mod test {
     fn origin(host: &str, target: &str, tls: bool) -> Origin {
         let mut request = RequestHeader::build("GET", target.as_bytes(), None).expect("request");
         request.insert_header("Host", host).expect("host");
-        Origin::from_request(&request, tls).expect("origin")
+        let forwarded = ForwardedView {
+            proto: if tls { Proto::Https } else { Proto::Http },
+            ..ForwardedView::default()
+        };
+        Origin::from_request(&request, &forwarded).expect("origin")
     }
 
     fn location(decision: Decision) -> String {
