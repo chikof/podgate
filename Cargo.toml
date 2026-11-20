@@ -3,26 +3,33 @@ name = "podgate"
 description = "Memory-safe reverse proxy for our PaaS, built on Pingora"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0 OR MIT"
 rust-version = "1.99"
 # Not published: `cargo deny` treats private crates as licence-exempt.
 publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+arc-swap = "1.9.5"
+async-trait = "0.1.92"
 axum = "0.8.9"
+bytes = "1.12.2"
+pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
+rustls-pki-types = "1.16.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1.54.1", features = ["net", "rt"] }
 tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 [dev-dependencies]
-# `oneshot` drives the router in-process, without a socket.
-tower = { version = "0.5.3", features = ["util"] }
-# Raw TCP in tests/http.rs: write the request, wait for shutdown.
-tokio = { version = "1.54.1", features = ["io-util", "sync", "time"] }
+# tests/common: raw HTTP/1.1 over TCP and unix sockets, plus a tiny upstream server.
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 
 [lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review
