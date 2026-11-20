@@ -15,6 +15,7 @@
 
 pub mod admin;
 pub mod config;
+pub mod conflict;
 pub mod error;
 pub mod host;
 pub mod proxy;
@@ -34,6 +35,7 @@ use tracing_subscriber::EnvFilter;
 
 pub use admin::{AdminService, AppState};
 pub use config::{Config, ConfigError, LogFormat};
+pub use conflict::Conflict;
 pub use error::AppError;
 pub use proxy::{Ctx, Gateway};
 pub use snapshot::Snapshot;

@@ -6,8 +6,9 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::conflict::Conflict;
 use crate::route::RouteError;
-use crate::table::ApplyError;
+use crate::table::{ApplyError, CompileError};
 
 /// Errors answered to clients. Rendered as `{"error": "<message>"}` with the matching status.
 #[derive(Debug, Error)]
@@ -25,9 +26,9 @@ pub enum AppError {
     /// The request contradicts the current state: `409 Conflict`.
     #[error("{0}")]
     Conflict(Box<str>),
-    /// A snapshot the compiler refused: `422`, with the reasons under `conflicts`.
+    /// A snapshot the compiler refused: `422`, with objects under `conflicts`, each with a `code`.
     #[error("snapshot rejected")]
-    SnapshotRejected(Vec<String>),
+    SnapshotRejected(Vec<Value>),
     /// Nothing can serve the request now: `503 Service Unavailable`.
     #[error("{0}")]
     Unavailable(Box<str>),
@@ -67,8 +68,20 @@ impl From<ApplyError> for AppError {
     fn from(err: ApplyError) -> Self {
         match err {
             ApplyError::Stale { .. } => Self::Conflict(err.to_string().into()),
-            ApplyError::Compile(err) => Self::SnapshotRejected(vec![err.to_string()]),
+            ApplyError::Compile(err) => Self::SnapshotRejected(rejection(&err)),
         }
+    }
+}
+
+/// The `conflicts` list for a refused snapshot: the typed conflicts as objects, any other
+/// compile error as `{"code": ..., "message": ...}`.
+fn rejection(err: &CompileError) -> Vec<Value> {
+    let other = |code: &str| vec![json!({ "code": code, "message": err.to_string() })];
+    match err {
+        CompileError::Conflicts(conflicts) => conflicts.iter().map(Conflict::to_json).collect(),
+        CompileError::InvalidHost { .. } => other("invalid_host"),
+        CompileError::UnknownTenant { .. } => other("unknown_tenant"),
+        CompileError::Certificate(_) => other("invalid_certificate"),
     }
 }
 
@@ -109,11 +122,11 @@ mod test {
 
     #[test]
     fn rejected_snapshot_lists_conflicts() {
-        let err = AppError::SnapshotRejected(vec!["host a.test twice".into()]);
+        let err = AppError::SnapshotRejected(vec![json!({"code": "host_conflict", "host": "a.test"})]);
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             err.body(),
-            json!({"error": "snapshot rejected", "conflicts": ["host a.test twice"]})
+            json!({"error": "snapshot rejected", "conflicts": [{"code": "host_conflict", "host": "a.test"}]})
         );
     }
 }

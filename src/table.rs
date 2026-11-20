@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
+use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost};
 use crate::snapshot::{App, Revision, RevisionState, Snapshot};
 use crate::tls::{CertError, CertStore};
 
-/// A snapshot the compiler refuses. Change 0003 grows this into the full conflict list.
+/// A snapshot the compiler refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompileError {
@@ -38,16 +39,10 @@ pub enum CompileError {
         /// The missing tenant.
         tenant: Box<str>,
     },
-    /// Two apps claim the same host. Nothing is merged: the snapshot is refused.
-    #[error("host {host} is claimed by apps {first} and {second}")]
-    DuplicateHost {
-        /// The contested host as declared.
-        host: Box<str>,
-        /// The app that claimed it first.
-        first: Box<str>,
-        /// The app that claimed it second.
-        second: Box<str>,
-    },
+    /// Declarations conflict on security. Nothing is merged: the snapshot is refused and every
+    /// conflict is listed.
+    #[error("{}", conflict::join(.0))]
+    Conflicts(Vec<Conflict>),
     /// A certificate cannot be served.
     #[error(transparent)]
     Certificate(#[from] CertError),
@@ -234,11 +229,11 @@ impl RoutingTable {
     ///
     /// # Errors
     ///
-    /// Returns [`CompileError`] for an invalid host, an unknown tenant, a host claimed twice or
-    /// a certificate that cannot be served.
+    /// Returns [`CompileError`] for an invalid host, an unknown tenant, declarations that
+    /// conflict (every [`Conflict`] is reported at once) or a certificate that cannot be served.
     pub fn compile(snapshot: &Snapshot) -> Result<Self, CompileError> {
         let tenants: HashSet<&str> = snapshot.tenants.iter().map(|tenant| &*tenant.id).collect();
-        let mut hosts = HostMap::default();
+        let mut claims = Vec::new();
         for (index, app) in snapshot.apps.iter().enumerate() {
             if !tenants.contains(&*app.tenant) {
                 return Err(CompileError::UnknownTenant {
@@ -252,14 +247,16 @@ impl RoutingTable {
                         app: app.id.clone(),
                         source,
                     })?;
-                if let Some(first) = hosts.insert(pattern, index) {
-                    return Err(CompileError::DuplicateHost {
-                        host: raw.clone(),
-                        first: snapshot.apps[first].id.clone(),
-                        second: app.id.clone(),
-                    });
-                }
+                claims.push((pattern, index));
             }
+        }
+        let conflicts = conflict::detect(&snapshot.apps, &claims);
+        if !conflicts.is_empty() {
+            return Err(CompileError::Conflicts(conflicts));
+        }
+        let mut hosts = HostMap::default();
+        for (pattern, index) in claims {
+            hosts.insert(pattern, index);
         }
         Ok(Self {
             version: snapshot.version,
@@ -479,7 +476,8 @@ mod test {
         );
         assert!(matches!(
             RoutingTable::compile(&duplicate),
-            Err(CompileError::DuplicateHost { .. })
+            Err(CompileError::Conflicts(conflicts))
+                if matches!(conflicts.as_slice(), [Conflict::HostConflict { .. }])
         ));
 
         let mut unknown = snapshot(1, vec![app("a", &["a.test"], serving(1))]);

@@ -117,11 +117,8 @@ async fn malformed_json_is_400_and_a_rejected_snapshot_is_422() {
     let rejected = podgate.push_snapshot(&duplicate).await;
     assert_eq!(rejected.status, 422);
     assert_eq!(rejected.json()["error"], "snapshot rejected");
-    assert!(
-        rejected.json()["conflicts"][0]
-            .as_str()
-            .is_some_and(|c| c.contains("dup.test"))
-    );
+    assert_eq!(rejected.json()["conflicts"][0]["code"], "host_conflict");
+    assert_eq!(rejected.json()["conflicts"][0]["host"], "dup.test");
 
     assert_eq!(podgate.get("a.test", "/").await.body, "kept");
 }
