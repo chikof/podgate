@@ -763,6 +763,16 @@ pub fn with_buffering(mut app: Value, config: Value) -> Value {
     app
 }
 
+/// `app` with one `forward_auth` middleware `auth` asking `http://<auth>/verify`; `extra` holds
+/// the other fields of its configuration (an object, or `null` for none).
+pub fn with_forward_auth(app: Value, auth: SocketAddr, extra: &Value) -> Value {
+    let mut config = json!({ "address": format!("http://{auth}/verify") });
+    if let (Some(config), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
+        config.extend(extra.clone());
+    }
+    with_middleware(app, "auth", "forward_auth", config)
+}
+
 /// A snapshot with tenant `t1`, the given apps and no certificates.
 pub fn snapshot(version: u64, apps: &[Value]) -> Value {
     json!({

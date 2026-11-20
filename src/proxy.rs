@@ -176,6 +176,7 @@ pub struct Gateway {
     page_fetcher: errors::fetch::Fetcher,
     node: Option<HeaderValue>,
     cache: Cache,
+    auth_client: middleware::forward_auth::Client,
 }
 
 impl Gateway {
@@ -201,6 +202,7 @@ impl Gateway {
             entry_point: Arc::from(entry::WEB),
             access_log: None,
             page_fetcher: errors::fetch::Fetcher::default(),
+            auth_client: middleware::forward_auth::Client::new(upstream_timeout),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
             node: None,
@@ -371,6 +373,8 @@ impl Gateway {
             capacity_refusal: &mut ctx.capacity_refusal,
             events: &self.events,
             hashing: &self.basic_auth,
+            auth: &self.auth_client,
+            policy: &self.upstream_policy,
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;

@@ -943,6 +943,8 @@ pub struct TableHandle {
     rate_limits: Arc<middleware::rate_limit::Registry>,
     // Counts of `in_flight_req` middlewares; touched only by `swap`.
     in_flight_reqs: Arc<middleware::in_flight_req::Registry>,
+    // Permits of `forward_auth` middlewares; touched only by `swap`.
+    forward_auths: Arc<middleware::forward_auth::Registry>,
     // Series of entry points, routers and services, and the snapshot counters; touched by
     // `swap` and when a snapshot is refused.
     metrics: Arc<metrics::Registry>,
@@ -1118,6 +1120,7 @@ impl TableHandle {
         self.digest_auth.settle(&mut table.apps);
         self.rate_limits.settle(&mut table.apps);
         self.in_flight_reqs.settle(&mut table.apps);
+        self.forward_auths.settle(&mut table.apps);
         self.metrics.settle(&mut table);
         let version = table.version;
         self.live.store(Arc::new(table));

@@ -49,6 +49,7 @@ pub mod compress;
 pub mod content_type;
 pub mod digest_auth;
 pub mod errors;
+pub mod forward_auth;
 pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
@@ -104,6 +105,10 @@ pub struct RequestCx<'a> {
     pub events: &'a EventFeed,
     /// The bounded pool for password verifications (`basic_auth`).
     pub hashing: &'a basic_auth::Pool,
+    /// Dials the auth service of a `forward_auth` stage.
+    pub auth: &'a forward_auth::Client,
+    /// The operator's rule for the addresses the proxy may dial.
+    pub policy: &'a UpstreamPolicy,
 }
 
 /// The stages of the chain that come before the one running a routed hook, with their per-request
@@ -615,7 +620,7 @@ kinds! {
 
     "digest_auth" => DigestAuth(digest_auth::DigestAuth),
 
-    "forward_auth" => unbuilt,
+    "forward_auth" => ForwardAuth(forward_auth::ForwardAuth),
 
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
@@ -679,6 +684,8 @@ schemas! {
     "basic_auth" => basic_auth::Config,
 
     "digest_auth" => digest_auth::Config,
+
+    "forward_auth" => forward_auth::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 

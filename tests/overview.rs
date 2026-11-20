@@ -483,6 +483,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         respond_header.clone(),
         respond_body.clone(),
     ]);
+    let auth_key = plant("forward-auth-key");
+    plants.push(auth_key.clone());
 
     let kinds = vec![
         (
@@ -539,6 +541,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         (
             "errors",
             json!({"status": ["500-599"], "service": "pinned", "query": format!("/{{status}}.html?key={page_key}")}),
+        ),
+        (
+            "forward_auth",
+            json!({"address": format!("http://10.0.0.9:9091/verify?key={auth_key}"), "response_headers": ["x-user"]}),
         ),
         (
             "respond",

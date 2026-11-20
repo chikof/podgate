@@ -259,6 +259,15 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                     invalid,
                 ));
             }
+            if let Stage::ForwardAuth(auth) = &named.stage
+                && let Err(invalid) = auth.check_budget(&app.tenant, max_buffer_bytes)
+            {
+                rejected.push(Rejected::new(
+                    app,
+                    format!("middleware {}", named.name),
+                    invalid,
+                ));
+            }
         }
         let transports = transports_of(app, &mut rejected);
         let services = services_of(

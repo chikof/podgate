@@ -98,6 +98,16 @@ pub enum AppError {
     /// declared a hash the tenant cannot pay for.
     #[error("password verification memory is over the tenant's budget")]
     AuthOverBudget,
+    /// A `forward_auth` call failed (no connection, refused by the upstream address policy, timed
+    /// out, or an answer over its cap or not valid HTTP/1.1): `503`. The request is never passed
+    /// on.
+    #[error("auth service unavailable")]
+    AuthUnavailable,
+    /// A `forward_auth` call found no room (the stage is at `max_concurrent`, or the tenant's
+    /// buffer budget is full right now): `503`, retry in a second. The request is never passed
+    /// on.
+    #[error("auth service unavailable")]
+    AuthSaturated,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -153,6 +163,8 @@ impl AppError {
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
             | Self::AuthBusy
+            | Self::AuthUnavailable
+            | Self::AuthSaturated
             | Self::LimiterBusy
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
@@ -179,6 +191,7 @@ impl AppError {
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
             | Self::AuthBusy
+            | Self::AuthSaturated
             | Self::AuthOverBudget => Some(1),
             Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
             Self::WakeTimeout => Some(5),
@@ -207,6 +220,7 @@ impl AppError {
                 | Self::FilterBusy
                 | Self::BufferingOverBudget
                 | Self::AuthBusy
+                | Self::AuthSaturated
         )
     }
 
@@ -234,6 +248,8 @@ impl AppError {
             Self::WakeTimeout => "wake_timeout",
             Self::FilterBusy => "filter_busy",
             Self::AuthBusy => "auth_busy",
+            Self::AuthUnavailable => "auth_unavailable",
+            Self::AuthSaturated => "auth_saturated",
             Self::AuthOverBudget => "auth_over_budget",
             Self::RateLimited { .. } => "rate_limited",
             Self::TooManyInFlight => "in_flight_limit",

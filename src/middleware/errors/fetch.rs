@@ -24,9 +24,9 @@ use tokio::time::timeout;
 use crate::service::upstream_policy::UpstreamPolicy;
 
 /// The most bytes a response head may take.
-const HEAD_LIMIT: usize = 8 * 1024;
+pub(crate) const HEAD_LIMIT: usize = 8 * 1024;
 /// One read never asks for more than this many bytes.
-const READ: usize = 4 * 1024;
+pub(crate) const READ: usize = 4 * 1024;
 /// The most bytes of chunked-body trailers that are read and thrown away.
 const TRAILER_LIMIT: usize = 8 * 1024;
 /// The longest `Content-Type` that is kept.
@@ -153,7 +153,7 @@ impl Fetcher {
 
 /// How the end of the body is found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Framing {
+pub(crate) enum Framing {
     Length(usize),
     Chunked,
     Close,
@@ -197,14 +197,17 @@ where
     })
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
 }
 
 /// Reads at most [`READ`] more bytes onto `buffer`; the end of the stream is an error.
-async fn fill<S: AsyncRead + Unpin>(stream: &mut S, buffer: &mut Vec<u8>) -> Result<(), Failure> {
+pub(crate) async fn fill<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    buffer: &mut Vec<u8>,
+) -> Result<(), Failure> {
     let mut chunk = vec![0_u8; READ];
     match stream.read(&mut chunk).await? {
         0 => Err(Failure::Malformed("the connection closed too early")),
@@ -290,7 +293,7 @@ fn parse_head(raw: &[u8]) -> Result<Head, Failure> {
 }
 
 /// Reads the body, which starts with `buffer` (what the head read brought in beyond the head).
-async fn read_body<S>(
+pub(crate) async fn read_body<S>(
     stream: &mut S,
     mut buffer: Vec<u8>,
     framing: Framing,
