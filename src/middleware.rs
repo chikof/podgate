@@ -690,6 +690,8 @@ schemas! {
 
     "buffering" => buffering::Config,
 
+    "cache" => cache::Config,
+
     "compress" => compress::Config,
 
     "errors" => errors::Config,

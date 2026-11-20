@@ -91,45 +91,68 @@ const NOT_MODIFIED_HEADERS: [&HeaderName; 6] = [
     &VARY,
 ];
 
-/// The declaration of a `cache` middleware.
-#[derive(Debug, Deserialize)]
+/// The declaration of a `cache` middleware. Every field is optional; see `docs/ref/mw-cache.md`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub struct Config {
+    /// Most bytes the tenant's cache may hold when this middleware stores; default a quarter of
+    /// the tenant's `max_buffer_bytes`, at most the operator's `CACHE_TENANT_MAX_PERCENT`.
     #[serde(default)]
     max_bytes: Option<u64>,
+    /// Largest response kept, in bytes; default 1 MiB or `max_bytes`, whichever is lower.
     #[serde(default)]
     max_object_bytes: Option<u64>,
+    /// Statuses that may be stored; default `200 203 204 301 308 404 410`.
     #[serde(default)]
     statuses: Option<Vec<u16>>,
+    /// Freshness for a response that names none; absent: only explicit freshness is stored.
     #[serde(default)]
     default_ttl_secs: Option<u64>,
+    /// Longest an entry stays fresh, in seconds; default 86400.
     #[serde(default)]
     max_ttl_secs: Option<u64>,
+    /// Longest the response's own `stale-while-revalidate` and `stale-if-error` are honoured.
     #[serde(default)]
     max_stale_secs: Option<StaleConfig>,
+    /// Store a `Set-Cookie` response with the cookie removed from the stored copy; default
+    /// `false`: such responses are never stored.
     #[serde(default)]
+    #[schemars(with = "bool")]
     cache_set_cookie: SetCookie,
+    /// Serve and store for requests that carry `Cookie`; default `false`: they bypass the cache.
     #[serde(default)]
+    #[schemars(with = "bool")]
     ignore_request_cookies: RequestCookies,
+    /// Obey a client's `no-cache`, `max-age=0` and `no-store`; default `false`.
     #[serde(default)]
+    #[schemars(with = "bool")]
     respect_request_cache_control: ClientControl,
+    /// Share entries between the revisions of the app; default `false`.
     #[serde(default)]
+    #[schemars(with = "bool")]
     share_across_revisions: Revisions,
+    /// Sort the query parameters before they are part of the key; default `false`.
     #[serde(default)]
+    #[schemars(with = "bool")]
     normalize_query: Query,
+    /// How long a request waits for the fetch another request leads, in milliseconds;
+    /// default 3000, at most 10000.
     #[serde(default)]
     collapse_timeout_ms: Option<u64>,
+    /// The response header that lists purge tags (for example `Cache-Tag`).
     #[serde(default)]
     tag_header: Option<String>,
 }
 
 /// `max_stale_secs`: how long a response's own `stale-while-revalidate` and `stale-if-error` are
 /// honoured.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StaleConfig {
+    /// Seconds of `stale-while-revalidate`; default 60.
     #[serde(default)]
     while_revalidate: Option<u64>,
+    /// Seconds of `stale-if-error`; default 300.
     #[serde(default)]
     if_error: Option<u64>,
 }
