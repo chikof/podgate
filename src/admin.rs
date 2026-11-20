@@ -42,6 +42,7 @@ use crate::failures::Failures;
 use crate::fairq::Backends;
 use crate::inflight::Inflight;
 use crate::observe::access_log::AccessLog;
+use crate::observe::tracing::Tracer;
 use crate::outcomes::Outcomes;
 use crate::revert::Reverter;
 use crate::service::upstream_policy::UpstreamPolicy;
@@ -59,6 +60,7 @@ pub struct AppState {
     failures: Failures,
     upstream_policy: UpstreamPolicy,
     access_log: AccessLog,
+    tracer: Tracer,
     reverter: Reverter,
     outcomes: Outcomes,
     entry_points: Arc<[EntryPoint]>,
@@ -87,6 +89,7 @@ impl AppState {
             failures: Failures::new(),
             upstream_policy: UpstreamPolicy::builtin(),
             access_log: AccessLog::new(),
+            tracer: Tracer::default(),
             reverter,
             outcomes,
             entry_points: Arc::default(),
@@ -187,6 +190,19 @@ impl AppState {
     #[must_use]
     pub fn access_log(&self) -> &AccessLog {
         &self.access_log
+    }
+
+    /// Reports `tracer`, the span queue and rate cap the proxy traces through, on `GET /metrics`.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: Tracer) -> Self {
+        self.tracer = tracer;
+        self
+    }
+
+    /// The tracer whose counters `GET /metrics` reports.
+    #[must_use]
+    pub fn tracer(&self) -> &Tracer {
+        &self.tracer
     }
 
     /// Reads `outcomes`, the counters the proxy records into, for auto-revert and the overview.

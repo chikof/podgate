@@ -22,6 +22,7 @@ use crate::budget::Budgets;
 use crate::error::AppError;
 use crate::fairq::Backends;
 use crate::observe::access_log::AccessLog;
+use crate::observe::tracing::Tracer;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::TableHandle;
 
@@ -39,12 +40,19 @@ pub fn bind(addr: SocketAddr) -> io::Result<StdTcpListener> {
 
 /// What the endpoint reads: the same handles the admin API's `GET /metrics` reads.
 #[derive(Debug)]
-struct Sources {
-    table: TableHandle,
-    budgets: Budgets,
-    backends: Backends,
-    upstream_policy: UpstreamPolicy,
-    access_log: AccessLog,
+pub struct Sources {
+    /// The live routing table.
+    pub table: TableHandle,
+    /// Per-tenant budgets.
+    pub budgets: Budgets,
+    /// Per-backend limits and queues.
+    pub backends: Backends,
+    /// The upstream address policy's refusal counter.
+    pub upstream_policy: UpstreamPolicy,
+    /// The access log queue's counters.
+    pub access_log: AccessLog,
+    /// The trace queue and rate cap counters.
+    pub tracer: Tracer,
 }
 
 /// Serves `GET /metrics` on a bound TCP listener. Run it as a Pingora background service.
@@ -59,27 +67,13 @@ pub struct MetricsService {
 }
 
 impl MetricsService {
-    /// Serves the metrics of `table`, `budgets`, `backends`, `upstream_policy` and `access_log` on `listener`,
+    /// Serves the metrics of `sources` on `listener`,
     /// ending a request that runs longer than `timeout` with `408`.
     #[must_use]
-    pub fn new(
-        listener: StdTcpListener,
-        table: TableHandle,
-        budgets: Budgets,
-        backends: Backends,
-        upstream_policy: UpstreamPolicy,
-        access_log: AccessLog,
-        timeout: Duration,
-    ) -> Self {
+    pub fn new(listener: StdTcpListener, sources: Sources, timeout: Duration) -> Self {
         Self {
             listener,
-            sources: Arc::new(Sources {
-                table,
-                budgets,
-                backends,
-                upstream_policy,
-                access_log,
-            }),
+            sources: Arc::new(sources),
             timeout,
         }
     }
@@ -105,6 +99,7 @@ async fn scrape(State(sources): State<Arc<Sources>>) -> impl IntoResponse {
             &sources.backends,
             &sources.upstream_policy,
             &sources.access_log,
+            &sources.tracer,
         ),
     )
 }

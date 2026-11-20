@@ -14,7 +14,7 @@ use common::{Podgate, TestCert, app, router, serving, snapshot};
 use podgate::observe::metrics::{self, EntrySeries, InFlight, Registry};
 use podgate::router::Matched;
 use podgate::service::upstream_policy::UpstreamPolicy;
-use podgate::{AccessLog, Backends, Budgets, TableHandle};
+use podgate::{AccessLog, Backends, Budgets, TableHandle, Tracer};
 use podgate_model::Snapshot;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -496,6 +496,7 @@ fn render(table: &TableHandle) -> String {
         &Backends::new(),
         &UpstreamPolicy::builtin(),
         &AccessLog::new(),
+        &Tracer::default(),
     )
 }
 

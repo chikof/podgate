@@ -28,6 +28,7 @@ use crate::entry::CompileContext;
 use crate::middleware;
 use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
+use crate::observe::tracing as trace;
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, Lease, PickCx, Upstream};
 use crate::tls::{CertError, CertStore, Options};
@@ -643,6 +644,7 @@ pub struct RoutingTable {
     access_log: Option<Arc<Policy>>,
     series: TableSeries,
     applied_at: u64,
+    tracing: Option<Arc<trace::Policy>>,
 }
 
 impl RoutingTable {
@@ -705,6 +707,7 @@ impl RoutingTable {
             applied_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs()),
+            tracing: trace::compile(snapshot).ok().flatten(),
         })
     }
 
@@ -850,6 +853,15 @@ impl RoutingTable {
             .and_then(|matched| self.router(matched))
             .and_then(|(_, router)| router.access_log());
         access_log::effective(self.access_log.as_ref(), router)
+    }
+
+    /// The tracing policy for a request that matched `matched`, or `None` when it is not traced.
+    #[must_use]
+    pub fn tracing(&self, matched: Option<Matched>) -> Option<&Arc<trace::Policy>> {
+        let router = matched
+            .and_then(|matched| self.router(matched))
+            .and_then(|(_, router)| router.tracing());
+        trace::effective(self.tracing.as_ref(), router)
     }
 
     /// The ACME view of the snapshot: HTTP-01 answers, missing and due certificates.

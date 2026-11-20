@@ -24,11 +24,12 @@ mod text;
 use crate::budget::Budgets;
 use crate::fairq::Backends;
 use crate::observe::access_log::AccessLog;
+use crate::observe::tracing::Tracer;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::TableHandle;
 
 pub use entry::{EntrySeries, InFlight};
-pub use listener::{MetricsService, bind};
+pub use listener::{MetricsService, Sources, bind};
 pub use registry::{DEFAULT_SERIES_PER_TENANT, RETENTION, Registry};
 pub use series::Series;
 pub use table::{RouteSeries, TableSeries};
@@ -49,12 +50,14 @@ pub fn render(
     backends: &Backends,
     upstream_policy: &UpstreamPolicy,
     access_log: &AccessLog,
+    tracer: &Tracer,
 ) -> String {
     let live = table.load();
     let mut out = budgets.render(&live);
     out.push_str(&backends.render());
     out.push_str(&upstream_policy.render());
     out.push_str(&access_log.render());
+    out.push_str(&tracer.render());
     out.push_str(&crate::service::outlier::render(&live));
     table.metrics().render(&mut out, &live);
     out

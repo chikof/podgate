@@ -1,7 +1,7 @@
 //! Observability settings of a snapshot: access log, metrics and tracing.
 //!
-//! `src/observe/` owns the semantics. The access log is built; a snapshot that sets
-//! `metrics` or `tracing` is refused with `observability_not_built` rather than silently
+//! `src/observe/` owns the semantics. The access log and tracing are built;
+//! a snapshot that sets `metrics` is refused with `observability_not_built` rather than silently
 //! recording nothing.
 
 use serde::{Deserialize, Serialize};

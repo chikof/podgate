@@ -22,7 +22,7 @@ The log is off until the snapshot says otherwise. `observability.access_log` is 
 }
 ```
 
-Unknown settings, bad actions, ranges or percentages are `422` `invalid_access_log`; per-router settings that are not a boolean `access_log` are `invalid_observability`. `metrics` and `tracing` stay `observability_not_built`.
+Unknown settings, bad actions, ranges or percentages are `422` `invalid_access_log`; per-router settings that are not a boolean `access_log` are `invalid_observability`. `metrics` stays `observability_not_built`; tracing is in `docs/ref/tracing.md`.
 
 |Setting|Meaning|
 |---|---|

@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::acme;
 use crate::entry::{self, EntryPoint};
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
+use crate::observe::tracing::ExportConfig;
 use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
@@ -75,6 +76,11 @@ const _: () =
 /// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
 /// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
 /// | `TLS_MIN_VERSION` | `1.2` | Lowest TLS version the HTTPS entry points serve, `1.2` or `1.3`. Pingora builds one rustls config per listener, so a connection below it is refused after the handshake (`421`), or at the ClientHello when the client offers no TLS 1.3 suite. An app's `tls.min_version` can only raise it. |
+/// | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of an OTLP/HTTP collector, `http://` or `https://`; spans are POSTed to `<endpoint>/v1/traces` as protobuf. Unset: nothing is exported (requests are still sampled and their trace context propagated). Never part of a snapshot. |
+/// | `OTEL_EXPORTER_OTLP_HEADERS` | unset | `name=value,...` sent with every export, such as an API key. Values are used as written and never logged. |
+/// | `OTEL_EXPORTER_OTLP_CERTIFICATE` | unset | PEM file with the roots to trust for an `https` collector instead of the platform's. |
+/// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
+/// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -123,6 +129,9 @@ pub struct Config {
     pub metrics_series_per_tenant: NonZeroU32,
     /// Lowest TLS version served (`TLS_MIN_VERSION`); the floor of every app's `tls.min_version`.
     pub tls_min_version: TlsVersion,
+    /// Where traces go and how many a node allows; see [`ExportConfig`]. No endpoint: nothing is
+    /// exported.
+    pub otel: ExportConfig,
 }
 
 impl Default for Config {
@@ -146,6 +155,7 @@ impl Default for Config {
             metrics_addr: None,
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
             tls_min_version: TlsVersion::V1_2,
+            otel: ExportConfig::default(),
         }
     }
 }
@@ -385,6 +395,7 @@ impl Config {
                 }
             };
         }
+        config.otel = ExportConfig::from_lookup(&lookup)?;
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -456,6 +467,7 @@ mod test {
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 tls_min_version: TlsVersion::V1_3,
+                otel: ExportConfig::default(),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
@@ -496,6 +508,8 @@ mod test {
             ("METRICS_ADDR", " "),
             ("METRICS_SERIES_PER_TENANT", "0"),
             ("METRICS_SERIES_PER_TENANT", "many"),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "nope"),
+            ("OTEL_MAX_SPANS_PER_SEC", "0"),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);
@@ -503,6 +517,29 @@ mod test {
                 err.to_string().starts_with(&format!("invalid {var}:")),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn otel_header_values_never_print() {
+        let parsed = config(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
+            (
+                "OTEL_EXPORTER_OTLP_HEADERS",
+                "x-api-key=s3cret-key,authorization=Bearer s3cret-token",
+            ),
+        ])
+        .expect("parses");
+        assert_eq!(parsed.otel.headers.len(), 2);
+        for shown in [format!("{parsed:?}"), format!("{parsed:#?}")] {
+            assert!(
+                !shown.contains("s3cret"),
+                "Config's Debug leaks a header value: {shown}"
+            );
+        }
+        for bad in ["x-api-key=s3cret\nkey", "s3cret-no-equals"] {
+            let err = config(&[("OTEL_EXPORTER_OTLP_HEADERS", bad)]).expect_err("refused");
+            assert!(!err.to_string().contains("s3cret"), "{err}");
         }
     }
 

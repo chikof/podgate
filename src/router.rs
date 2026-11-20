@@ -25,7 +25,7 @@ mod tree;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::host::HostPattern;
-use crate::observe::access_log;
+use crate::observe::{access_log, tracing};
 use podgate_model::{App, EntryPointPolicy, Router};
 use serde_json::Value;
 
@@ -69,6 +69,7 @@ pub struct CompiledRouter {
     chain_digest: u64,
     access_log: Option<bool>,
     matcher_json: Value,
+    tracing: Option<bool>,
 }
 
 impl CompiledRouter {
@@ -119,6 +120,10 @@ impl CompiledRouter {
                 .as_ref()
                 .and_then(access_log::router_override),
             matcher_json: router.matcher.clone(),
+            tracing: router
+                .observability
+                .as_ref()
+                .and_then(tracing::router_override),
         })
     }
 
@@ -228,6 +233,12 @@ impl CompiledRouter {
     #[must_use]
     pub fn access_log(&self) -> Option<bool> {
         self.access_log
+    }
+
+    /// The router's own tracing switch: `Some(false)` turns it off, `Some(true)` turns it on.
+    #[must_use]
+    pub fn tracing(&self) -> Option<bool> {
+        self.tracing
     }
 
     /// The effective middleware chain: indices into the app's stages.

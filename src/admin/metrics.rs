@@ -24,6 +24,7 @@ async fn scrape(State(state): State<AppState>) -> impl IntoResponse {
             state.backends(),
             state.upstream_policy(),
             state.access_log(),
+            state.tracer(),
         ),
     )
 }

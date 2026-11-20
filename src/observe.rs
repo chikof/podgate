@@ -1,10 +1,10 @@
 //! Access log, metrics and tracing. The model is in [`podgate_model::Observability`]. The access
-//! log is built ([`access_log`]); metrics and tracing are not, and a snapshot that sets them is
-//! refused with `observability_not_built` rather than silently recording nothing.
+//! log ([`access_log`]) and tracing ([`tracing`]) are built; metrics are not, and a snapshot that
+//! sets them is refused with `observability_not_built` rather than silently recording nothing.
 
 pub mod access_log;
 pub mod metrics;
-mod tracing;
+pub mod tracing;
 
 use crate::compile::Invalid;
 use podgate_model::{Router, Snapshot};
@@ -16,10 +16,13 @@ pub fn reject(snapshot: &Snapshot) -> Option<Invalid> {
     if let Err(invalid) = access_log::compile(snapshot) {
         return Some(invalid);
     }
+    if let Err(invalid) = tracing::compile(snapshot) {
+        return Some(invalid);
+    }
     let snapshot_wide = snapshot
         .observability
         .as_ref()
-        .is_some_and(|set| set.metrics.is_some() || set.tracing.is_some());
+        .is_some_and(|set| set.metrics.is_some());
     if snapshot_wide {
         return Some(not_built());
     }
@@ -47,7 +50,14 @@ fn reject_router(router: &Router) -> Option<Invalid> {
                     format!("router {}: access_log must be true or false", router.name),
                 ));
             }
-            "metrics" | "tracing" => return Some(not_built()),
+            "tracing" if value.is_boolean() => {}
+            "tracing" => {
+                return Some(Invalid::new(
+                    "invalid_tracing",
+                    format!("router {}: tracing must be true or false", router.name),
+                ));
+            }
+            "metrics" => return Some(not_built()),
             other => {
                 return Some(Invalid::new(
                     "invalid_observability",
@@ -65,6 +75,6 @@ fn reject_router(router: &Router) -> Option<Invalid> {
 fn not_built() -> Invalid {
     Invalid::new(
         "observability_not_built",
-        "metrics and tracing settings are planned and not built yet",
+        "metrics settings are planned and not built yet",
     )
 }

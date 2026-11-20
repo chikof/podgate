@@ -59,6 +59,7 @@ use crate::inflight::{Inflight, InflightGuard};
 use crate::middleware::{self, Flow, RequestCx};
 use crate::observe::access_log::{self, AccessLog};
 use crate::observe::metrics;
+use crate::observe::tracing as trace;
 use crate::outcomes::{self, Outcomes};
 use crate::pool;
 use crate::respond;
@@ -132,6 +133,8 @@ pub struct Ctx {
     /// Counts the request open on its entry point and records it in `logging`, under its
     /// entry point, router and service (see [`crate::observe::metrics`]).
     pub metrics: metrics::InFlight,
+    /// The trace context of the request and its sampling verdict.
+    pub trace: trace::State,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -152,6 +155,7 @@ pub struct Gateway {
     entry: Arc<metrics::EntrySeries>,
     events: EventFeed,
     access_log: Option<AccessLog>,
+    tracer: trace::Tracer,
 }
 
 impl Gateway {
@@ -176,6 +180,7 @@ impl Gateway {
             entry_point: Arc::from(entry::WEB),
             access_log: None,
             entry: Arc::default(),
+            tracer: trace::Tracer::default(),
         }
     }
 
@@ -259,6 +264,14 @@ impl Gateway {
     #[must_use]
     pub fn with_access_log(mut self, access_log: AccessLog) -> Self {
         self.access_log = Some(access_log);
+        self
+    }
+
+    /// Traces requests through `tracer`: the per-node rate cap and the span queue the exporter
+    /// drains. Without this a gateway still propagates trace context but exports nothing.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: trace::Tracer) -> Self {
+        self.tracer = tracer;
         self
     }
 
@@ -367,6 +380,7 @@ impl ProxyHttp for Gateway {
             lease: None,
             access: access_log::Pending::new(),
             metrics: metrics::InFlight::begin(&self.entry),
+            trace: trace::State::default(),
         }
     }
 
@@ -414,6 +428,7 @@ impl ProxyHttp for Gateway {
             return Ok(true);
         };
         ctx.matched = Some(matched);
+        trace::begin(&self.tracer, session, ctx);
         let keep_bodies = ctx
             .table
             .app(matched.app)
@@ -512,6 +527,7 @@ impl ProxyHttp for Gateway {
                 &mut ctx.chain,
             )?;
         }
+        ctx.trace.inject(upstream_request)?;
         Ok(())
     }
 
@@ -584,6 +600,7 @@ impl ProxyHttp for Gateway {
         if end_of_stream {
             ctx.backend.release();
             ctx.access.upstream_done();
+            ctx.trace.upstream_done();
         }
         Ok(None)
     }
@@ -598,6 +615,7 @@ impl ProxyHttp for Gateway {
         }
         self.finish_chain(session, error, ctx);
         access_log::log(self.access_log.as_ref(), session, ctx);
+        trace::finish(&self.tracer, session, error, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
         ctx.backend.release();
@@ -614,6 +632,7 @@ impl ProxyHttp for Gateway {
             .ok_or_else(|| Error::explain(InternalError, "upstream_peer without a route"))?;
         // The one place a proxied request dials: every address, whatever produced it, is checked.
         self.check_upstream(&ctx.table, &selected)?;
+        ctx.trace.upstream_starting();
         let outside = || Error::explain(InternalError, "route points outside the table");
         let upstream = ctx
             .table
@@ -675,6 +694,7 @@ impl ProxyHttp for Gateway {
             lease.responded(status);
         }
         ctx.access.upstream_responded();
+        ctx.trace.upstream_responded(status);
         Ok(())
     }
 

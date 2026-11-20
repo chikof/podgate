@@ -35,6 +35,8 @@
 //!   queue and a stdout or file sink that never delays a request.
 //! - [`service::health`]: active health checks: probes each declared server of a service with a
 //!   `health_check` and writes the flag the balancers read.
+//! - [`observe::tracing`]: OpenTelemetry tracing: W3C trace context to the upstream, spans exported over OTLP/HTTP
+//!   to the operator's collector from a bounded queue, a node-wide rate cap on what gets traced.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -98,6 +100,7 @@ pub use failures::Failures;
 pub use fairq::Backends;
 pub use inflight::{Inflight, InflightGuard};
 pub use observe::access_log::AccessLog;
+pub use observe::tracing::Tracer;
 pub use outcomes::Outcomes;
 pub use proxy::{Ctx, Gateway};
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
@@ -115,7 +118,7 @@ pub use wake::{Wake, WakeService};
 ///
 /// Fails when `UPSTREAM_POLICY_FILE` is invalid, an entry point is `tcp` or `udp` or sets
 /// `proxy_protocol` (not built yet), a TLS listener cannot be configured, or the admin socket
-/// cannot be bound.
+/// cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let table = TableHandle::with_context(
@@ -145,6 +148,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         Some(path) => Box::new(observe::access_log::FileSink::new(path.clone())),
         None => Box::new(observe::access_log::StdoutSink),
     };
+    let tracer = config.otel.tracer();
     let timeout = config.request_timeout();
 
     let server_conf = ServerConf {
@@ -164,6 +168,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_outcomes(outcomes.clone())
         .with_upstream_policy(upstream_policy.clone())
         .with_access_log(access_log.clone())
+        .with_tracer(tracer.clone())
         .with_events(events.clone())
         .with_wasm(wasm::Executor::new(
             config.wasm_max_concurrent.get(),
@@ -216,11 +221,14 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             "metrics",
             observe::metrics::MetricsService::new(
                 listener,
-                table.clone(),
-                budgets.clone(),
-                backends.clone(),
-                upstream_policy.clone(),
-                access_log.clone(),
+                observe::metrics::Sources {
+                    table: table.clone(),
+                    budgets: budgets.clone(),
+                    backends: backends.clone(),
+                    upstream_policy: upstream_policy.clone(),
+                    access_log: access_log.clone(),
+                    tracer: tracer.clone(),
+                },
                 timeout,
             ),
         ));
@@ -230,6 +238,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         "access log",
         access_log.service(access_sink),
     ));
+    if let Some(exporter) = observe::tracing::TraceService::new(&tracer, &config.otel)? {
+        server.add_service(background_service("trace exporter", exporter));
+    }
     server.add_service(background_service(
         "scale to zero",
         WakeService::new(wake, table.clone()),
@@ -255,6 +266,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 .with_backends(backends)
                 .with_failures(failures)
                 .with_access_log(access_log)
+                .with_tracer(tracer)
                 .with_upstream_policy(upstream_policy)
                 .with_outcomes(outcomes)
                 .with_entry_points(config.entry_points.clone())
