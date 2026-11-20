@@ -8,6 +8,7 @@
 //! - [`Snapshot`]: the JSON model of a pushed snapshot.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
+//! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
 //!   report drained revisions into it.
@@ -24,6 +25,7 @@ pub mod error;
 pub mod events;
 pub mod host;
 pub mod inflight;
+pub mod pool;
 pub mod proxy;
 pub mod respond;
 pub mod route;

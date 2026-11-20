@@ -11,6 +11,7 @@
 //!
 //! Core host routing is `route.rs`; this file never matches hosts or picks backends itself.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use crate::budget::{self, Budgets, TenantSlot};
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::inflight::{Inflight, InflightGuard};
+use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::sni;
@@ -53,6 +55,8 @@ pub struct Ctx {
     pub tenant_slot: Option<TenantSlot>,
     /// The gzip encoder of this response, when it is being compressed.
     pub compression: Option<Gzip>,
+    /// Pool partition state of the downstream connection, see [`pool`].
+    pub pool: pool::State,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -97,6 +101,7 @@ impl ProxyHttp for Gateway {
             inflight: None,
             tenant_slot: None,
             compression: None,
+            pool: pool::State::default(),
         }
     }
 
@@ -170,7 +175,7 @@ impl ProxyHttp for Gateway {
 
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Ctx,
     ) -> pingora::Result<Box<HttpPeer>> {
         let selected = ctx
@@ -180,6 +185,27 @@ impl ProxyHttp for Gateway {
         peer.options.connection_timeout = Some(self.upstream_timeout);
         peer.options.read_timeout = Some(self.upstream_timeout);
         peer.options.write_timeout = Some(self.upstream_timeout);
+        let identity = pool::Identity::of(&ctx.table, &selected)
+            .ok_or_else(|| Error::explain(InternalError, "route points outside the table"))?;
+        pool::observe(&mut ctx.pool, session.req_header());
+        pool::isolate(&mut peer, identity, ctx.pool, session);
         Ok(Box::new(peer))
+    }
+
+    fn persist_connection_context(
+        &self,
+        _session: &Session,
+        ctx: &Ctx,
+    ) -> Option<Box<dyn Any + Send + Sync>> {
+        pool::persist(ctx.pool)
+    }
+
+    fn on_connection_reuse(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+        prev_ctx: Box<dyn Any + Send + Sync>,
+    ) {
+        pool::restore(&mut ctx.pool, prev_ctx);
     }
 }
