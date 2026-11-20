@@ -28,9 +28,10 @@
 //! The verdict is memoized per connection for 30 seconds, so a request costs a signature check
 //! once per connection and app, not once per request.
 //!
-//! An app that sets `tls.pass_client_cert` also receives the verified certificate's subject in
-//! [`SUBJECT_HEADER`]. The header is removed from every request first, so a client cannot set
-//! it.
+//! The certificate also reaches the app's upstream, when the route has a `pass_tls_client_cert`
+//! middleware: `verified_chain` gives it the chain only when this app's CA accepted it.
+//! The `x-forwarded-tls-client-cert*` request headers are removed earlier, in the entry stage
+//! (`middleware::pass_tls_client_cert::strip`), whatever the app is.
 
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -52,12 +53,8 @@ use thiserror::Error;
 use crate::error::AppError;
 use crate::router::Matched;
 use crate::sni;
-use crate::table::RoutingTable;
+use crate::table::{CompiledApp, RoutingTable};
 use podgate_model::{App, ClientAuthMode};
-
-/// The request header that carries the verified client certificate's subject to an app with
-/// `pass_client_cert`. Removed from every incoming request.
-pub const SUBJECT_HEADER: &str = "x-forwarded-tls-client-cert-subject";
 
 /// How long a connection's verdict on its client certificate is reused before the chain is
 /// checked again, so a certificate that expires mid-connection stops working soon after.
@@ -134,8 +131,7 @@ impl ClientAuth {
     ///
     /// [`Rejection`] when the PEM holds no certificate, a block that is not one, or a
     /// certificate that cannot be a trust anchor; when a mode that judges the chain has no CA
-    /// or a mode that does not has one; or when `pass_client_cert` asks for a subject nobody
-    /// verified.
+    /// or a mode that does not has one.
     pub fn compile(app: &App) -> Result<Option<Arc<Self>>, Rejection> {
         let tls = &app.tls;
         let mode = match (tls.client_auth, &tls.client_ca_pem) {
@@ -176,14 +172,6 @@ impl ClientAuth {
                     .map_err(|reason| reject("invalid_client_ca", "tls.client_ca_pem", reason))?,
             ),
         };
-        if tls.pass_client_cert && !judges {
-            return Err(reject(
-                "invalid_client_auth",
-                "tls.pass_client_cert",
-                "passes only a verified certificate: use verify_if_given or require_and_verify"
-                    .into(),
-            ));
-        }
         Ok(Some(Arc::new(Self { mode, verifier })))
     }
 
@@ -191,6 +179,12 @@ impl ClientAuth {
     #[must_use]
     pub fn mode(&self) -> ClientAuthMode {
         self.mode
+    }
+
+    /// Whether this mode judges the chain a client sends (`verify_if_given`,
+    /// `require_and_verify`): only then is a certificate that got through verified.
+    fn judges(&self) -> bool {
+        self.verifier.is_some()
     }
 
     /// Whether `chain` (leaf first) is valid now and signed by this CA.
@@ -285,29 +279,11 @@ impl ClientChain {
         });
         accepted
     }
-
-    /// The leaf's subject, one line of printable ASCII (anything else becomes `?`).
-    fn subject(&self) -> Option<String> {
-        let (_, leaf) = x509_parser::parse_x509_certificate(self.certs.first()?).ok()?;
-        let subject = leaf.subject().to_string();
-        Some(
-            subject
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_graphic() || c == ' ' {
-                        c
-                    } else {
-                        '?'
-                    }
-                })
-                .collect(),
-        )
-    }
 }
 
-/// Checks the client certificate of a request against the app of the router it matched, and
-/// fills or clears [`SUBJECT_HEADER`]. Runs right after the match and the SNI check, before the
-/// middleware chain and anything else that answers.
+/// Checks the client certificate of a request against the app of the router it matched. Runs
+/// right after the match and the SNI check, before the middleware chain and anything else that
+/// answers.
 ///
 /// The app is the one the v2 router actually matched, whatever kind of router it was (exact
 /// host, wildcard, `host_regexp`, no host at all): there is no second host lookup that could
@@ -322,33 +298,38 @@ impl ClientChain {
 /// `require_and_verify` (including every plain HTTP connection), a chain its CA refuses for
 /// `verify_if_given`.
 pub fn admit(
-    session: &mut Session,
+    session: &Session,
     table: &RoutingTable,
     matched: Option<Matched>,
 ) -> Result<(), AppError> {
-    session.req_header_mut().remove_header(SUBJECT_HEADER);
     let Some(app) = matched.and_then(|matched| table.app(matched.app)) else {
         return Ok(());
     };
     let Some(auth) = app.client_auth() else {
         return Ok(());
     };
-    let chain = sni::client_chain(session);
-    if !allows(auth, chain) {
-        return Err(AppError::ClientCertRequired);
+    if allows(auth, sni::client_chain(session)) {
+        Ok(())
+    } else {
+        Err(AppError::ClientCertRequired)
     }
-    let subject = app
-        .tls()
-        .pass_client_cert
-        .then(|| chain.and_then(ClientChain::subject))
-        .flatten();
-    if let Some(subject) = subject {
-        session
-            .req_header_mut()
-            .insert_header(SUBJECT_HEADER, subject)
-            .map_err(|err| AppError::Internal(anyhow::anyhow!("subject header: {err}")))?;
-    }
-    Ok(())
+}
+
+/// The certificates (leaf first, as the client sent them) of the session's TLS connection, when
+/// `app`'s client CA accepted them: the app's own `tls.client_ca_pem` judged this chain, never
+/// the CA of the app the TLS handshake was for. `None` on plain HTTP, when the client sent no
+/// certificate, when `app` has no client authentication, and for the modes that do not judge
+/// the chain (`request`, `require`): a certificate nobody verified is never passed on.
+///
+/// Only the first certificate is the one the CA signed; the others are what the client sent
+/// along and are not judged.
+pub(crate) fn verified_chain<'a>(
+    session: &'a Session,
+    app: &CompiledApp,
+) -> Option<&'a [CertificateDer<'static>]> {
+    let auth = app.client_auth()?;
+    let chain = sni::client_chain(session)?;
+    (auth.judges() && chain.satisfies(auth)).then_some(chain.certs.as_slice())
 }
 
 /// The listener's client certificate verifier: requests a certificate only when the resolver

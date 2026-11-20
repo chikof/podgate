@@ -11,6 +11,9 @@
 //! 2. `entry_point`: normalizes the path (the path that is matched is the path that is served),
 //!    so a request with an unsafe path is refused first, then settles who the client is: the
 //!    forwarding headers of a peer the entry point does not trust are removed ([`crate::client_ip`]).
+//!    The `x-forwarded-tls-client-cert*` headers are removed from every request, trusted peer or
+//!    not ([`crate::middleware::pass_tls_client_cert::strip`]); only the `pass_tls_client_cert`
+//!    middleware writes them, later, in the chain.
 //! 3. `route`: picks the router. No match is `404`.
 //! 4. `sni_check`: over TLS, the matched app decides whether a request may name a host other
 //!    than the SNI. It runs for requests no router matched too (they get `421`, not `404`).

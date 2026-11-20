@@ -396,6 +396,8 @@ impl ProxyHttp for Gateway {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
+        // Whatever the route: no client-supplied certificate header ever reaches an upstream.
+        middleware::pass_tls_client_cert::strip(session.req_header_mut());
         ctx.forwarded =
             ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point));
         let found = route::matching(

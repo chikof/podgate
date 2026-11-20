@@ -795,11 +795,19 @@ impl TestCa {
 
     /// A client certificate with common name `common_name`, signed by this CA.
     pub fn client(&self, common_name: &str) -> TestClient {
+        self.client_with(|params| {
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, common_name);
+        })
+    }
+
+    /// A client certificate signed by this CA whose parameters (names, alternative names,
+    /// serial, validity) `edit` fills in.
+    pub fn client_with(&self, edit: impl FnOnce(&mut rcgen::CertificateParams)) -> TestClient {
         let key = rcgen::KeyPair::generate().expect("client key");
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
-        params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, common_name);
+        edit(&mut params);
         let cert = params
             .signed_by(&key, &self.issuer)
             .expect("sign client certificate");
@@ -821,11 +829,30 @@ impl Podgate {
         host: &str,
         path: &str,
     ) -> std::io::Result<Response> {
+        self.try_https_get_with_headers(config, sni, host, path, &[])
+            .await
+    }
+
+    /// [`Self::try_https_get`] with extra request headers (repeat a name to send it twice).
+    pub async fn try_https_get_with_headers(
+        &self,
+        config: Arc<rustls::ClientConfig>,
+        sni: &str,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> std::io::Result<Response> {
         let name = rustls::pki_types::ServerName::try_from(sni.to_owned()).expect("server name");
+        let extra: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n");
         timeout(IO_TIMEOUT, async {
             let tcp = TcpStream::connect(self.tls_addr).await?;
             let mut stream = TlsConnector::from(config).connect(name, tcp).await?;
-            stream.write_all(get_request(host, path).as_bytes()).await?;
+            stream.write_all(request.as_bytes()).await?;
             let mut raw = Vec::new();
             stream.read_to_end(&mut raw).await?;
             if raw.is_empty() {

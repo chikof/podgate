@@ -364,7 +364,6 @@ async fn tls_client_auth_modes() {
         json!({"client_auth": "verify_if_given"}),
         json!({"client_auth": "require_and_verify"}),
         json!({"client_auth": "require", "client_ca_pem": ca.pem}),
-        json!({"client_auth": "request", "pass_client_cert": true}),
     ];
     for (version, tls) in (2_u64..).zip(&invalid) {
         let pushed = snapshot(version, &[with_tls("bad", &["bad.test"], &upstream, tls)]);

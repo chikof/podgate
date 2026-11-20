@@ -43,6 +43,7 @@ pub mod content_type;
 pub mod digest_auth;
 pub mod headers;
 pub mod ip_allow_list;
+pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod redirect;
 pub mod redirect_regex;
@@ -489,7 +490,7 @@ kinds! {
 
     "errors" => unbuilt,
 
-    "pass_tls_client_cert" => unbuilt,
+    "pass_tls_client_cert" => PassTlsClientCert(pass_tls_client_cert::PassTlsClientCert),
 
     "grpc_web" => unbuilt,
 

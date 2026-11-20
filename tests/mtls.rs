@@ -7,7 +7,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{Podgate, TestCa, TestCert, TestClient, Upstream, app, serving, snapshot};
+use common::{
+    Podgate, TestCa, TestCert, TestClient, Upstream, app, serving, snapshot, with_middleware,
+};
 use rustls::client::ResolvesClientCert;
 use rustls::crypto::ring::default_provider;
 use rustls::sign::CertifiedKey;
@@ -16,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const SUBJECT_HEADER: &str = "x-forwarded-tls-client-cert-subject";
+const INFO_HEADER: &str = "x-forwarded-tls-client-cert-info";
 
 /// Records whether the server asked for a client certificate, and answers with `client`'s.
 #[derive(Debug)]
@@ -79,8 +81,8 @@ fn tls12() -> &'static [&'static SupportedProtocolVersion] {
     &VERSIONS
 }
 
-/// A backend that answers with the value of [`SUBJECT_HEADER`] in the request, or `none`.
-async fn echo_subject_upstream() -> SocketAddr {
+/// A backend that answers with the value of [`INFO_HEADER`] in the request, or `none`.
+async fn echo_info_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
     let addr = listener.local_addr().expect("echo addr");
     tokio::spawn(async move {
@@ -97,11 +99,12 @@ async fn echo_subject_upstream() -> SocketAddr {
                         Ok(read) => head.extend_from_slice(&chunk[..read]),
                     }
                 }
-                let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let text = String::from_utf8_lossy(&head);
                 let body = text
                     .lines()
-                    .find_map(|line| line.strip_prefix(&format!("{SUBJECT_HEADER}:")))
-                    .map_or("none".to_owned(), |value| value.trim().to_owned());
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case(INFO_HEADER))
+                    .map_or("none".to_owned(), |(_, value)| value.trim().to_owned());
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -304,14 +307,19 @@ async fn mtls_host_regexp_router_requires_cert() {
 }
 
 #[tokio::test]
-async fn mtls_pass_client_cert_subject() {
+async fn mtls_pass_tls_client_cert_info() {
     let podgate = Podgate::start().await;
-    let echo = echo_subject_upstream().await;
+    let echo = echo_info_upstream().await;
     let server = TestCert::new(&["pass.test", "quiet.test"]);
     let ca = TestCa::new("trusted ca");
     let mut pass = app("pass", &["pass.test"], &[serving("r1", echo)]);
     pass["tls"]["client_ca_pem"] = json!(ca.pem);
-    pass["tls"]["pass_client_cert"] = json!(true);
+    let pass = with_middleware(
+        pass,
+        "cert",
+        "pass_tls_client_cert",
+        json!({ "info": { "subject": { "common_name": true } } }),
+    );
     let mut quiet = app("quiet", &["quiet.test"], &[serving("r1", echo)]);
     quiet["tls"]["client_ca_pem"] = json!(ca.pem);
     let open = app("open", &["open.test"], &[serving("r1", echo)]);
@@ -321,25 +329,28 @@ async fn mtls_pass_client_cert_subject() {
     let alice = ca.client("alice");
 
     let (config, _) = client_config(&server, Some(&alice), tls13());
-    let opted_in = podgate
+    let with_middleware_on_route = podgate
         .try_https_get(config, "pass.test", "pass.test", "/")
         .await
         .expect("handshake and response");
-    assert_eq!(opted_in.status, 200, "{opted_in:?}");
     assert_eq!(
-        opted_in.body, "cn=alice",
+        with_middleware_on_route.status, 200,
+        "{with_middleware_on_route:?}"
+    );
+    assert_eq!(
+        with_middleware_on_route.body, "Subject%3D%22CN%3Dalice%22",
         "subject of the verified certificate"
     );
 
     let (config, _) = client_config(&server, Some(&alice), tls13());
-    let not_opted_in = podgate
+    let without_middleware = podgate
         .try_https_get(config, "quiet.test", "quiet.test", "/")
         .await
         .expect("handshake and response");
-    assert_eq!(not_opted_in.body, "none", "no opt-in, no header");
+    assert_eq!(without_middleware.body, "none", "no middleware, no header");
 
     let spoofed = podgate
-        .get_with_headers("open.test", "/", &[(SUBJECT_HEADER, "CN=evil")])
+        .get_with_headers("open.test", "/", &[(INFO_HEADER, "Subject=\"CN=evil\"")])
         .await;
     assert_eq!(
         spoofed.body, "none",

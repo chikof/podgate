@@ -247,11 +247,6 @@ pub struct TlsPolicy {
     /// PEM of the CA that must sign client certificates. Absent: no client authentication.
     #[serde(default)]
     pub client_ca_pem: Option<String>,
-    /// Pass the verified client certificate's subject to the app in the
-    /// `x-forwarded-tls-client-cert-subject` request header. Needs `client_ca_pem`.
-    /// Absent: the header is never sent.
-    #[serde(default)]
-    pub pass_client_cert: bool,
     /// How the issuer proves the app's hosts to the CA. Absent: `http-01`.
     #[serde(default)]
     pub challenge: ChallengeKind,
@@ -295,7 +290,7 @@ fn is_false(value: &bool) -> bool {
 
 impl TlsPolicy {
     /// Whether `self` and `other` ask the same of a TLS handshake: everything but where
-    /// certificates come from (the ACME `challenge` is compared, though) and `pass_client_cert`.
+    /// certificates come from (the ACME `challenge` is compared, though).
     /// Apps that share a host must agree on it.
     #[must_use]
     pub fn same_handshake_policy(&self, other: &Self) -> bool {
@@ -545,7 +540,7 @@ mod test {
                 "id": "shop",
                 "tenant": "acme",
                 "declared_by": "podkit/agent",
-                "tls": {"mode": "on_demand", "client_ca_pem": "ca", "pass_client_cert": true, "challenge": "dns-01"},
+                "tls": {"mode": "on_demand", "client_ca_pem": "ca", "challenge": "dns-01"},
                 "routers": [{
                     "name": "web",
                     "entry_points": ["websecure"],
