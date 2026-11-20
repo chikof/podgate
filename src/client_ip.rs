@@ -15,6 +15,8 @@
 //! All addresses are normalized first: an IPv4-mapped IPv6 address (`::ffff:10.0.0.1`) becomes
 //! the IPv4 address, so an IPv4 allow list cannot be bypassed by writing the address in IPv6.
 
+pub mod set;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

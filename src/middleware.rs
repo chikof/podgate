@@ -42,6 +42,7 @@ pub mod compress;
 pub mod content_type;
 pub mod digest_auth;
 pub mod headers;
+pub mod ip_allow_list;
 mod path_rewrite;
 pub mod redirect;
 pub mod redirect_regex;
@@ -469,7 +470,7 @@ kinds! {
 
     "forward_auth" => unbuilt,
 
-    "ip_allow_list" => unbuilt,
+    "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => unbuilt,
 
