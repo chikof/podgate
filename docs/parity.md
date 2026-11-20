@@ -15,7 +15,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Per-router entry point list | `entryPoints` on a router | site address | built (unbound names rejected as `unknown_entry_point`, `tcp` and `udp` ones as `entry_point_protocol`) |
 | Per-tenant entry point access | none | none | built (`EntryPointPolicy.tenants`, `entry_point_forbidden`) |
 | TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 parses them (startup stops naming the entry point), 0058, 0062 |
-| `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | 0097 (Traefik's set minus `-Server`, which is opt-in; found missing by the 0020 benchmark) |
+| `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | built: X-Forwarded-For, -Proto, -Host, -Port and X-Real-IP by default (Traefik's set minus -Server, which is `forwarded.server: true`); `forwarded.rfc7239` adds `Forwarded`; forged inbound values of untrusted peers are removed |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | 0030 |
 | Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | 0030 (each knob works or is rejected as `unsupported_setting`) |
