@@ -69,6 +69,7 @@ use crate::service::{Lease, outlier, sticky};
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
+use crate::tls;
 use crate::wake::{self, Wake};
 use crate::wasm;
 
@@ -393,6 +394,12 @@ impl ProxyHttp for Gateway {
         // Right after matching and before anything answers: a misdirected request gets `421`
         // whether or not a router matched, and the matched app decides fronting.
         if let Err(err) = sni::check(session, &ctx.table, found) {
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+        // The TLS options of the matched app (version, suite, ALPN), judged on what the
+        // connection negotiated.
+        if let Err(err) = tls::enforce(session, &ctx.table, found) {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }

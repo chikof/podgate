@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use crate::router::path::{self, Refused};
 use crate::service::upstream_policy::UpstreamPolicy;
+use podgate_model::TlsVersion;
 
 /// The built-in plain HTTP entry point.
 pub const WEB: &str = "web";
@@ -229,6 +230,7 @@ pub struct CompileContext {
     catch_all_tenants: Vec<Box<str>>,
     acme_dns_zones: Vec<Box<str>>,
     upstream_policy: UpstreamPolicy,
+    tls_floor: TlsVersion,
 }
 
 impl Default for CompileContext {
@@ -250,6 +252,7 @@ impl CompileContext {
             catch_all_tenants: Vec::new(),
             acme_dns_zones: Vec::new(),
             upstream_policy: UpstreamPolicy::allow_all(),
+            tls_floor: TlsVersion::V1_2,
         }
     }
 
@@ -292,6 +295,20 @@ impl CompileContext {
     pub fn with_upstream_policy(mut self, policy: UpstreamPolicy) -> Self {
         self.upstream_policy = policy;
         self
+    }
+
+    /// Sets the lowest TLS version the process serves (`TLS_MIN_VERSION`); an app's
+    /// `tls.min_version` below it is refused with `unsupported_setting`.
+    #[must_use]
+    pub fn with_tls_floor(mut self, floor: TlsVersion) -> Self {
+        self.tls_floor = floor;
+        self
+    }
+
+    /// The lowest TLS version the process serves.
+    #[must_use]
+    pub fn tls_floor(&self) -> TlsVersion {
+        self.tls_floor
     }
 
     /// The policy the compiler checks literal server addresses against.

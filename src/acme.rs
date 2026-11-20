@@ -17,7 +17,7 @@
 //!    and renews at a random point inside it, replacing the old certificate; without ARI it
 //!    renews at two thirds of the lifetime. Renewing is the same round trip as issuing.
 //! 4. **On demand.** A TLS handshake for a host of an `on_demand` app that has no certificate
-//!    waits, bounded, for one (the pre-TLS hook on [`Acme`]). Every node, the issuer too, emits
+//!    waits, bounded, for one (the pre-TLS hook, [`crate::tls::PreHandshake`]). Every node, the issuer too, emits
 //!    `certificate_requested {host}` once per pending period; the control plane approves by
 //!    listing the host in `acme.requested_hosts`, and only then does the issuer order it. A
 //!    client can therefore never make podgate spend the CA's rate limits. A host of no app never
@@ -30,7 +30,7 @@
 //!
 //! Pingora's rustls backend has no async certificate callback (`certificate_callback` is
 //! OpenSSL-only) and rustls' `ResolvesServerCert` is synchronous, so the wait happens before
-//! the handshake starts: [`Acme`] is installed as Pingora's pre-TLS hook, reads the ClientHello
+//! the handshake starts: [`crate::tls::PreHandshake`] is Pingora's pre-TLS hook; it reads the ClientHello
 //! to learn the SNI, waits, and hands the bytes back to the handshake.
 
 pub(crate) mod dns01;
@@ -100,7 +100,7 @@ struct Shared {
 /// The ACME machinery of one node. Cheap to clone; every clone is the same node.
 ///
 /// Run one clone as a Pingora background service (it only acts when this node is the issuer)
-/// and install another as the listener's pre-TLS hook.
+/// and hand another to [`crate::tls::PreHandshake`], the listener's pre-TLS hook.
 #[derive(Debug, Clone)]
 pub struct Acme {
     shared: Arc<Shared>,

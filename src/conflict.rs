@@ -18,8 +18,9 @@
 //!   `*.a.test`; `a.test` and `*.y.a.test` are not.
 //! - A claim under another tenant's wildcard: [`Conflict::CrossTenantWildcard`].
 //! - A claim under a wildcard of the same tenant, in another app, or a pattern two apps of one
-//!   tenant share, with a different `tls.client_ca_pem` (compared as written, `None` against
-//!   `Some` included; a pattern two apps share must also agree on `tls.challenge`):
+//!   tenant share, with a different TLS handshake policy (`tls.client_ca_pem`, `client_auth`, the version,
+//!   suite, ALPN and SNI options of change 0057, and the ACME `challenge`; compared as written,
+//!   `None` against `Some` included):
 //!   [`Conflict::TlsPolicy`]. TLS is decided per host at the handshake, before
 //!   any path is known, and exact beats wildcard when routing, so without this rule an app could
 //!   drop or swap the client-certificate requirement of its neighbour.
@@ -80,9 +81,9 @@ pub enum Conflict {
         /// Their `declared_by` values: the router's own, else its app's.
         declared_by: [Box<str>; 2],
     },
-    /// A claim and the wildcard above it, both of one tenant, disagree on `client_ca_pem`.
+    /// A claim and the wildcard above it, both of one tenant, disagree on the TLS handshake policy.
     #[error(
-        "host {host} of app {} ({}) and wildcard {wildcard} of app {} ({}) disagree on client_ca_pem",
+        "host {host} of app {} ({}) and wildcard {wildcard} of app {} ({}) disagree on the TLS handshake policy (client CA, client_auth or TLS options)",
         .apps[0], .declared_by[0], .apps[1], .declared_by[1]
     )]
     TlsPolicy {
@@ -360,8 +361,7 @@ pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Confl
                 } else if a.app != b.app
                     && settled.insert((a.app.min(b.app), a.app.max(b.app)))
                     && let (Some(one), Some(two)) = (world.app(a.app), world.app(b.app))
-                    && (one.tls.client_ca_pem != two.tls.client_ca_pem
-                        || one.tls.challenge != two.tls.challenge)
+                    && !one.tls.same_handshake_policy(&two.tls)
                 {
                     found.push(Conflict::TlsPolicy {
                         host: host.clone(),
@@ -423,7 +423,7 @@ pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Confl
                     apps,
                     declared_by,
                 });
-            } else if app.tls.client_ca_pem != owner.tls.client_ca_pem {
+            } else if !app.tls.same_handshake_policy(&owner.tls) {
                 found.push(Conflict::TlsPolicy {
                     host,
                     wildcard,

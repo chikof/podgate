@@ -12,6 +12,7 @@ use crate::entry::{self, EntryPoint};
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
+use podgate_model::TlsVersion;
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
 /// snapshot compiles always find threads.
@@ -73,6 +74,7 @@ const _: () =
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
 /// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
 /// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
+/// | `TLS_MIN_VERSION` | `1.2` | Lowest TLS version the HTTPS entry points serve, `1.2` or `1.3`. Pingora builds one rustls config per listener, so a connection below it is refused after the handshake (`421`), or at the ClientHello when the client offers no TLS 1.3 suite. An app's `tls.min_version` can only raise it. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -119,6 +121,8 @@ pub struct Config {
     /// Series each tenant may own for its routers, services and servers before they collapse
     /// into `other` (see [`crate::observe::metrics`]).
     pub metrics_series_per_tenant: NonZeroU32,
+    /// Lowest TLS version served (`TLS_MIN_VERSION`); the floor of every app's `tls.min_version`.
+    pub tls_min_version: TlsVersion,
 }
 
 impl Default for Config {
@@ -141,6 +145,7 @@ impl Default for Config {
             access_log_file: None,
             metrics_addr: None,
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
+            tls_min_version: TlsVersion::V1_2,
         }
     }
 }
@@ -368,6 +373,18 @@ impl Config {
                     .into(),
             })?;
         }
+        if let Some(raw) = non_empty("TLS_MIN_VERSION")? {
+            config.tls_min_version = match raw.as_str() {
+                "1.2" => TlsVersion::V1_2,
+                "1.3" => TlsVersion::V1_3,
+                _ => {
+                    return Err(ConfigError {
+                        var: "TLS_MIN_VERSION",
+                        reason: format!("{raw:?} is not `1.2` or `1.3`").into(),
+                    });
+                }
+            };
+        }
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -416,6 +433,7 @@ mod test {
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
             ("METRICS_ADDR", "127.0.0.1:9100"),
             ("METRICS_SERIES_PER_TENANT", "50"),
+            ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
         ]);
         assert_eq!(
@@ -437,6 +455,7 @@ mod test {
                 acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
+                tls_min_version: TlsVersion::V1_3,
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
@@ -522,5 +541,13 @@ mod test {
             err.to_string(),
             "invalid ENTRY_POINTS: entry \"b=oops/http\": \"oops\" is not a socket address like 0.0.0.0:8080 (invalid socket address syntax)"
         );
+    }
+
+    #[test]
+    fn tls_min_version_is_1_2_or_1_3() {
+        for bad in ["1.1", "TLS1.3", "1", ""] {
+            let err = config(&[("TLS_MIN_VERSION", bad)]).expect_err(bad);
+            assert_eq!(err.var, "TLS_MIN_VERSION", "{bad:?}");
+        }
     }
 }

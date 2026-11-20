@@ -711,12 +711,7 @@ mod test {
                 id: "a".into(),
                 tenant: "t".into(),
                 declared_by: "test".into(),
-                tls: podgate_model::TlsPolicy {
-                    mode: podgate_model::TlsMode::Acme,
-                    client_ca_pem: None,
-                    pass_client_cert: false,
-                    challenge: podgate_model::ChallengeKind::default(),
-                },
+                tls: serde_json::from_str(r#"{"mode": "acme"}"#).expect("valid tls policy"),
                 routers: Vec::new(),
                 middlewares: Vec::new(),
                 default_chain: Vec::new(),

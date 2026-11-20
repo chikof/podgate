@@ -1,5 +1,8 @@
-//! Client certificate authentication per app: an app with `tls.client_ca_pem` only
-//! serves TLS clients whose certificate chains to that CA.
+//! Client certificate authentication per app: an app with
+//! `tls.client_ca_pem` only serves TLS clients whose certificate chains to that CA. With
+//! `tls.client_auth` the app picks the mode instead: `request` (ask, trust nothing), `require`
+//! (some certificate), `verify_if_given` (a certificate, when sent, must chain to the CA) or
+//! `require_and_verify` (the default with a CA).
 //!
 //! Two layers, because Pingora builds one rustls `ServerConfig` for the whole listener and rustls
 //! asks the config's verifier, not the SNI, whether to request a certificate:
@@ -50,7 +53,7 @@ use crate::error::AppError;
 use crate::router::Matched;
 use crate::sni;
 use crate::table::RoutingTable;
-use podgate_model::App;
+use podgate_model::{App, ClientAuthMode};
 
 /// The request header that carries the verified client certificate's subject to an app with
 /// `pass_client_cert`. Removed from every incoming request.
@@ -77,25 +80,29 @@ fn forget() {
     REQUEST_CERT.set(None);
 }
 
-/// A `tls.client_ca_pem` the compiler refuses, with where it was declared.
+/// A `tls.client_ca_pem` or `tls.client_auth` the compiler refuses, with where it was declared.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("app {app} ({declared_by}) tls.client_ca_pem: {reason}")]
+#[error("app {app} ({declared_by}) {field}: {reason}")]
 pub struct Rejection {
     /// The declaring app.
     pub app: Box<str>,
     /// Its `declared_by` source.
     pub declared_by: Box<str>,
-    /// What is wrong with the PEM.
+    /// The code of the `422` entry: `invalid_client_ca` or `invalid_client_auth`.
+    pub code: &'static str,
+    /// The setting that is wrong.
+    pub field: &'static str,
+    /// What is wrong with it.
     pub reason: Box<str>,
 }
 
 impl Rejection {
-    /// The object in the `conflicts` list of a `422` body: `code` (`invalid_client_ca`),
-    /// `message`, `app` and `declared_by`.
+    /// The object in the `conflicts` list of a `422` body: `code`, `message`, `app` and
+    /// `declared_by`.
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({
-            "code": "invalid_client_ca", "message": self.to_string(),
+            "code": self.code, "message": self.to_string(),
             "app": self.app, "declared_by": self.declared_by,
         })
     }
@@ -110,53 +117,129 @@ pub(crate) fn join(rejections: &[Rejection]) -> String {
         .join("; ")
 }
 
-/// The compiled `client_ca_pem` of one app: judges client certificate chains against it.
+/// The compiled client authentication of one app: whether clients are asked for a certificate,
+/// and the CA that judges the chains they send.
 #[derive(Debug)]
 pub struct ClientAuth {
-    verifier: Arc<dyn ClientCertVerifier>,
+    mode: ClientAuthMode,
+    /// Present for the modes that judge the chain.
+    verifier: Option<Arc<dyn ClientCertVerifier>>,
 }
 
 impl ClientAuth {
-    /// Compiles the client CA of `app`, if it declares one.
+    /// Compiles the client authentication of `app`, if it declares any: `tls.client_auth`, or
+    /// `tls.client_ca_pem` alone, which means `require_and_verify`.
     ///
     /// # Errors
     ///
     /// [`Rejection`] when the PEM holds no certificate, a block that is not one, or a
-    /// certificate that cannot be a trust anchor.
+    /// certificate that cannot be a trust anchor; when a mode that judges the chain has no CA
+    /// or a mode that does not has one; or when `pass_client_cert` asks for a subject nobody
+    /// verified.
     pub fn compile(app: &App) -> Result<Option<Arc<Self>>, Rejection> {
-        let Some(pem) = &app.tls.client_ca_pem else {
-            return Ok(None);
+        let tls = &app.tls;
+        let mode = match (tls.client_auth, &tls.client_ca_pem) {
+            (None, None) => return Ok(None),
+            (None, Some(_)) => ClientAuthMode::RequireAndVerify,
+            (Some(mode), _) => mode,
         };
-        let reject = |reason: String| Rejection {
+        let reject = |code, field, reason: String| Rejection {
             app: app.id.clone(),
             declared_by: app.declared_by.clone(),
+            code,
+            field,
             reason: reason.into(),
         };
-        let mut roots = RootCertStore::empty();
-        for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
-            let cert = cert.map_err(|err| reject(err.to_string()))?;
-            roots.add(cert).map_err(|err| reject(err.to_string()))?;
+        let judges = matches!(
+            mode,
+            ClientAuthMode::VerifyIfGiven | ClientAuthMode::RequireAndVerify
+        );
+        let verifier = match (&tls.client_ca_pem, judges) {
+            (None, true) => {
+                return Err(reject(
+                    "invalid_client_auth",
+                    "tls.client_auth",
+                    "this mode judges the chain and needs tls.client_ca_pem".into(),
+                ));
+            }
+            (Some(_), false) => {
+                return Err(reject(
+                    "invalid_client_auth",
+                    "tls.client_auth",
+                    "tls.client_ca_pem is not used by this mode: use verify_if_given or require_and_verify"
+                        .into(),
+                ));
+            }
+            (None, false) => None,
+            (Some(pem), true) => Some(
+                verifier_of(pem)
+                    .map_err(|reason| reject("invalid_client_ca", "tls.client_ca_pem", reason))?,
+            ),
+        };
+        if tls.pass_client_cert && !judges {
+            return Err(reject(
+                "invalid_client_auth",
+                "tls.pass_client_cert",
+                "passes only a verified certificate: use verify_if_given or require_and_verify"
+                    .into(),
+            ));
         }
-        if roots.is_empty() {
-            return Err(reject("holds no certificate".into()));
-        }
-        let verifier = WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots),
-            Arc::new(ring::default_provider()),
-        )
-        .build()
-        .map_err(|err| reject(err.to_string()))?;
-        Ok(Some(Arc::new(Self { verifier })))
+        Ok(Some(Arc::new(Self { mode, verifier })))
+    }
+
+    /// How clients are asked for a certificate.
+    #[must_use]
+    pub fn mode(&self) -> ClientAuthMode {
+        self.mode
     }
 
     /// Whether `chain` (leaf first) is valid now and signed by this CA.
     fn accepts(&self, chain: &[CertificateDer<'_>]) -> bool {
-        let Some((leaf, intermediates)) = chain.split_first() else {
+        let (Some((leaf, intermediates)), Some(verifier)) = (chain.split_first(), &self.verifier)
+        else {
             return false;
         };
-        self.verifier
+        verifier
             .verify_client_cert(leaf, intermediates, UnixTime::now())
             .is_ok()
+    }
+}
+
+/// Whether going from mode `old` to `new` (`None`: no client authentication) asks less of
+/// clients: it drops the requirement or stops judging the chain. Going to `require_and_verify`,
+/// or from `request` to any mode, asks more.
+#[must_use]
+pub(crate) fn relaxes(old: ClientAuthMode, new: Option<ClientAuthMode>) -> bool {
+    match new {
+        None => true,
+        Some(new) => {
+            new != old && new != ClientAuthMode::RequireAndVerify && old != ClientAuthMode::Request
+        }
+    }
+}
+
+/// The verifier of the CA certificates in `pem`.
+fn verifier_of(pem: &str) -> Result<Arc<dyn ClientCertVerifier>, String> {
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.map_err(|err| err.to_string())?;
+        roots.add(cert).map_err(|err| err.to_string())?;
+    }
+    if roots.is_empty() {
+        return Err("holds no certificate".into());
+    }
+    WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::new(ring::default_provider()))
+        .build()
+        .map_err(|err| err.to_string())
+}
+
+/// Whether a connection that presented `chain` (`None`: no certificate) is served under `auth`.
+fn allows(auth: &Arc<ClientAuth>, chain: Option<&ClientChain>) -> bool {
+    match auth.mode {
+        ClientAuthMode::Request => true,
+        ClientAuthMode::Require => chain.is_some(),
+        ClientAuthMode::VerifyIfGiven => chain.is_none_or(|chain| chain.satisfies(auth)),
+        ClientAuthMode::RequireAndVerify => chain.is_some_and(|chain| chain.satisfies(auth)),
     }
 }
 
@@ -234,8 +317,10 @@ impl ClientChain {
 ///
 /// # Errors
 ///
-/// [`AppError::ClientCertRequired`] when the matched app has a client CA and the connection
-/// presented no certificate chain that it accepts, including every plain HTTP connection.
+/// [`AppError::ClientCertRequired`] when the matched app's `tls.client_auth` mode is not
+/// satisfied: no certificate chain for `require`, none that its CA accepts for
+/// `require_and_verify` (including every plain HTTP connection), a chain its CA refuses for
+/// `verify_if_given`.
 pub fn admit(
     session: &mut Session,
     table: &RoutingTable,
@@ -249,7 +334,7 @@ pub fn admit(
         return Ok(());
     };
     let chain = sni::client_chain(session);
-    if !chain.is_some_and(|chain| chain.satisfies(auth)) {
+    if !allows(auth, chain) {
         return Err(AppError::ClientCertRequired);
     }
     let subject = app

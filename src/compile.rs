@@ -32,7 +32,7 @@ use crate::router::{self, CompiledRouter, Tier};
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{self, NamedTransport, Service, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
-use crate::tls::CertStore;
+use crate::tls::{CertStore, Options};
 use crate::wasm as engine;
 use podgate_model::{App, Declared, EntryPointPolicy, RevisionState, SkewSecret, Snapshot};
 
@@ -213,6 +213,21 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     if !bad_cas.is_empty() {
         return Err(CompileError::ClientCa(bad_cas));
     }
+    let mut tls_options = Vec::with_capacity(snapshot.apps.len());
+    let mut rejected = Vec::new();
+    for app in &snapshot.apps {
+        match Options::compile(app, context.tls_floor()) {
+            Ok(compiled) => tls_options.push(compiled),
+            Err(problems) => rejected.extend(
+                problems
+                    .into_iter()
+                    .map(|invalid| Rejected::new(app, "tls".to_owned(), invalid)),
+            ),
+        }
+    }
+    if !rejected.is_empty() {
+        return Err(CompileError::Rejected(rejected));
+    }
 
     let mut engine = engine::Compiler::default();
     let mut rejected = Vec::new();
@@ -248,8 +263,9 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         .zip(routers)
         .zip(parts)
         .zip(client_auth)
+        .zip(tls_options)
         .map(
-            |(((app, routers), (stages, (services, revisions))), client_auth)| {
+            |((((app, routers), (stages, (services, revisions))), client_auth), tls_options)| {
                 CompiledApp::assemble(
                     app,
                     Parts {
@@ -259,6 +275,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                         revisions,
                         fingerprint: fingerprint(app),
                         client_auth,
+                        tls_options,
                     },
                 )
             },

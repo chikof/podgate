@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::clientauth;
 use crate::table::{CompiledApp, RoutingTable};
+use crate::tls::Options;
 use podgate_model::TlsMode;
 
 /// The `kind` strings of the built-in posture changes. Middleware kinds add their own, such as
@@ -34,6 +36,15 @@ pub mod kind {
     /// An `https://` upstream is now reached without verifying its certificate
     /// (`insecure_skip_verify` of a `servers_transport`).
     pub const UPSTREAM_TLS_VERIFICATION_DISABLED: &str = "upstream_tls_verification_disabled";
+    /// The host's clients may now negotiate an older TLS version.
+    pub const TLS_MIN_VERSION_LOWERED: &str = "tls_min_version_lowered";
+    /// The host's clients may now negotiate a cipher suite they could not before.
+    pub const TLS_CIPHER_SUITES_WIDENED: &str = "tls_cipher_suites_widened";
+    /// A name of the host without a certificate is now served the default certificate instead of
+    /// failing the handshake.
+    pub const SNI_STRICT_DISABLED: &str = "sni_strict_disabled";
+    /// The host still asks for client certificates but judges them less.
+    pub const CLIENT_AUTH_RELAXED: &str = "client_auth_relaxed";
 }
 
 /// What stands in the `host` of a [`PostureChange`] that is about an entry point, followed by its
@@ -96,6 +107,16 @@ fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str>
         (Some(old), Some(new)) if old != new => kinds.push(kind::CLIENT_CA_CHANGED),
         _ => {}
     }
+    if let Some(old) = live.client_auth().map(|auth| auth.mode())
+        && !kinds.contains(&kind::CLIENT_CA_REMOVED)
+        && clientauth::relaxes(old, candidate.client_auth().map(|auth| auth.mode()))
+    {
+        kinds.push(kind::CLIENT_AUTH_RELAXED);
+    }
+    kinds.extend(Options::relaxations(
+        live.tls_options(),
+        candidate.tls_options(),
+    ));
     if candidate.allow_domain_fronting() && !live.allow_domain_fronting() {
         kinds.push(kind::DOMAIN_FRONTING_ENABLED);
     }

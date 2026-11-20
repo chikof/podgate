@@ -255,6 +255,86 @@ pub struct TlsPolicy {
     /// How the issuer proves the app's hosts to the CA. Absent: `http-01`.
     #[serde(default)]
     pub challenge: ChallengeKind,
+    /// How client certificates are asked for and judged. Absent: `require_and_verify`
+    /// when `client_ca_pem` is set, no client authentication otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth: Option<ClientAuthMode>,
+    /// Lowest TLS version a connection to this app may have. Absent: the listener's floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_version: Option<TlsVersion>,
+    /// Not enforceable per app: the compiler rejects it with `unsupported_setting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_version: Option<TlsVersion>,
+    /// The cipher suites a connection to this app may negotiate, by rustls name. Absent: every
+    /// suite of the listener.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher_suites: Option<Vec<String>>,
+    /// Not enforceable per app: the compiler rejects it with `unsupported_setting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curves: Option<Vec<String>>,
+    /// The ALPN protocols a connection to this app may negotiate: `h2` and `http/1.1`. Absent:
+    /// both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpn: Option<Vec<String>>,
+    /// Refuse a handshake for a name of this app that has no certificate, instead of serving the
+    /// default certificate.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sni_strict: bool,
+    /// Not enforceable per app: the compiler rejects it with `unsupported_setting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_tickets: Option<bool>,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl TlsPolicy {
+    /// Whether `self` and `other` ask the same of a TLS handshake: everything but where
+    /// certificates come from (the ACME `challenge` is compared, though) and `pass_client_cert`.
+    /// Apps that share a host must agree on it.
+    #[must_use]
+    pub fn same_handshake_policy(&self, other: &Self) -> bool {
+        self.client_ca_pem == other.client_ca_pem
+            && self.challenge == other.challenge
+            && self.client_auth == other.client_auth
+            && self.min_version == other.min_version
+            && self.max_version == other.max_version
+            && self.cipher_suites == other.cipher_suites
+            && self.curves == other.curves
+            && self.alpn == other.alpn
+            && self.sni_strict == other.sni_strict
+            && self.session_tickets == other.session_tickets
+    }
+}
+
+/// A TLS protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum TlsVersion {
+    /// TLS 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+    /// TLS 1.3.
+    #[serde(rename = "1.3")]
+    V1_3,
+}
+
+/// Whether and how clients are asked for a certificate (Traefik's `clientAuthType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuthMode {
+    /// Ask for a certificate; serve clients with none and trust none.
+    Request,
+    /// Require some certificate; the chain is not judged.
+    Require,
+    /// A certificate, when sent, must chain to `client_ca_pem`; none is fine.
+    VerifyIfGiven,
+    /// A certificate that chains to `client_ca_pem` is required.
+    RequireAndVerify,
 }
 
 /// The ACME challenge the issuer answers for an `acme` app's hosts.
@@ -315,6 +395,10 @@ pub struct Certificate {
     pub cert_pem: String,
     /// PKCS#8, PKCS#1 or SEC1 private key, PEM.
     pub key_pem: String,
+    /// Serve this certificate for a name no other certificate covers, and for a handshake with
+    /// no SNI, unless the app that owns the name sets `sni_strict`. At most one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub default: bool,
 }
 
 impl fmt::Debug for Certificate {

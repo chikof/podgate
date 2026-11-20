@@ -120,7 +120,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
             .with_acme_dns_zones(config.acme_dns_zones.iter().map(AsRef::as_ref))
-            .with_upstream_policy(upstream_policy.clone()),
+            .with_upstream_policy(upstream_policy.clone())
+            .with_tls_floor(config.tls_min_version),
     )
     .with_metrics(observe::metrics::Registry::new(
         config.metrics_series_per_tenant,
@@ -186,7 +187,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 proxy.add_tls_with_settings(&addr, None, settings);
                 proxy
                     .endpoints()
-                    .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(acme.clone())));
+                    .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(
+                        tls::PreHandshake::new(acme.clone(), table.clone()),
+                    )));
             }
             entry::Protocol::Tcp | entry::Protocol::Udp => anyhow::bail!(
                 "entry point {} is {}: TCP and UDP entry points are not built yet",

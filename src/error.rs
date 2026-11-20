@@ -23,6 +23,10 @@ pub enum AppError {
     /// A TLS request names a host other than its SNI: `421 Misdirected Request`.
     #[error("misdirected request")]
     Misdirected,
+    /// The connection negotiated a TLS version, cipher suite or protocol the app's TLS options
+    /// do not allow: `421 Misdirected Request`.
+    #[error("tls policy")]
+    TlsPolicy,
     /// The app requires a client certificate and the connection presented none that its CA
     /// accepts: `403 Forbidden`.
     #[error("client certificate required")]
@@ -98,7 +102,7 @@ impl AppError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Misdirected => StatusCode::MISDIRECTED_REQUEST,
+            Self::Misdirected | Self::TlsPolicy => StatusCode::MISDIRECTED_REQUEST,
             Self::ClientCertRequired => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
@@ -163,6 +167,7 @@ impl AppError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::Misdirected => "misdirected",
+            Self::TlsPolicy => "tls_policy",
             Self::ClientCertRequired => "client_cert_required",
             Self::NotFound => "no_route",
             Self::Overloaded | Self::FilterOverBudget | Self::BufferingOverBudget => "over_budget",

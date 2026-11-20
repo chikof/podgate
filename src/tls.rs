@@ -1,6 +1,15 @@
 //! The TLS listener: certificates come from the live snapshot and are chosen by SNI per
 //! handshake, so a pushed certificate serves new connections without a restart. The same SNI
 //! decides whether the client is asked for a certificate (see [`crate::clientauth`]).
+//!
+//! A name no certificate covers gets the certificate marked `default: true` when the snapshot
+//! has one, unless an app that may serve the name sets `sni_strict`; then the handshake fails.
+//! A handshake with no SNI is treated like an unknown name. Per-app version, suite and ALPN
+//! options are in [`Options`], and the pre-TLS hook that reads the ClientHello for them and for
+//! on-demand certificates is [`PreHandshake`].
+
+mod hello;
+mod options;
 
 use std::sync::Arc;
 
@@ -19,6 +28,9 @@ use crate::sni;
 use crate::table::TableHandle;
 use podgate_model::Certificate;
 
+pub use hello::PreHandshake;
+pub use options::{Options, Violation, enforce};
+
 /// A certificate in a snapshot that cannot be served.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("invalid certificate for {hosts}: {reason}")]
@@ -34,6 +46,7 @@ pub struct CertError {
 pub struct CertStore {
     by_host: HostMap<Arc<CertifiedKey>>,
     expiries: Vec<(Box<str>, u64)>,
+    default: Option<Arc<CertifiedKey>>,
 }
 
 impl CertStore {
@@ -42,10 +55,11 @@ impl CertStore {
     /// # Errors
     ///
     /// Returns [`CertError`] for a bad host, unreadable PEM, an unsupported or mismatched key,
-    /// or a host claimed by two certificates.
+    /// a host claimed by two certificates, or a second `default` certificate.
     pub fn build(certificates: &[Certificate]) -> Result<Self, CertError> {
         let mut by_host = HostMap::default();
         let mut expiries = Vec::new();
+        let mut default = None;
         for certificate in certificates {
             let hosts = certificate.hosts.join(",");
             let reject = |reason: String| CertError {
@@ -60,6 +74,9 @@ impl CertStore {
                 .and_then(|(_, parsed)| {
                     u64::try_from(parsed.validity().not_after.timestamp()).ok()
                 });
+            if certificate.default && default.replace(Arc::clone(&key)).is_some() {
+                return Err(reject("a second certificate is marked default".into()));
+            }
             for raw in &certificate.hosts {
                 expiries.extend(not_after.map(|at| (raw.clone(), at)));
                 let pattern = HostPattern::parse(raw).map_err(|err| reject(err.to_string()))?;
@@ -68,7 +85,11 @@ impl CertStore {
                 }
             }
         }
-        Ok(Self { by_host, expiries })
+        Ok(Self {
+            by_host,
+            expiries,
+            default,
+        })
     }
 
     /// The certificate for a server name from the client hello, if the snapshot has one.
@@ -82,6 +103,12 @@ impl CertStore {
     #[must_use]
     pub fn expiries(&self) -> &[(Box<str>, u64)] {
         &self.expiries
+    }
+
+    /// The certificate marked `default: true`, served for names no certificate covers.
+    #[must_use]
+    pub fn default_certificate(&self) -> Option<&Arc<CertifiedKey>> {
+        self.default.as_ref()
     }
 }
 
@@ -107,9 +134,10 @@ fn parse_certified_key(certificate: &Certificate) -> Result<CertifiedKey, String
     Ok(certified)
 }
 
-/// Picks the certificate of the live routing table for each handshake. No SNI or no matching
-/// certificate aborts the handshake. Also tells the client verifier whether this SNI belongs to
-/// an app with a client CA.
+/// Picks the certificate of the live routing table for each handshake: the one covering the
+/// SNI, else the default certificate unless an app that may serve the name is `sni_strict`.
+/// Without a certificate the handshake aborts. Also tells the client verifier whether this SNI
+/// belongs to an app that asks for client certificates.
 #[derive(Debug)]
 struct SniResolver {
     table: TableHandle,
@@ -117,17 +145,29 @@ struct SniResolver {
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let name = client_hello.server_name()?;
         let table = self.table.load();
+        let certificates = table.certificates();
+        let Some(name) = client_hello.server_name() else {
+            clientauth::decide(false);
+            return certificates.default_certificate().cloned();
+        };
         // Ask for a client certificate when any app that may serve this host wants one: a
         // literal claimant, or an app with a `host_regexp` or host-free router. The request
         // check (`clientauth::admit`) judges the app the request really matched.
-        clientauth::decide(
-            table
-                .may_serve(&host::normalize(name))
-                .any(|app| app.client_auth().is_some()),
-        );
-        table.certificates().lookup(name)
+        let (mut ask, mut strict) = (false, false);
+        for app in table.may_serve(&host::normalize(name)) {
+            ask |= app.client_auth().is_some();
+            strict |= app
+                .tls_options()
+                .is_some_and(|options| options.sni_strict());
+        }
+        clientauth::decide(ask);
+        certificates.lookup(name).or_else(|| {
+            certificates
+                .default_certificate()
+                .filter(|_| !strict)
+                .cloned()
+        })
     }
 }
 

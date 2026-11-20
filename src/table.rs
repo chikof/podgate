@@ -30,7 +30,7 @@ use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, Lease, PickCx, Upstream};
-use crate::tls::{CertError, CertStore};
+use crate::tls::{CertError, CertStore, Options};
 use podgate_model::SkewSecret;
 use podgate_model::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
 
@@ -206,6 +206,7 @@ pub struct CompiledApp {
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
     client_auth: Option<Arc<ClientAuth>>,
+    tls_options: Option<Arc<Options>>,
     canary: Option<Arc<Runtime>>,
     fingerprint: u64,
 }
@@ -219,6 +220,7 @@ pub(crate) struct Parts {
     pub(crate) revisions: Vec<CompiledRevision>,
     pub(crate) fingerprint: u64,
     pub(crate) client_auth: Option<Arc<ClientAuth>>,
+    pub(crate) tls_options: Option<Arc<Options>>,
 }
 
 /// What the effective weights of an app's revisions add up to while it has a canary.
@@ -283,6 +285,7 @@ impl CompiledApp {
             canary,
             fingerprint: parts.fingerprint,
             client_auth: parts.client_auth,
+            tls_options: parts.tls_options,
         };
         compiled.reweigh();
         compiled
@@ -402,6 +405,13 @@ impl CompiledApp {
     #[must_use]
     pub fn client_auth(&self) -> Option<&Arc<ClientAuth>> {
         self.client_auth.as_ref()
+    }
+
+    /// The app's compiled TLS options; `None` when it asks for nothing beyond the
+    /// listener's baseline.
+    #[must_use]
+    pub fn tls_options(&self) -> Option<&Options> {
+        self.tls_options.as_deref()
     }
 
     /// Whether failed requests keep their bodies for replay.
@@ -624,6 +634,7 @@ pub struct RoutingTable {
     by_id: HashMap<Box<str>, usize>,
     certificates: CertStore,
     acme: Plan,
+    tls_hello_policy: bool,
     budgets: HashMap<Box<str>, Budget>,
     weights: HashMap<Box<str>, u32>,
     skew_secret: Option<SkewSecret>,
@@ -657,6 +668,10 @@ impl RoutingTable {
     ) -> Result<Self, CompileError> {
         let built = compile::build(snapshot, context)?;
         let index = Index::build(&built.apps);
+        let tls_hello_policy = built
+            .apps
+            .iter()
+            .any(|app| app.tls_options().is_some_and(Options::needs_hello));
         Ok(Self {
             version: snapshot.version,
             by_id: built
@@ -667,6 +682,7 @@ impl RoutingTable {
                 .collect(),
             index,
             apps: built.apps.into_boxed_slice(),
+            tls_hello_policy,
             certificates: built.certificates,
             acme: built.acme,
             budgets: snapshot
@@ -771,6 +787,13 @@ impl RoutingTable {
     #[must_use]
     pub fn tenant_weight(&self, id: &str) -> Option<u32> {
         self.weights.get(id).copied()
+    }
+
+    /// Whether some app has TLS options that a ClientHello can already refuse: the
+    /// pre-TLS hook reads hellos only then, or for on-demand certificates.
+    #[must_use]
+    pub fn tls_hello_policy(&self) -> bool {
+        self.tls_hello_policy
     }
 
     /// Certificates for the TLS listener.
