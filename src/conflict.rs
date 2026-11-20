@@ -245,6 +245,7 @@ mod test {
                 client_ca_pem: ca.map(Into::into),
             },
             revisions: Vec::new(),
+            allow_domain_fronting: false,
         }
     }
 
