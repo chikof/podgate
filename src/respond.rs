@@ -14,9 +14,12 @@ use crate::error::AppError;
 /// Fails when the response cannot be written to the client.
 pub async fn write_error(session: &mut Session, err: &AppError) -> pingora::Result<()> {
     let body = Bytes::from(err.body().to_string());
-    let mut header = ResponseHeader::build(err.status(), Some(2))?;
+    let mut header = ResponseHeader::build(err.status(), Some(3))?;
     header.insert_header("content-type", "application/json")?;
     header.insert_header("content-length", body.len().to_string())?;
+    if let Some(secs) = err.retry_after_secs() {
+        header.insert_header("retry-after", secs.to_string())?;
+    }
     session
         .write_response_header(Box::new(header), false)
         .await?;

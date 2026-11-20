@@ -32,6 +32,9 @@ pub enum AppError {
     /// Nothing can serve the request now: `503 Service Unavailable`.
     #[error("{0}")]
     Unavailable(Box<str>),
+    /// The tenant is at its in-flight limit: `503`, and the client should retry in a second.
+    #[error("tenant is over its in-flight limit")]
+    Overloaded,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -47,9 +50,15 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unavailable(_) | Self::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
+    }
+
+    /// Seconds for the `retry-after` header, when the client should retry later.
+    #[must_use]
+    pub fn retry_after_secs(&self) -> Option<u32> {
+        matches!(self, Self::Overloaded).then_some(1)
     }
 
     /// The JSON body: `{"error": "<message>"}`, plus `conflicts` for a rejected snapshot.
@@ -99,7 +108,14 @@ impl IntoResponse for AppError {
         if let Self::Internal(cause) = &self {
             tracing::error!(error = ?cause, "internal error");
         }
-        (self.status(), Json(self.body())).into_response()
+        let retry_after = self.retry_after_secs();
+        let mut response = (self.status(), Json(self.body())).into_response();
+        if let Some(secs) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        response
     }
 }
 
@@ -112,6 +128,14 @@ mod test {
         let err = AppError::NotFound;
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.body(), json!({"error": "not found"}));
+    }
+
+    #[test]
+    fn overloaded_is_503_with_retry_after() {
+        let err = AppError::Overloaded;
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.retry_after_secs(), Some(1));
+        assert_eq!(AppError::NotFound.retry_after_secs(), None);
     }
 
     #[test]

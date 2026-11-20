@@ -16,6 +16,8 @@
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
 pub mod admin;
+pub mod budget;
+pub mod compress;
 pub mod config;
 pub mod conflict;
 pub mod error;
@@ -38,6 +40,7 @@ use pingora::services::background::background_service;
 use tracing_subscriber::EnvFilter;
 
 pub use admin::{AdminService, AppState};
+pub use budget::Budgets;
 pub use config::{Config, ConfigError, LogFormat};
 pub use conflict::Conflict;
 pub use error::AppError;
@@ -62,6 +65,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let table = TableHandle::new();
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
+    let budgets = Budgets::new();
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -76,7 +80,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 
     let mut proxy = http_proxy_service(
         &server.configuration,
-        Gateway::new(table.clone(), inflight.clone(), timeout),
+        Gateway::new(table.clone(), inflight.clone(), timeout).with_budgets(budgets.clone()),
     );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {
@@ -89,7 +93,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         "admin API",
         AdminService::new(
             admin_listener,
-            AppState::new(table, events, inflight),
+            AppState::new(table, events, inflight).with_budgets(budgets),
             timeout,
         ),
     ));

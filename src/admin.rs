@@ -8,6 +8,7 @@
 
 mod events;
 mod health;
+mod metrics;
 mod snapshot;
 
 use std::io;
@@ -28,6 +29,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::budget::Budgets;
 use crate::error::AppError;
 use crate::events::EventFeed;
 use crate::inflight::Inflight;
@@ -40,6 +42,7 @@ pub struct AppState {
     table: TableHandle,
     events: EventFeed,
     inflight: Inflight,
+    budgets: Budgets,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
             table,
             events,
             inflight,
+            budgets: Budgets::new(),
         }
     }
 
@@ -82,6 +86,19 @@ impl AppState {
     pub fn inflight(&self) -> &Inflight {
         &self.inflight
     }
+
+    /// Reports `budgets`, the registry the proxy charges, on `GET /metrics`.
+    #[must_use]
+    pub fn with_budgets(mut self, budgets: Budgets) -> Self {
+        self.budgets = budgets;
+        self
+    }
+
+    /// The per-tenant budget registry `GET /metrics` reports.
+    #[must_use]
+    pub fn budgets(&self) -> &Budgets {
+        &self.budgets
+    }
 }
 
 async fn not_found() -> AppError {
@@ -90,7 +107,8 @@ async fn not_found() -> AppError {
 
 /// Builds the router with all routes and middleware.
 ///
-/// Routes: `GET /healthz`, `GET /readyz`, `PUT /v1/snapshot`, `GET /v1/events`; anything else is a
+/// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`;
+/// anything else is a
 /// JSON 404.
 ///
 /// Middleware, outermost first:
@@ -104,6 +122,7 @@ async fn not_found() -> AppError {
 pub fn router(state: AppState, timeout: Duration) -> Router {
     Router::new()
         .merge(health::routes())
+        .merge(metrics::routes())
         .merge(snapshot::routes())
         .merge(events::routes())
         .layer(events::poll_cap(timeout))

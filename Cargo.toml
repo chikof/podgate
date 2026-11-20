@@ -14,6 +14,8 @@ arc-swap = "1.9.5"
 async-trait = "0.1.92"
 axum = "0.8.9"
 bytes = "1.12.2"
+crc32fast = "1.5.5"
+miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 rustls-pki-types = "1.16.0"
 serde = { version = "1.0.229", features = ["derive"] }

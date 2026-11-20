@@ -15,11 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use pingora::Error;
 use pingora::ErrorType::InternalError;
+use pingora::http::ResponseHeader;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
+use crate::budget::{self, Budgets, TenantSlot};
+use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::inflight::{Inflight, InflightGuard};
 use crate::respond;
@@ -44,6 +48,11 @@ pub struct Ctx {
     /// Keeps this request counted on its revision (see [`crate::inflight`]); set by
     /// `request_filter` with `route`, released when the request ends and the `Ctx` drops.
     pub inflight: Option<InflightGuard>,
+    /// The tenant's in-flight slot (see [`crate::budget`]), taken by `request_filter` after the
+    /// revision is counted and freed in `logging`.
+    pub tenant_slot: Option<TenantSlot>,
+    /// The gzip encoder of this response, when it is being compressed.
+    pub compression: Option<Gzip>,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -52,6 +61,7 @@ pub struct Gateway {
     table: TableHandle,
     inflight: Inflight,
     upstream_timeout: Duration,
+    budgets: Budgets,
 }
 
 impl Gateway {
@@ -64,7 +74,15 @@ impl Gateway {
             table,
             inflight,
             upstream_timeout,
+            budgets: Budgets::new(),
         }
+    }
+
+    /// Charges tenants against `budgets`, a registry shared with the admin API's metrics.
+    #[must_use]
+    pub fn with_budgets(mut self, budgets: Budgets) -> Self {
+        self.budgets = budgets;
+        self
     }
 }
 
@@ -77,6 +95,8 @@ impl ProxyHttp for Gateway {
             table: self.table.load(),
             route: None,
             inflight: None,
+            tenant_slot: None,
+            compression: None,
         }
     }
 
@@ -96,6 +116,13 @@ impl ProxyHttp for Gateway {
                 }
             };
             if let Some(guard) = self.inflight.admit(&ctx.table, &selected) {
+                match budget::admit(&self.budgets, &ctx.table, selected.app) {
+                    Ok(slot) => ctx.tenant_slot = slot,
+                    Err(err) => {
+                        respond::write_error(session, &err).await?;
+                        return Ok(true);
+                    }
+                }
                 ctx.route = Some(selected);
                 ctx.inflight = Some(guard);
                 return Ok(false);
@@ -109,6 +136,36 @@ impl ProxyHttp for Gateway {
             }
             ctx.table = self.table.load();
         }
+    }
+
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        if let Some(slot) = &ctx.tenant_slot {
+            ctx.compression =
+                compress::start(session.req_header(), upstream_response, slot.tenant());
+        }
+        Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<Option<Duration>> {
+        compress::filter(&mut ctx.compression, body, end_of_stream)
+            .map_err(|err| Error::because(InternalError, "gzip encoding failed", err))?;
+        Ok(None)
+    }
+
+    async fn logging(&self, _session: &mut Session, _error: Option<&Error>, ctx: &mut Ctx) {
+        ctx.compression = None;
+        ctx.tenant_slot = None;
     }
 
     async fn upstream_peer(

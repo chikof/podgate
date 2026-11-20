@@ -5,7 +5,7 @@
 //! swap never changes the routing of a request in flight. A snapshot that does not compile
 //! leaves the live table untouched.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost};
-use crate::snapshot::{App, Revision, RevisionState, Snapshot};
+use crate::snapshot::{App, Budget, Revision, RevisionState, Snapshot};
 use crate::tls::{CertError, CertStore};
 
 /// A snapshot the compiler refuses.
@@ -222,6 +222,7 @@ pub struct RoutingTable {
     apps: Box<[CompiledApp]>,
     hosts: HostMap<usize>,
     certificates: CertStore,
+    budgets: HashMap<Box<str>, Budget>,
 }
 
 impl RoutingTable {
@@ -263,6 +264,11 @@ impl RoutingTable {
             apps: snapshot.apps.iter().map(CompiledApp::new).collect(),
             hosts,
             certificates: CertStore::build(&snapshot.certificates)?,
+            budgets: snapshot
+                .tenants
+                .iter()
+                .map(|tenant| (tenant.id.clone(), tenant.budget))
+                .collect(),
         })
     }
 
@@ -284,6 +290,12 @@ impl RoutingTable {
     #[must_use]
     pub fn app(&self, index: usize) -> Option<&CompiledApp> {
         self.apps.get(index)
+    }
+
+    /// The resource budget of tenant `id`, or `None` when the snapshot does not declare it.
+    #[must_use]
+    pub fn tenant_budget(&self, id: &str) -> Option<Budget> {
+        self.budgets.get(id).copied()
     }
 
     /// Certificates for the TLS listener.
