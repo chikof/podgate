@@ -282,7 +282,7 @@ Every matcher is an object with exactly one key; anything else is `invalid_match
 |Matcher|Meaning|Module (`src/router/matcher/`)|
 |---|---|---|
 |`{"host": "a.test"}`, `{"host": ["a.test", "*.b.test"]}`|Exact or one-label wildcard; a list is any-of. Compared lowercase without port or trailing dot.|`host.rs`|
-|`{"host_regexp": "..."}`|Regular expression over the normalized host.|`host_regexp.rs`|
+|`{"host_regexp": "..."}`|Regular expression over the normalized host. Combine it with a literal `host` in an `all` to narrow a claim; on its own it is a catch-all router and needs the entry point or the operator to allow it (`catch_all_not_allowed`).|`host_regexp.rs`|
 |`{"path": "/x"}`, `{"path_prefix": "/api"}`, `{"path_regexp": "..."}`|Over the normalized path. A prefix matches whole segments: `/api` and `/api/x`, not `/apix`.|`path.rs`, `path_prefix.rs`, `path_regexp.rs`|
 |`{"method": ["GET", "HEAD"]}`|Any-of, case-sensitive tokens.|`method.rs`|
 |`{"header": {"name": "x-env", "value": "canary"}}`, `{"header_regexp": {"name": "...", "regex": "..."}}`|Header names are case-insensitive, values exact or regex. Several headers of one name match if any does.|`header.rs`, `header_regexp.rs`|
@@ -311,7 +311,8 @@ Host ownership: a literal host pattern is claimed by the positive `host` leaves 
 **Priority never orders routers across tenants.** Two rules make that hold:
 
 - A literal host is claimed by one tenant only (`host_conflict`), and no tenant may claim a host under another's wildcard (`cross_tenant_wildcard`), so for any host all routers with a literal claim belong to one tenant, and priority only orders those.
-- A *fallback* router (a `host_regexp`, or no host constraint) matches only hosts that no other tenant claims with a literal host, so a tenant's catch-all cannot capture another tenant's host or paths, whatever its priority: with `{"host_regexp": ".*"}` at `i32::MAX`, tenant B still loses `a.test` (claimed by tenant A) on every path, including paths A has no router for (`404`). Fallbacks of two tenants on a shared entry point are refused (`cross_tenant_catch_all`), because no order between them would be fair; an operator gives such a tenant an entry point whose `tenants` policy names it alone, which lifts the first restriction there.
+- A *fallback* router (a `host_regexp` with no literal host beside it, or no host constraint) can match hosts nobody claims right now: an app in a redeploy gap, a deleted app, a lookalike domain. Whoever declared it first would receive that traffic, and browsers would send it the cookies of the real app, a subdomain takeover. So it compiles only if every entry point it listens on has a policy whose `tenants` names that tenant alone, or the operator lists the tenant in `CATCH_ALL_TENANTS`; otherwise the snapshot is refused with `catch_all_not_allowed`. Even then it matches only hosts that no other tenant claims with a literal host, so it cannot capture another tenant's host or paths whatever its priority: with `{"host_regexp": ".*"}` at `i32::MAX`, tenant B still loses `a.test` (claimed by tenant A) on every path, including paths A has no router for (`404`). Fallbacks of two tenants on a shared entry point are refused (`cross_tenant_catch_all`), because no order between them would be fair.
+- A `host_regexp` that sits in an `all` next to a literal `host` is not a fallback. The literal claim (an exact name or a `*.` wildcard the tenant owns under the rules above) bounds the router, it is indexed and matched under that claim only, and the regexp can only narrow it, never widen it. podgate never reads the regexp text to decide what it may match: `{"all": [{"host": "*.a.test"}, {"host_regexp": "^(other\\.test|x\\.a\\.test)$"}]}` serves `x.a.test` and never `other.test`. A `host_regexp` that cannot be tied to a literal claim this way is a fallback.
 
 |Code|When|v1 rule it extends|
 |---|---|---|
@@ -319,6 +320,7 @@ Host ownership: a literal host pattern is claimed by the positive `host` leaves 
 |`route_ambiguity`|Two routers of one app are ambiguous, or two fallback routers of one tenant are.|New.|
 |`cross_tenant_wildcard`|A claim lies under another tenant's wildcard.|Unchanged.|
 |`cross_tenant_catch_all`|Fallback routers of two tenants share an entry point.|New.|
+|`catch_all_not_allowed`|A fallback router (no host constraint, or a `host_regexp` with no literal host beside it) of a tenant the operator has not allowed (`CATCH_ALL_TENANTS`), on an entry point whose `tenants` policy does not name that tenant alone.|New.|
 |`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, or two apps of one tenant share a pattern, and their `tls.client_ca_pem` differ (compared as written). A later TLS option that restricts clients joins the comparison.|v1 compared the same field for wildcards only. TLS is decided per host at the handshake, before any path is known, so it is a property of the app and cannot vary per router.|
 
 ### Services
@@ -568,6 +570,7 @@ All settings are environment variables, read once at startup by `Config::from_en
 | `RUST_LOG` | `info` | Log filter, `tracing-subscriber` env-filter syntax (`info,podgate=debug`). Pingora's own `log` records are filtered by the same variable. |
 | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs that may execute at once across all tenants, 1..=256. Filters run through `spawn_blocking`, and this bounds how many threads of tokio's 512-thread blocking pool (which snapshot compiles also use) they can hold. |
 | `WASM_QUEUE_TIMEOUT_MS` | `1000` | Milliseconds a filter run waits for a free worker, 1..=60000. After that the request gets `503` with `retry-after: 1`. |
+| `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids the operator lets declare catch-all routers (a host-free router, or a `host_regexp` with no literal host beside it) on a shared entry point. Only the operator can allow it; a snapshot cannot. Empty: no tenant can. See `### Priority, ambiguity and conflicts`. |
 
 Add a setting: field on `Config`, a branch in `Config::from_lookup` that returns `ConfigError { var, .. }`, a row here and in `.env.example`, a case in the `test` module.
 

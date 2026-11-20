@@ -26,10 +26,11 @@ pub const WEBSECURE: &str = "websecure";
 #[derive(Debug, Clone)]
 pub struct CompileContext {
     entry_points: Vec<Box<str>>,
+    catch_all_tenants: Vec<Box<str>>,
 }
 
 impl Default for CompileContext {
-    /// The two built-in entry points.
+    /// The two built-in entry points, and no tenant allowed a catch-all router.
     fn default() -> Self {
         Self::new([WEB, WEBSECURE])
     }
@@ -41,7 +42,28 @@ impl CompileContext {
     pub fn new<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             entry_points: names.into_iter().map(Box::from).collect(),
+            catch_all_tenants: Vec::new(),
         }
+    }
+
+    /// Lets the tenants called `tenants` declare routers that match hosts nobody claims (a
+    /// `host_regexp` or host-free router) on a shared entry point. Only the operator calls this
+    /// (`CATCH_ALL_TENANTS`); a snapshot never can.
+    #[must_use]
+    pub fn with_catch_all_tenants<'a>(
+        mut self,
+        tenants: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        self.catch_all_tenants = tenants.into_iter().map(Box::from).collect();
+        self
+    }
+
+    /// Whether the operator allows `tenant` catch-all routers on shared entry points.
+    #[must_use]
+    pub fn allows_catch_all(&self, tenant: &str) -> bool {
+        self.catch_all_tenants
+            .iter()
+            .any(|allowed| &**allowed == tenant)
     }
 
     /// The bound entry point names.

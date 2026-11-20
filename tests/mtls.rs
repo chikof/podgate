@@ -270,7 +270,7 @@ async fn mtls_fronting_cannot_bypass() {
 /// certificate, and a client that presents one is served.
 #[tokio::test]
 async fn mtls_host_regexp_router_requires_cert() {
-    let podgate = Podgate::start().await;
+    let podgate = Podgate::start_with_env(&[("CATCH_ALL_TENANTS", "t1")]).await;
     let secure = Upstream::start("secure body").await;
     let server = TestCert::new(&["secure.test"]);
     let ca = TestCa::new("trusted ca");

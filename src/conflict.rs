@@ -524,7 +524,8 @@ mod test {
             "version": 1, "tenants": [tenant("t1"), tenant("t2")], "apps": apps,
         }))
         .expect("snapshot");
-        match RoutingTable::compile(&snapshot) {
+        let context = crate::entry::CompileContext::default().with_catch_all_tenants(["t1", "t2"]);
+        match RoutingTable::compile_with(&snapshot, &context) {
             Ok(_) => Vec::new(),
             Err(CompileError::Conflicts(found)) => found,
             Err(other) => panic!("unexpected error: {other}"),

@@ -105,7 +105,10 @@ pub use wake::{Wake, WakeService};
 ///
 /// Fails when the admin socket cannot be bound or the TLS listener cannot be configured.
 pub fn run(config: &Config) -> anyhow::Result<()> {
-    let table = TableHandle::new();
+    let table = TableHandle::with_context(
+        entry::CompileContext::default()
+            .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref)),
+    );
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
     let budgets = Budgets::new();

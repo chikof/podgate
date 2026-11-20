@@ -26,7 +26,7 @@ use crate::host::HostPattern;
 use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
-use crate::router::{self, CompiledRouter};
+use crate::router::{self, CompiledRouter, Tier};
 use crate::service::{self, Service};
 use crate::snapshot::{App, Declared, EntryPointPolicy, RevisionState, Snapshot};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
@@ -177,12 +177,17 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
+    // A router that can match a host nobody claims takes that host from whoever deploys there
+    // next, so only an exclusive entry point or the operator allows it.
     let mut rejected = Vec::new();
     let mut routers: Vec<Vec<CompiledRouter>> = snapshot
         .apps
         .iter()
         .map(|app| routers_of(app, snapshot, context, &mut rejected))
         .collect();
+    for (app, list) in snapshot.apps.iter().zip(&routers) {
+        catch_all_rule(app, list, context, &mut rejected);
+    }
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
@@ -465,6 +470,48 @@ fn routers_of(
         compiled.push(compile);
     }
     compiled
+}
+
+/// Refuses the routers of `app` that can match a host no one claims, unless the operator or the
+/// entry point allows them.
+///
+/// A router with no host constraint, or a `host_regexp` without a literal host next to it,
+/// matches every host nobody claims right now: an app mid-redeploy, a deleted app, a lookalike
+/// domain. Whoever declares it first would receive that traffic, and with it the cookies
+/// browsers send to the host. It compiles only when every entry point it listens on admits
+/// that tenant alone (`tenants` in the entry point policy), or the operator lists the tenant in
+/// `CATCH_ALL_TENANTS`; otherwise `catch_all_not_allowed`.
+///
+/// A `host_regexp` next to a literal `host` in an `all` is not a catch-all: the literal claim
+/// bounds the router, and the regexp can only narrow it, so no regexp text is ever inspected.
+fn catch_all_rule(
+    app: &App,
+    routers: &[CompiledRouter],
+    context: &CompileContext,
+    rejected: &mut Vec<Rejected>,
+) {
+    if context.allows_catch_all(&app.tenant) {
+        return;
+    }
+    for router in routers
+        .iter()
+        .filter(|router| router.is_fallback() && !router.is_unrestricted())
+    {
+        let what = match router.tier() {
+            Tier::Hostless => "has no host constraint",
+            _ => "has a host_regexp and no literal host beside it",
+        };
+        rejected.push(Rejected::new(
+            app,
+            format!("router {}", router.name()),
+            Invalid::new(
+                "catch_all_not_allowed",
+                format!(
+                    "the router {what}, so it would match every host nobody claims; add a literal host in an `all`, attach it only to an entry point whose tenants policy names this tenant alone, or ask the operator to list the tenant in CATCH_ALL_TENANTS"
+                ),
+            ),
+        ));
+    }
 }
 
 /// The configuration of a `chain` middleware.

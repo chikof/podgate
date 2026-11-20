@@ -56,6 +56,7 @@ const _: () =
 /// | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
+/// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Address of the plain HTTP proxy listener.
@@ -79,6 +80,9 @@ pub struct Config {
     pub node_name: Option<Box<str>>,
     /// PEM file with the root certificate trusted for the ACME server. Absent: platform roots.
     pub acme_ca_file: Option<PathBuf>,
+    /// Tenants the operator lets declare catch-all routers (a `host_regexp` or host-free router)
+    /// on a shared entry point, so they can receive hosts nobody claims. Empty: none can.
+    pub catch_all_tenants: Vec<Box<str>>,
 }
 
 impl Default for Config {
@@ -96,6 +100,7 @@ impl Default for Config {
             wasm_queue_timeout_ms: NonZeroU16::MIN.saturating_add(999),
             node_name: None,
             acme_ca_file: None,
+            catch_all_tenants: Vec::new(),
         }
     }
 }
@@ -218,6 +223,14 @@ impl Config {
         };
         config.node_name = non_empty("NODE_NAME")?.map(String::into_boxed_str);
         config.acme_ca_file = non_empty("ACME_CA_FILE")?.map(PathBuf::from);
+        if let Some(list) = lookup("CATCH_ALL_TENANTS") {
+            config.catch_all_tenants = list
+                .split(',')
+                .map(str::trim)
+                .filter(|tenant| !tenant.is_empty())
+                .map(Box::from)
+                .collect();
+        }
         Ok(config)
     }
 }
@@ -251,6 +264,7 @@ mod test {
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
+            ("CATCH_ALL_TENANTS", "t1, t2,,"),
         ]);
         assert_eq!(
             parsed,
@@ -264,6 +278,7 @@ mod test {
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
+                catch_all_tenants: vec!["t1".into(), "t2".into()],
             })
         );
     }

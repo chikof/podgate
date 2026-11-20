@@ -122,7 +122,7 @@ async fn v2_rejects_bad_matcher() {
 /// priority still loses a host tenant A claims, on every path.
 #[tokio::test]
 async fn cross_tenant_regexp_capture() {
-    let podgate = Podgate::start().await;
+    let podgate = Podgate::start_with_env(&[("CATCH_ALL_TENANTS", "t2")]).await;
     let (a_up, b_up) = (Upstream::start("a").await, Upstream::start("b").await);
     let mut a = app("a", &["a.test"], &[serving("r1", a_up.addr)]);
     a["routers"] = json!([router(
@@ -144,13 +144,12 @@ async fn cross_tenant_regexp_capture() {
     // A has no router for this path, and B's catch-all may not take a host A claims.
     assert_eq!(podgate.get("a.test", "/other").await.status, 404);
     assert_eq!(podgate.get("a.test", "/").await.status, 404);
-    // Hosts nobody claims are B's.
-    assert_eq!(podgate.get("elsewhere.test", "/").await.body, "b");
+    // The operator's setting lets B declare a catch-all; it still takes nothing A claims.
 }
 
 #[tokio::test]
 async fn fallback_routers_of_two_tenants_are_refused() {
-    let podgate = Podgate::start().await;
+    let podgate = Podgate::start_with_env(&[("CATCH_ALL_TENANTS", "t1,t2")]).await;
     let up = Upstream::start("up").await;
     let catch_all = |id: &str, tenant: &str| {
         let mut app = app(id, &["unused.test"], &[serving("r1", up.addr)]);
@@ -188,4 +187,123 @@ async fn a_chain_answers_before_the_backend_is_chosen() {
         200
     );
     assert_eq!(podgate.get("a.test", "/").await.status, 503);
+}
+
+/// The default entry points: no policy restricts them, so a catch-all on them is refused.
+fn catch_all_app(id: &str, tenant: &str, up: &Upstream, matcher: Value) -> Value {
+    let mut app = app(id, &["unused.test"], &[serving("r1", up.addr)]);
+    app["tenant"] = json!(tenant);
+    app["routers"] = json!([router("all", matcher, "web")]);
+    app
+}
+
+/// A tenant cannot take the hosts nobody claims right now (a redeploy gap, a deleted app, a
+/// lookalike domain): a `.*` or host-free router on a shared entry point is refused, and on an
+/// entry point whose policy names the tenant alone it is accepted.
+#[tokio::test]
+async fn catch_all_cannot_take_unclaimed_host() {
+    let podgate = Podgate::start().await;
+    let up = Upstream::start("b").await;
+    for matcher in [
+        json!({ "host_regexp": ".*" }),
+        json!({ "path_prefix": "/" }),
+        json!({ "any": [{ "host": "x.test" }, { "host_regexp": ".*" }] }),
+    ] {
+        let refused = podgate
+            .push_snapshot(&two_tenants(
+                1,
+                &[catch_all_app("b", "t2", &up, matcher.clone())],
+            ))
+            .await;
+        assert_eq!(refused.status, 422, "{matcher}: {}", refused.body);
+        assert_eq!(
+            conflict_codes(&refused.json()),
+            ["catch_all_not_allowed"],
+            "{matcher}"
+        );
+    }
+    assert_eq!(podgate.get("elsewhere.test", "/").await.status, 404);
+
+    // On an entry point that admits tenant `t2` alone, the same router is accepted.
+    let mut exclusive = catch_all_app("b", "t2", &up, json!({ "host_regexp": ".*" }));
+    exclusive["routers"][0]["entry_points"] = json!(["web"]);
+    let mut pushed = two_tenants(2, &[exclusive]);
+    pushed["entry_points"] = json!([{ "name": "web", "tenants": ["t2"] }]);
+    let accepted = podgate.push_snapshot(&pushed).await;
+    assert_eq!(accepted.status, 200, "{}", accepted.body);
+    assert_eq!(podgate.get("elsewhere.test", "/").await.body, "b");
+}
+
+/// A `host_regexp` next to a literal host the tenant claims is not a catch-all: it narrows that
+/// claim, so it compiles without any operator setting.
+#[tokio::test]
+async fn anchored_regexp_under_own_suffix_accepted() {
+    let podgate = Podgate::start().await;
+    let up = Upstream::start("preview").await;
+    let mut acme = app("acme", &["unused.test"], &[serving("r1", up.addr)]);
+    acme["routers"] = json!([router(
+        "preview",
+        json!({ "all": [
+            { "host": "*.preview.acme.test" },
+            { "host_regexp": "^pr-[0-9]+\\.preview\\.acme\\.test$" },
+        ] }),
+        "web"
+    )]);
+    let response = podgate.push_snapshot(&snapshot(1, &[acme])).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(
+        podgate.get("pr-42.preview.acme.test", "/").await.body,
+        "preview"
+    );
+    assert_eq!(podgate.get("main.preview.acme.test", "/").await.status, 404);
+    assert_eq!(podgate.get("pr-42.other.acme.test", "/").await.status, 404);
+}
+
+/// The operator, never a snapshot, can allow a tenant a catch-all (`CATCH_ALL_TENANTS`).
+#[tokio::test]
+async fn operator_allowed_catch_all() {
+    let podgate = Podgate::start_with_env(&[("CATCH_ALL_TENANTS", "t2")]).await;
+    let (a_up, b_up) = (Upstream::start("a").await, Upstream::start("b").await);
+    let a = app("a", &["a.test"], &[serving("r1", a_up.addr)]);
+    let b = catch_all_app("b", "t2", &b_up, json!({ "host_regexp": ".*" }));
+    let accepted = podgate.push_snapshot(&two_tenants(1, &[a, b])).await;
+    assert_eq!(accepted.status, 200, "{}", accepted.body);
+    assert_eq!(podgate.get("a.test", "/").await.body, "a");
+    assert_eq!(podgate.get("elsewhere.test", "/").await.body, "b");
+
+    // Another tenant is still refused.
+    let c = catch_all_app("c", "t1", &b_up, json!({ "path_prefix": "/" }));
+    let refused = podgate.push_snapshot(&two_tenants(2, &[c])).await;
+    assert_eq!(conflict_codes(&refused.json()), ["catch_all_not_allowed"]);
+}
+
+/// A regexp only narrows a literal claim: an alternation naming another host cannot widen the
+/// router to it, whether that host is claimed by another tenant or by nobody.
+#[tokio::test]
+async fn regexp_alternation_cannot_widen_claim() {
+    let podgate = Podgate::start().await;
+    let (a_up, b_up) = (Upstream::start("a").await, Upstream::start("b").await);
+    let mut a = app("a", &["unused.test"], &[serving("r1", a_up.addr)]);
+    a["routers"] = json!([router(
+        "narrow",
+        json!({ "all": [
+            { "host": "*.a.test" },
+            { "host_regexp": "^(other-tenant\\.test|x\\.a\\.test)$" },
+        ] }),
+        "web"
+    )]);
+    // Unclaimed first: `other-tenant.test` belongs to nobody.
+    let pushed = two_tenants(1, std::slice::from_ref(&a));
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    assert_eq!(podgate.get("x.a.test", "/").await.body, "a");
+    assert_eq!(podgate.get("other-tenant.test", "/").await.status, 404);
+    assert_eq!(podgate.get("y.a.test", "/").await.status, 404);
+
+    // Now tenant B claims it.
+    let mut b = app("b", &["other-tenant.test"], &[serving("r1", b_up.addr)]);
+    b["tenant"] = json!("t2");
+    let pushed = two_tenants(2, &[a, b]);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    assert_eq!(podgate.get("other-tenant.test", "/").await.body, "b");
+    assert_eq!(podgate.get("x.a.test", "/").await.body, "a");
 }

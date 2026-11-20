@@ -202,8 +202,9 @@ impl Matcher {
     }
 
     /// The hosts a match can be for, or `None` when the matcher does not limit the host (so the
-    /// router can match any host). `all` is limited by its limited children, `any` only when
-    /// every branch is, `not` never.
+    /// router can match any host). `all` is limited by its limited children, and a child that
+    /// names only literal hosts bounds it: a `host_regexp` next to a literal host narrows that
+    /// claim and never widens it. `any` is limited only when every branch is, `not` never.
     #[must_use]
     pub fn claims(&self) -> Option<Vec<Claim>> {
         match self {
@@ -215,12 +216,25 @@ impl Matcher {
             | Self::Method(_)
             | Self::Not(_) => None,
             Self::All(children) => {
-                let limited: Vec<Claim> =
-                    children.iter().filter_map(Self::claims).flatten().collect();
-                children
+                let limited: Vec<Vec<Claim>> = children.iter().filter_map(Self::claims).collect();
+                if limited.is_empty() {
+                    return None;
+                }
+                let literal: Vec<Claim> = limited
                     .iter()
-                    .any(|child| child.claims().is_some())
-                    .then_some(limited)
+                    .filter(|claims| {
+                        claims
+                            .iter()
+                            .all(|claim| matches!(claim, Claim::Pattern(_)))
+                    })
+                    .flatten()
+                    .cloned()
+                    .collect();
+                Some(if literal.is_empty() {
+                    limited.into_iter().flatten().collect()
+                } else {
+                    literal
+                })
             }
             Self::Any(children) => {
                 let mut all = Vec::new();
@@ -357,6 +371,18 @@ mod test {
         let any = parsed(&json!({"any": [{"host": "a.test"}, {"host": "b.test"}]}));
         assert_eq!(literal(&any), 2);
         assert_eq!(literal(&parsed(&json!({"not": {"host": "a.test"}}))), -1);
+        // A regexp next to a literal host only narrows the claim: the router is limited to the
+        // literal host and stays a literal router, so the regexp cannot widen it.
+        let narrowed = parsed(
+            &json!({"all": [{"host": "*.a.test"}, {"host_regexp": "^(other\\.test|x\\.a\\.test)$"}]}),
+        );
+        assert_eq!(literal(&narrowed), 1);
+        let alone = parsed(&json!({"all": [{"host_regexp": "^a"}, {"path": "/x"}]}));
+        assert!(
+            alone
+                .claims()
+                .is_some_and(|claims| claims.contains(&Claim::Regexp))
+        );
     }
 
     #[test]
