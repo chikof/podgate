@@ -296,31 +296,45 @@ async fn wasm_forbidden_import() {
     .await;
     assert_eq!(pushed.status, 200, "{}", pushed.body);
 
-    let wasi = filter_module(
-        r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))"#,
-        "1",
-        "(i32.const 0)",
-    );
-    let refused = push(
-        &podgate,
-        2,
-        &[filtered(
-            "a",
-            "a.test",
-            upstream,
-            &[wat_filter(&wasi, 1_000_000, 65_536)],
-        )],
-    )
-    .await;
+    // Filesystem and socket WASI functions, another `fd_*` function and an unknown `env`
+    // function: each is refused, all are reported at once.
+    let imports = [
+        r#"(import "wasi_snapshot_preview1" "path_open" (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))"#,
+        r#"(import "wasi_snapshot_preview1" "sock_accept" (func (param i32 i32 i32) (result i32)))"#,
+        r#"(import "wasi_snapshot_preview1" "fd_read" (func (param i32 i32 i32 i32) (result i32)))"#,
+        r#"(import "env" "proxy_http_call" (func (param i32) (result i32)))"#,
+    ];
+    let filters: Vec<Value> = imports
+        .iter()
+        .map(|import| {
+            let wat = filter_module(import, "1", "(i32.const 0)");
+            wat_filter(&wat, 1_000_000, 65_536)
+        })
+        .collect();
+    let refused = push(&podgate, 2, &[filtered("a", "a.test", upstream, &filters)]).await;
     assert_eq!(refused.status, 422, "{}", refused.body);
     let body = refused.json();
     assert_eq!(body["error"], "snapshot rejected");
-    let conflict = &body["conflicts"][0];
-    assert_eq!(conflict["code"], "wasm_forbidden_import");
-    assert_eq!(conflict["module"], "wasi_snapshot_preview1");
-    assert_eq!(conflict["name"], "fd_write");
-    assert_eq!(conflict["app"], "a");
-    assert_eq!(conflict["declared_by"], "tests/a");
+    let found: Vec<_> = body["conflicts"]
+        .as_array()
+        .expect("list")
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry["code"], "wasm_forbidden_import");
+            assert_eq!(entry["app"], "a");
+            assert_eq!(entry["declared_by"], "tests/a");
+            (entry["module"].clone(), entry["name"].clone())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (json!("wasi_snapshot_preview1"), json!("path_open")),
+            (json!("wasi_snapshot_preview1"), json!("sock_accept")),
+            (json!("wasi_snapshot_preview1"), json!("fd_read")),
+            (json!("env"), json!("proxy_http_call")),
+        ]
+    );
 
     let (status, body) = get_with(&podgate, "a.test", &[]).await;
     assert_eq!(
@@ -392,4 +406,74 @@ async fn wasm_local_response() {
     assert_eq!(pushed.status, 200, "{}", pushed.body);
     let (status, body) = get_with(&podgate, "a.test", &[]).await;
     assert_eq!((status, body.as_str()), (403, "denied"));
+}
+
+#[tokio::test]
+async fn wasm_wasip1_filter_loads() {
+    let podgate = Podgate::start().await;
+    let upstream = echo_upstream().await;
+    // clock_time_get and fd_write, as wasm32-wasip1 modules import them. The filter checks
+    // every result before it adds `x-filter`: the clock works, fd 1 and fd 2 accept a write
+    // (fd 2 a 1 MiB one, which the host logs at most 4 KiB of), and fd 3 is EBADF (8).
+    let wasip1 = filter_module(
+        r#"(import "wasi_snapshot_preview1" "clock_time_get" (func $clock (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $write (param i32 i32 i32 i32) (result i32)))"#,
+        "17",
+        r#"
+    (i32.store (i32.const 256) (i32.const 0))
+    (i32.store (i32.const 260) (i32.const 8))
+    (i32.store (i32.const 272) (i32.const 1024))
+    (i32.store (i32.const 276) (i32.const 1048576))
+    (if (i32.and
+          (i32.and
+            (i32.eqz (call $clock (i32.const 0) (i64.const 0) (i32.const 200)))
+            (i32.eqz (call $write (i32.const 1) (i32.const 256) (i32.const 1) (i32.const 264))))
+          (i32.and
+            (i32.eqz (call $write (i32.const 2) (i32.const 272) (i32.const 1) (i32.const 268)))
+            (i32.and
+              (i32.eq (i32.load (i32.const 268)) (i32.const 1048576))
+              (i32.eq (call $write (i32.const 3) (i32.const 256) (i32.const 1) (i32.const 264))
+                      (i32.const 8)))))
+      (then (drop (call $add (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 16) (i32.const 4)))))
+    (i32.const 0)"#,
+    );
+    let pushed = push(
+        &podgate,
+        1,
+        &[filtered(
+            "a",
+            "a.test",
+            upstream,
+            &[wat_filter(&wasip1, 10_000_000, 17 * 65_536)],
+        )],
+    )
+    .await;
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let (status, body) = get_with(&podgate, "a.test", &[]).await;
+    assert_eq!((status, body.as_str()), (200, "wasm|-|-|-"));
+}
+
+#[tokio::test]
+async fn wasm_wasip1_proc_exit_is_500() {
+    let podgate = Podgate::start().await;
+    let upstream = echo_upstream().await;
+    let exits = filter_module(
+        r#"(import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))"#,
+        "1",
+        "(call $exit (i32.const 1)) (i32.const 0)",
+    );
+    let pushed = push(
+        &podgate,
+        1,
+        &[filtered(
+            "a",
+            "a.test",
+            upstream,
+            &[wat_filter(&exits, 1_000_000, 65_536)],
+        )],
+    )
+    .await;
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let (status, _) = get_with(&podgate, "a.test", &[]).await;
+    assert_eq!(status, 500);
 }

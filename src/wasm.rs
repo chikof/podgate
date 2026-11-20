@@ -28,14 +28,17 @@
 //!
 //! # The host ABI (proxy-wasm 0.2.x subset)
 //!
-//! The filter is a proxy-wasm module built for `wasm32-unknown-unknown`. The imports below, all
-//! from module `env`, are the whole host surface: no WASI, no clocks, no sockets, no files, no
-//! shared data, no callouts. Statuses are the proxy-wasm `WasmResult` codes: `0` ok, `1` not
-//! found, `2` bad argument, `6` invalid memory access, `10` internal failure.
+//! The filter is a proxy-wasm module, built for `wasm32-unknown-unknown` or `wasm32-wasip1`.
+//! The imports below are the whole host surface. From module `env`: the proxy-wasm functions
+//! in the table. From `wasi_snapshot_preview1`: a few harmless stubs (clocks, entropy, empty
+//! environment and arguments, `fd_write` to the log, `proc_exit` as a trap), listed in the
+//! `wasi` submodule. There are no sockets, no files, no shared data, no callouts. Statuses are
+//! the proxy-wasm `WasmResult` codes: `0` ok, `1` not found, `2` bad argument, `6` invalid
+//! memory access, `10` internal failure.
 //!
 //! | Import | Behaviour |
 //! |---|---|
-//! | `proxy_log(level, msg_ptr, msg_len)` | `tracing` event, at most 32 lines of 1 KiB per request |
+//! | `proxy_log(level, msg_ptr, msg_len)` | `tracing` event tagged with `app` and `tenant`; a run logs at most 32 lines and 4 KiB of payload in total, the rest is cut (`truncated = true`) |
 //! | `proxy_get_header_map_value(map, key_ptr, key_len, out_ptr, out_len)` | values of one header, joined with `,` |
 //! | `proxy_get_header_map_pairs(map, out_ptr, out_len)` | all headers, serialized as in proxy-wasm |
 //! | `proxy_add_header_map_value(map, key_ptr, key_len, val_ptr, val_len)` | append a header |
@@ -60,8 +63,11 @@
 //! there) or the request continues with the header changes it made. A filter that returns
 //! `Pause` without a local response therefore does not stall the request.
 
+mod wasi;
+
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -81,11 +87,11 @@ use crate::respond;
 use crate::snapshot::{App, Filter};
 use crate::table::RoutingTable;
 
-/// Module that provides the host functions.
+/// Module that provides the proxy-wasm host functions.
 const HOST_MODULE: &str = "env";
 
-/// The host functions a filter may import; the whole surface of [`link`].
-const ALLOWED_IMPORTS: [&str; 7] = [
+/// The proxy-wasm host functions a filter may import from [`HOST_MODULE`].
+const ENV_IMPORTS: [&str; 7] = [
     "proxy_log",
     "proxy_get_header_map_value",
     "proxy_get_header_map_pairs",
@@ -94,6 +100,15 @@ const ALLOWED_IMPORTS: [&str; 7] = [
     "proxy_remove_header_map_value",
     "proxy_send_local_response",
 ];
+
+/// Whether a filter may import `module.name`: the whole surface of [`link`].
+fn is_allowed(module: &str, name: &str) -> bool {
+    match module {
+        HOST_MODULE => ENV_IMPORTS.contains(&name),
+        wasi::MODULE => wasi::IMPORTS.contains(&name),
+        _ => false,
+    }
+}
 
 /// Accepted ABI marker exports, newest first.
 const ABI_MARKERS: [&str; 2] = ["proxy_abi_version_0_2_1", "proxy_abi_version_0_2_0"];
@@ -106,9 +121,10 @@ const ROOT_CONTEXT: i32 = 1;
 const HTTP_CONTEXT: i32 = 2;
 /// Most header changes one run may make.
 const MAX_HEADER_OPS: usize = 256;
-/// Most log lines one run may emit, and longest line kept.
+/// Most log lines one run may emit, and most payload bytes in total (guest memory is never
+/// copied past this).
 const MAX_LOG_LINES: u8 = 32;
-const MAX_LOG_BYTES: usize = 1024;
+const MAX_LOG_BYTES: usize = 4096;
 /// Table limits of one instance; compiled code needs one table for indirect calls.
 const MAX_TABLES: usize = 8;
 const MAX_TABLE_ELEMENTS: usize = 100_000;
@@ -230,11 +246,16 @@ enum Verdict {
 struct HostState {
     limits: StoreLimits,
     app: Arc<str>,
+    tenant: Arc<str>,
     /// Request headers as the filter sees them, pseudo headers first. Names are lowercase.
     headers: Vec<(String, Vec<u8>)>,
     ops: Vec<HeaderOp>,
     local: Option<LocalResponse>,
     log_budget: u8,
+    /// Payload bytes the run may still log.
+    log_bytes_left: usize,
+    /// When the run started: the monotonic clock of the WASI stubs counts from here.
+    started: Instant,
 }
 
 impl HostState {
@@ -278,6 +299,7 @@ impl HostState {
 /// A compiled filter: the module, linked against the host functions, and its limits.
 pub struct CompiledFilter {
     app: Arc<str>,
+    tenant: Arc<str>,
     pre: InstancePre<HostState>,
     fuel: u64,
     max_memory: usize,
@@ -311,10 +333,13 @@ impl CompiledFilter {
                 .trap_on_grow_failure(true)
                 .build(),
             app: Arc::clone(&self.app),
+            tenant: Arc::clone(&self.tenant),
             headers,
             ops: Vec::new(),
             local: None,
             log_budget: MAX_LOG_LINES,
+            log_bytes_left: MAX_LOG_BYTES,
+            started: Instant::now(),
         };
         let mut store = Store::new(self.pre.module().engine(), state);
         store.limiter(|state| &mut state.limits);
@@ -390,7 +415,7 @@ impl Compiler {
         for (index, filter) in app.filters.iter().enumerate() {
             let result = self
                 .runtime()
-                .and_then(|(engine, linker)| compile_filter(engine, linker, &app.id, filter));
+                .and_then(|(engine, linker)| compile_filter(engine, linker, app, filter));
             match result {
                 Ok(filter) => compiled.push(filter),
                 Err(reason) => rejected.push(Rejection {
@@ -429,7 +454,7 @@ fn engine() -> wasmtime::Result<Engine> {
 fn compile_filter(
     engine: &Engine,
     linker: &Linker<HostState>,
-    app: &str,
+    app: &App,
     filter: &Filter,
 ) -> Result<CompiledFilter, Reason> {
     if filter.fuel == 0 {
@@ -441,8 +466,7 @@ fn compile_filter(
     let module =
         Module::new(engine, &wasm).map_err(|err| Reason::Invalid(err.to_string().into()))?;
     for import in module.imports() {
-        let allowed = import.module() == HOST_MODULE
-            && ALLOWED_IMPORTS.contains(&import.name())
+        let allowed = is_allowed(import.module(), import.name())
             && matches!(import.ty(), ExternType::Func(_));
         if !allowed {
             return Err(Reason::ForbiddenImport {
@@ -469,7 +493,8 @@ fn compile_filter(
         .instantiate_pre(&module)
         .map_err(|err| Reason::Invalid(err.to_string().into()))?;
     Ok(CompiledFilter {
-        app: app.into(),
+        app: Arc::from(&*app.id),
+        tenant: Arc::from(&*app.tenant),
         pre,
         fuel: filter.fuel,
         max_memory: usize::try_from(filter.max_memory_bytes).unwrap_or(usize::MAX),
@@ -512,7 +537,7 @@ fn check_exports(engine: &Engine, module: &Module) -> Result<(), Reason> {
     check("proxy_on_configure", &[I32, I32], &[I32], false)
 }
 
-/// The linker with every host function in [`ALLOWED_IMPORTS`] and nothing else.
+/// The linker with every host function [`is_allowed`] accepts and nothing else.
 fn link(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
     let mut linker = Linker::new(engine);
     linker.func_wrap(HOST_MODULE, "proxy_log", proxy_log)?;
@@ -546,6 +571,7 @@ fn link(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
         "proxy_send_local_response",
         proxy_send_local_response,
     )?;
+    wasi::link(&mut linker)?;
     Ok(linker)
 }
 
@@ -618,20 +644,38 @@ fn proxy_log(mut caller: Caller<'_, HostState>, level: u32, ptr: u32, len: u32) 
     let Some(message) = region(guest, ptr, len) else {
         return status::INVALID_MEMORY_ACCESS;
     };
-    if state.log_budget == 0 {
-        return status::OK;
+    emit(state, level, message, false);
+    status::OK
+}
+
+/// Takes what a log line may carry from the run's budget: the kept prefix of `message` and
+/// whether anything was cut (`cut` says the caller already cut it). `None` once the run has
+/// used its lines or its bytes.
+fn budgeted<'a>(state: &mut HostState, message: &'a [u8], cut: bool) -> Option<(&'a [u8], bool)> {
+    if state.log_budget == 0 || state.log_bytes_left == 0 {
+        return None;
     }
     state.log_budget -= 1;
-    let message = String::from_utf8_lossy(&message[..message.len().min(MAX_LOG_BYTES)]);
-    let app = &*state.app;
+    let keep = message.len().min(state.log_bytes_left);
+    state.log_bytes_left -= keep;
+    Some((message.get(..keep)?, cut || keep < message.len()))
+}
+
+/// Logs `message` at `level` (`0` trace to `4` error), tagged with the app and tenant, within
+/// the run's budget.
+fn emit(state: &mut HostState, level: u32, message: &[u8], cut: bool) {
+    let Some((kept, truncated)) = budgeted(state, message, cut) else {
+        return;
+    };
+    let message = String::from_utf8_lossy(kept);
+    let (app, tenant) = (&*state.app, &*state.tenant);
     match level {
-        0 => tracing::trace!(app, "wasm filter: {message}"),
-        1 => tracing::debug!(app, "wasm filter: {message}"),
-        2 => tracing::info!(app, "wasm filter: {message}"),
-        3 => tracing::warn!(app, "wasm filter: {message}"),
-        _ => tracing::error!(app, "wasm filter: {message}"),
+        0 => tracing::trace!(app, tenant, truncated, "wasm filter: {message}"),
+        1 => tracing::debug!(app, tenant, truncated, "wasm filter: {message}"),
+        2 => tracing::info!(app, tenant, truncated, "wasm filter: {message}"),
+        3 => tracing::warn!(app, tenant, truncated, "wasm filter: {message}"),
+        _ => tracing::error!(app, tenant, truncated, "wasm filter: {message}"),
     }
-    status::OK
 }
 
 fn proxy_get_header_map_value(
@@ -1023,31 +1067,67 @@ mod test {
         assert!(parse_pairs(&serialize_pairs(&[("bad name".to_owned(), Vec::new())])).is_none());
     }
 
+    fn state() -> HostState {
+        HostState {
+            limits: StoreLimits::default(),
+            app: "a".into(),
+            tenant: "t".into(),
+            headers: Vec::new(),
+            ops: Vec::new(),
+            local: None,
+            log_budget: MAX_LOG_LINES,
+            log_bytes_left: MAX_LOG_BYTES,
+            started: Instant::now(),
+        }
+    }
+
     #[test]
     fn the_linker_provides_exactly_the_allowed_imports() {
         let engine = engine().expect("engine");
         let linker = link(&engine).expect("linker");
-        let mut store = Store::new(
-            &engine,
-            HostState {
-                limits: StoreLimits::default(),
-                app: "a".into(),
-                headers: Vec::new(),
-                ops: Vec::new(),
-                local: None,
-                log_budget: 0,
-            },
-        );
+        let mut store = Store::new(&engine, state());
         let mut provided: Vec<_> = linker
             .iter(&mut store)
             .map(|(module, name, _)| format!("{module}.{name}"))
             .collect();
         provided.sort();
-        let mut allowed: Vec<_> = ALLOWED_IMPORTS
+        let mut allowed: Vec<_> = ENV_IMPORTS
             .iter()
             .map(|name| format!("{HOST_MODULE}.{name}"))
+            .chain(
+                wasi::IMPORTS
+                    .iter()
+                    .map(|name| format!("{}.{name}", wasi::MODULE)),
+            )
             .collect();
         allowed.sort();
         assert_eq!(provided, allowed);
+        assert!(provided.iter().all(|name| {
+            let (module, import) = name.split_once('.').expect("module.name");
+            is_allowed(module, import)
+        }));
+        assert!(!is_allowed(wasi::MODULE, "path_open"));
+        assert!(!is_allowed(wasi::MODULE, "sock_accept"));
+        assert!(!is_allowed(wasi::MODULE, "fd_read"));
+    }
+
+    #[test]
+    fn a_run_logs_at_most_4_kib_whatever_the_filter_writes() {
+        let mut state = state();
+        let megabyte = vec![b'x'; 1 << 20];
+        let mut logged = 0;
+        for _ in 0..100 {
+            if let Some((kept, truncated)) = budgeted(&mut state, &megabyte, false) {
+                assert!(truncated, "a 1 MiB line is cut");
+                logged += kept.len();
+            }
+        }
+        assert_eq!(logged, 4096);
+
+        let mut state = self::state();
+        let lines = (0..100)
+            .filter_map(|_| budgeted(&mut state, b"ab", false))
+            .count();
+        assert_eq!(lines, usize::from(MAX_LOG_LINES));
     }
 }
