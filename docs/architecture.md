@@ -155,7 +155,7 @@ Counting and draining: once `request_filter` has a route it takes an `InflightGu
 
 Admin API only. Outermost first: request id (`x-request-id`: keep the caller's, else a UUID), `TraceLayer` (span per request with method, path, request id), request id copied to the response, timeout.
 
-Timeouts return `408 Request Timeout` with an empty body, always. `503` is reserved for readiness, so the two never get confused in dashboards.
+Timeouts return `408 Request Timeout` with an empty body, always. On the admin API, `503` is reserved for readiness, so the two never get confused in dashboards.
 
 ## Shutdown
 
