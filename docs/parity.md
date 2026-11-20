@@ -90,7 +90,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |
 | Content type sniffing | `contentType` | none | built: never sniffs; `auto_detect: true` refused |
 | Basic auth | `basicAuth` (MD5, SHA1, bcrypt) | `basic_auth` | built: `src/middleware/basic_auth.rs`; bcrypt and argon2 only, costs capped; verification bounded by `BASIC_AUTH_MAX_CONCURRENT`, a tenant share and the tenant's `max_buffer_bytes` |
-| Digest auth | `digestAuth` | none | 0047 |
+| Digest auth | `digestAuth` | none | built: `src/middleware/digest_auth.rs`; SHA-256 and MD5 by HA1 length, qop=auth only, stateless HMAC nonces, bounded charged nc table, state kept across pushes; Authorization stripped upstream by default |
 | Forward auth | `forwardAuth` | `forward_auth` | 0048 (fail closed) |
 | IP allow list | `ipAllowList` | `remote_ip` plus `respond` | 0049 |
 | Rate limit | `rateLimit` | plugin | 0050 (bounded table, per node) |
