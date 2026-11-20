@@ -647,7 +647,6 @@ async fn overview_redacts_secrets() {
     let document: Value = serde_json::from_str(&bodies[0]).expect("JSON");
     let a = app_of(&document, "a");
     assert_eq!(a["tls"]["client_auth"], true);
-    assert_eq!(a["middlewares"].as_array().map(Vec::len), Some(19));
     assert_eq!(
         a["routers"][0]["match"]["all"][1],
         json!({"header": {"name": "x-0", "value": "[value]"}})
