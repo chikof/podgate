@@ -17,6 +17,8 @@
     pkgs.git-cliff # CHANGELOG.md, scripts/release.sh
     pkgs.cargo-edit # cargo set-version, scripts/release.sh
     pkgs.cmake # libz-ng-sys: pingora-core forces its zlib-ng backend
+    pkgs.pebble # test ACME server
+    pkgs.oha # HTTP load generator
   ];
 
   # Secrets and local overrides come from the gitignored .env file. See .env.example.
