@@ -19,10 +19,14 @@ use podgate_model::Snapshot;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 
-/// A backend that answers `/status/<code>` with that status, `/slow` after 300 ms, and anything
-/// else with 200; every response closes the connection.
+/// Releases a `/hold` request of [`upstream`].
+static RELEASE: Notify = Notify::const_new();
+
+/// A backend that answers `/status/<code>` with that status, `/slow` after 300 ms, `/hold` once
+/// [`RELEASE`] is notified, and anything else with 200; every response closes the connection.
 async fn upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -48,6 +52,9 @@ async fn upstream() -> SocketAddr {
                     .unwrap_or(200);
                 if path == "/slow" {
                     sleep(Duration::from_millis(300)).await;
+                }
+                if path == "/hold" {
+                    RELEASE.notified().await;
                 }
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
@@ -318,23 +325,31 @@ async fn metrics_open_connections() {
     let open = "podgate_entry_point_open_connections{entry_point=\"web\"}";
     assert_eq!(value(&scrape(&podgate).await, open), Some(0.0));
 
+    // The request stays open until the watcher has seen it, however slow the scrapes are; the
+    // count drops in `logging`, which may run just after the client has the response.
     let watch = async {
-        for _ in 0..200 {
-            if value(&scrape(&podgate).await, open) == Some(1.0) {
-                return true;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-        false
+        let seen = wait_for_value(&podgate, open, 1.0).await;
+        RELEASE.notify_one();
+        seen
     };
-    let (response, saw_it) = tokio::join!(podgate.get("a.test", "/slow"), watch);
+    let (response, saw_it) = tokio::join!(podgate.get("a.test", "/hold"), watch);
     assert_eq!(response.status, 200);
-    assert!(saw_it, "the slow request was never seen open");
-    assert_eq!(
-        value(&scrape(&podgate).await, open),
-        Some(0.0),
+    assert!(saw_it, "the held request was never seen open");
+    assert!(
+        wait_for_value(&podgate, open, 0.0).await,
         "and is not open once it finished"
     );
+}
+
+/// Whether `series` reaches `want` within five seconds.
+async fn wait_for_value(podgate: &Podgate, series: &str, want: f64) -> bool {
+    for _ in 0..500 {
+        if value(&scrape(podgate).await, series) == Some(want) {
+            return true;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    false
 }
 
 #[tokio::test]
