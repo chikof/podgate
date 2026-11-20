@@ -13,8 +13,8 @@ use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
 use crate::host::{self, HostMap, HostPattern};
-use crate::sni;
 use crate::snapshot::Certificate;
+use crate::sni;
 use crate::table::TableHandle;
 
 /// A certificate in a snapshot that cannot be served.

@@ -17,7 +17,10 @@ const MISDIRECTED: &str = r#"{"error":"misdirected request"}"#;
 /// on `b.test`.
 async fn start(allow_b: bool) -> (Podgate, TestCert, [Upstream; 2]) {
     let podgate = Podgate::start().await;
-    let upstreams = [Upstream::start("body a").await, Upstream::start("body b").await];
+    let upstreams = [
+        Upstream::start("body a").await,
+        Upstream::start("body b").await,
+    ];
     let cert = TestCert::new(&["a.test", "b.test"]);
     let a = app("a", &["a.test"], &[serving("r1", upstreams[0].addr)]);
     let mut b = app("b", &["b.test"], &[serving("r1", upstreams[1].addr)]);
@@ -41,7 +44,10 @@ async fn sni_mismatch_is_421() {
     assert_eq!(response.body, MISDIRECTED);
 
     let unknown = podgate.https_get("a.test", "nope.test", "/", &cert).await;
-    assert_eq!(unknown.status, 421, "an unknown host must not reveal a 404: {unknown:?}");
+    assert_eq!(
+        unknown.status, 421,
+        "an unknown host must not reveal a 404: {unknown:?}"
+    );
 }
 
 #[tokio::test]
@@ -53,7 +59,10 @@ async fn sni_match_served() {
     assert_eq!(response.body, "body a");
 
     let cased = podgate.https_get("b.test", "B.Test:8443", "/", &cert).await;
-    assert_eq!(cased.status, 200, "case and port do not make a mismatch: {cased:?}");
+    assert_eq!(
+        cased.status, 200,
+        "case and port do not make a mismatch: {cased:?}"
+    );
     assert_eq!(cased.body, "body b");
 }
 
@@ -80,9 +89,17 @@ async fn sni_domain_fronting_opt_in() {
 
 /// An HTTP/2 request on a TLS connection, with `scheme` and `authority` as the client states
 /// them. Returns the status and body.
-async fn h2_get(podgate: &Podgate, cert: &TestCert, sni: &str, scheme: &str, authority: &str) -> (u16, String) {
+async fn h2_get(
+    podgate: &Podgate,
+    cert: &TestCert,
+    sni: &str,
+    scheme: &str,
+    authority: &str,
+) -> (u16, String) {
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert.der.clone()).expect("trust the test certificate");
+    roots
+        .add(cert.der.clone())
+        .expect("trust the test certificate");
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -97,7 +114,11 @@ async fn h2_get(podgate: &Podgate, cert: &TestCert, sni: &str, scheme: &str, aut
         .connect(name, tcp)
         .await
         .expect("handshake");
-    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]), "h2 negotiated");
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(&b"h2"[..]),
+        "h2 negotiated"
+    );
 
     let (mut client, connection) = h2::client::handshake(tls).await.expect("h2 handshake");
     tokio::spawn(connection);
@@ -123,14 +144,14 @@ async fn h2_get(podgate: &Podgate, cert: &TestCert, sni: &str, scheme: &str, aut
 async fn sni_h2_scheme_http() {
     let (podgate, cert, _upstreams) = start(false).await;
 
-    let (status, body) = h2_get(&podgate, &cert, "a.test", "http", "b.test").await;
+    let (status, body) = Box::pin(h2_get(&podgate, &cert, "a.test", "http", "b.test")).await;
     assert_eq!(status, 421, ":scheme http must not skip the check");
     assert_eq!(body, MISDIRECTED);
 
-    let (status, body) = h2_get(&podgate, &cert, "a.test", "https", "b.test").await;
+    let (status, body) = Box::pin(h2_get(&podgate, &cert, "a.test", "https", "b.test")).await;
     assert_eq!(status, 421);
     assert_eq!(body, MISDIRECTED);
 
-    let (status, body) = h2_get(&podgate, &cert, "a.test", "http", "a.test").await;
+    let (status, body) = Box::pin(h2_get(&podgate, &cert, "a.test", "http", "a.test")).await;
     assert_eq!((status, body.as_str()), (200, "body a"));
 }

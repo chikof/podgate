@@ -44,7 +44,9 @@ impl TlsAccept for CaptureServerName {
         &self,
         ssl: &TlsRef,
     ) -> Option<Arc<dyn Any + Send + Sync>> {
-        let name = ssl.server_name().map(|name| Box::from(&*host::normalize(name)));
+        let name = ssl
+            .server_name()
+            .map(|name| Box::from(&*host::normalize(name)));
         Some(Arc::new(NegotiatedServerName(name)))
     }
 }

@@ -20,8 +20,8 @@ pub mod host;
 pub mod proxy;
 pub mod respond;
 pub mod route;
-pub mod sni;
 pub mod snapshot;
+pub mod sni;
 pub mod table;
 pub mod tls;
 
