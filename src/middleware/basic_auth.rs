@@ -332,7 +332,7 @@ impl Pool {
         if memory > 0
             && let Some(budget) = budget
         {
-            run._memory = Some(budget.charge(memory).ok_or(AppError::AuthBusy)?);
+            run._memory = Some(budget.charge(memory).ok_or(AppError::AuthOverBudget)?);
         }
         Ok(run)
     }
@@ -951,7 +951,10 @@ mod test {
         let refused = auth
             .authenticate(&who, Some(&header("bob", "hunter2")))
             .await;
-        assert!(matches!(refused, Err(AppError::AuthBusy)), "{refused:?}");
+        assert!(
+            matches!(refused, Err(AppError::AuthOverBudget)),
+            "{refused:?}"
+        );
         assert_eq!(pool.runs(), 0);
         assert_eq!(tenant.buffered(), 0, "the failed charge is not kept");
     }

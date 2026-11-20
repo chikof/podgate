@@ -648,3 +648,54 @@ async fn basic_auth_throttle_survives_unrelated_push() {
         "a changed middleware starts with a clean count"
     );
 }
+
+#[tokio::test]
+async fn basic_auth_over_budget_counts_for_auto_revert() {
+    let backend = Backend::start(Duration::ZERO).await;
+    let podgate = Podgate::start().await;
+    // v1 verifies a cheap bcrypt hash; v2 swaps in an argon2 hash whose 4 MiB of memory the
+    // tenant's 1 MiB buffer budget cannot pay for.
+    let good = protected(
+        backend.addr,
+        json!({ "users": [format!("bob:{}", bcrypt_hash("hunter2"))] }),
+    );
+    let pushed = podgate.push_snapshot(&snapshot(1, &[good])).await;
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+
+    let bad = protected(
+        backend.addr,
+        json!({ "users": [format!("bob:{}", argon2_hash("hunter2", 4096))] }),
+    );
+    let mut bad_snapshot = snapshot(2, &[bad]);
+    bad_snapshot["revert_window_secs"] = json!(20);
+    let pushed = podgate.push_snapshot(&bad_snapshot).await;
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    for _ in 0..30 {
+        let refused = get_as(&podgate, &basic("bob", "hunter2")).await;
+        assert_eq!(refused.status, 503, "{refused:?}");
+        assert_eq!(refused.header("retry-after"), Some("1"));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let reverted = loop {
+        let events = podgate.admin_get("/v1/events?after=0").await.json();
+        let found: Vec<Value> = events["events"]
+            .as_array()
+            .expect("events list")
+            .iter()
+            .filter(|event| event["kind"] == "config_reverted")
+            .cloned()
+            .collect();
+        if !found.is_empty() || Instant::now() > deadline {
+            break found;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(reverted.len(), 1, "{reverted:?}");
+    assert_eq!(reverted[0]["from_version"], 2);
+    let served = get_as(&podgate, &basic("bob", "hunter2")).await;
+    assert_eq!(
+        served.status, 200,
+        "the cheap hash serves again: {served:?}"
+    );
+}

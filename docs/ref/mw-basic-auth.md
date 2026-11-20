@@ -41,7 +41,8 @@ Apache MD5 (`$apr1$`), `{SHA}`, `crypt` and plaintext entries (Traefik accepts t
 |No `Authorization`, another scheme, malformed base64, no `:`, more than one `Authorization` header, a user name over 255 bytes or a password over 1024 bytes|`401`, no hashing.|
 |Unknown user, wrong password|`401`, after one verification (see below).|
 |Known user, right password|The request continues; `header_field` and `remove_header` apply.|
-|No verification slot or memory in time|`503` with `retry-after: 1`. Not counted by auto-revert (a capacity refusal).|
+|No verification worker in time, or the tenant over its share of them|`503` with `retry-after: 1`, `password verification is busy`. Not counted by auto-revert (a capacity refusal).|
+|An argon2 hash whose memory does not fit the tenant's `max_buffer_bytes`|`503` with `retry-after: 1`, `password verification memory is over the tenant's budget`. Counted by auto-revert: the deploy declared a hash the tenant cannot pay for, so a push that does this can be reverted.|
 
 Every `401` carries `WWW-Authenticate: Basic realm="<realm>", charset="UTF-8"`, `Cache-Control: no-store` and the body `{"error":"unauthorized"}`. The scheme name is matched case-insensitively.
 

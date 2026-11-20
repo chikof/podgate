@@ -73,10 +73,16 @@ pub enum AppError {
     /// retry in a second.
     #[error("buffering is over the tenant's budget")]
     BufferingOverBudget,
-    /// A `basic_auth` verification found no worker, tenant share or memory in time: `503`, retry
-    /// in a second. A flood of bad passwords causes it, not a broken deploy.
+    /// A `basic_auth` verification found no worker within the wait, or its tenant already holds
+    /// its share of them: `503`, retry in a second. A flood of bad passwords causes it, not a
+    /// broken deploy.
     #[error("password verification is busy")]
     AuthBusy,
+    /// The memory a `basic_auth` verification needs (an argon2 hash's `m`) does not fit the
+    /// tenant's buffer budget: `503`, retry in a second. Not a capacity refusal: the deploy
+    /// declared a hash the tenant cannot pay for.
+    #[error("password verification memory is over the tenant's budget")]
+    AuthOverBudget,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -105,7 +111,8 @@ impl AppError {
             | Self::FilterBusy
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
-            | Self::AuthBusy => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::AuthBusy
+            | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -123,7 +130,8 @@ impl AppError {
             | Self::FilterBusy
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
-            | Self::AuthBusy => Some(1),
+            | Self::AuthBusy
+            | Self::AuthOverBudget => Some(1),
             Self::WakeTimeout => Some(5),
             _ => None,
         }
@@ -134,7 +142,7 @@ impl AppError {
     /// [`Self::FilterBusy`] is one: the filter pool is shared by every tenant. So is
     /// [`Self::Saturated`]: the backend may be shared, and another tenant can fill it. A filter
     /// that does not fit its own tenant's budget ([`Self::FilterOverBudget`]) is not: the deploy
-    /// raised the filter's memory above what the tenant can pay.
+    /// raised the filter's memory above what the tenant can pay; so is [`Self::AuthOverBudget`].
     #[must_use]
     pub fn is_capacity_refusal(&self) -> bool {
         matches!(
@@ -166,6 +174,7 @@ impl AppError {
             Self::WakeTimeout => "wake_timeout",
             Self::FilterBusy => "filter_busy",
             Self::AuthBusy => "auth_busy",
+            Self::AuthOverBudget => "auth_over_budget",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
@@ -280,5 +289,17 @@ mod test {
             err.body(),
             json!({"error": "snapshot rejected", "conflicts": [{"code": "host_conflict", "host": "a.test"}]})
         );
+    }
+
+    #[test]
+    fn auth_over_budget_counts_toward_auto_revert_but_busy_does_not() {
+        for err in [AppError::AuthBusy, AppError::AuthOverBudget] {
+            assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(err.retry_after_secs(), Some(1));
+        }
+        assert!(AppError::AuthBusy.is_capacity_refusal());
+        assert!(!AppError::AuthOverBudget.is_capacity_refusal());
+        assert_eq!(AppError::AuthBusy.log_reason(), "auth_busy");
+        assert_eq!(AppError::AuthOverBudget.log_reason(), "auth_over_budget");
     }
 }
