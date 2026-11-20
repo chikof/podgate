@@ -37,6 +37,7 @@ use crate::inflight::{Inflight, InflightGuard};
 use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
+use crate::skew;
 use crate::sni;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
 
@@ -173,6 +174,7 @@ impl ProxyHttp for Gateway {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
+        skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         if let Some(slot) = &ctx.tenant_slot {
             ctx.compression =
                 compress::start(session.req_header(), upstream_response, slot.tenant());

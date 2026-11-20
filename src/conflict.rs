@@ -263,6 +263,7 @@ mod test {
             tenants: vec![tenant("t1"), tenant("t2")],
             apps,
             certificates: Vec::new(),
+            skew_secret: None,
         };
         match RoutingTable::compile(&snapshot) {
             Ok(_) => Vec::new(),

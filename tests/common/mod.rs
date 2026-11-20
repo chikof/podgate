@@ -204,6 +204,25 @@ impl Podgate {
         exchange(&mut stream, &get_request(host, path)).await
     }
 
+    /// `GET path` on the HTTP proxy listener with `Host: host` and extra request headers.
+    pub async fn get_with_headers(
+        &self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Response {
+        let mut stream = TcpStream::connect(self.proxy_addr)
+            .await
+            .expect("connect to the proxy");
+        let extra: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n");
+        exchange(&mut stream, &request).await
+    }
+
     /// `GET path` on the HTTPS listener: TLS handshake with `sni` as server name (like
     /// `curl --resolve`), trusting only `trusted`, then `Host: host`.
     ///

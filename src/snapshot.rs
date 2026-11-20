@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::skew::SkewSecret;
+
 /// The complete desired state of one node. Replaces the previous snapshot as a whole.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -21,6 +23,11 @@ pub struct Snapshot {
     /// Certificates served on the TLS listener, chosen by SNI. Change 0014 fills this from ACME.
     #[serde(default)]
     pub certificates: Vec<Certificate>,
+    /// Key that signs the session cookie pinning a browser to a revision, at least 16
+    /// bytes (a shorter one rejects the snapshot with `422`). Absent: skew protection is off. Never
+    /// logged.
+    #[serde(default)]
+    pub skew_secret: Option<SkewSecret>,
 }
 
 /// One tenant of the PaaS.

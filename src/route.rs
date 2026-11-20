@@ -10,6 +10,7 @@ use pingora::http::RequestHeader;
 use thiserror::Error;
 
 use crate::host;
+use crate::skew;
 use crate::table::RoutingTable;
 
 /// The routing decision for one request. Indices point into the table the request was
@@ -22,6 +23,9 @@ pub struct Selected {
     pub revision: usize,
     /// The backend to connect to.
     pub upstream: SocketAddr,
+    /// Whether a valid session cookie dictated the revision (see [`crate::skew`]); `false` when
+    /// the weighted pick chose it.
+    pub pinned: bool,
 }
 
 /// Why a request has no route.
@@ -46,7 +50,9 @@ pub fn request_host(request: &RequestHeader) -> Option<Cow<'_, str>> {
     Some(host::normalize(raw))
 }
 
-/// Routes a request against `table`.
+/// Routes a request against `table`. A valid session cookie (see [`crate::skew`]) pins it to
+/// the revision it names while that revision is `serving` or `retiring`; otherwise the weighted
+/// pick decides.
 ///
 /// # Errors
 ///
@@ -55,11 +61,15 @@ pub fn request_host(request: &RequestHeader) -> Option<Cow<'_, str>> {
 pub fn resolve(table: &RoutingTable, request: &RequestHeader) -> Result<Selected, RouteError> {
     let host = request_host(request).ok_or(RouteError::UnknownHost)?;
     let (index, app) = table.find_app(&host).ok_or(RouteError::UnknownHost)?;
-    let pick = app.pick().ok_or(RouteError::NoUpstream)?;
+    let (pick, pinned) = match skew::pinned(table, app, request) {
+        Some(pick) => (pick, true),
+        None => (app.pick().ok_or(RouteError::NoUpstream)?, false),
+    };
     Ok(Selected {
         app: index,
         revision: pick.revision,
         upstream: pick.upstream,
+        pinned,
     })
 }
 

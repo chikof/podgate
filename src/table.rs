@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use crate::conflict::{self, Conflict};
 use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
+use crate::skew::SkewSecret;
 use crate::snapshot::{App, Budget, Revision, RevisionState, Snapshot};
 use crate::tls::{CertError, CertStore};
 
@@ -46,6 +47,9 @@ pub enum CompileError {
     /// A certificate cannot be served.
     #[error(transparent)]
     Certificate(#[from] CertError),
+    /// The `skew_secret` is shorter than [`SkewSecret::MIN_LEN`] bytes.
+    #[error("skew_secret must be at least {} bytes", SkewSecret::MIN_LEN)]
+    SkewSecretTooShort,
 }
 
 /// Why a snapshot was not applied.
@@ -124,6 +128,16 @@ impl CompiledRevision {
     /// Whether new requests may be sent here: serving, weighted, and with a backend.
     fn takes_new_requests(&self) -> bool {
         self.state == RevisionState::Serving && self.weight > 0 && !self.upstreams.is_empty()
+    }
+
+    /// The next backend, in turn; `None` without backends.
+    fn take_upstream(&self) -> Option<SocketAddr> {
+        if self.upstreams.is_empty() {
+            return None;
+        }
+        let turn = self.next_upstream.fetch_add(1, Ordering::Relaxed);
+        let slot = usize::try_from(turn % self.upstreams.len() as u64).ok()?;
+        self.upstreams.get(slot).copied()
     }
 }
 
@@ -224,16 +238,33 @@ impl CompiledApp {
             }
             let weight = u64::from(revision.weight);
             if ticket < weight {
-                let turn = revision.next_upstream.fetch_add(1, Ordering::Relaxed);
-                let slot = usize::try_from(turn % revision.upstreams.len() as u64).ok()?;
                 return Some(Pick {
                     revision: index,
-                    upstream: *revision.upstreams.get(slot)?,
+                    upstream: revision.take_upstream()?,
                 });
             }
             ticket -= weight;
         }
         None
+    }
+
+    /// The pick for a session pinned to revision `id`: `serving` or `retiring` revisions with a
+    /// backend only, weight ignored. `None` when the revision is `draining`, gone or has no
+    /// backend, and the request must be routed by [`Self::pick`].
+    #[must_use]
+    pub fn pick_pinned(&self, id: &str) -> Option<Pick> {
+        let (index, revision) = self
+            .revisions
+            .iter()
+            .enumerate()
+            .find(|(_, revision)| &*revision.id == id)?;
+        if revision.state == RevisionState::Draining {
+            return None;
+        }
+        Some(Pick {
+            revision: index,
+            upstream: revision.take_upstream()?,
+        })
     }
 }
 
@@ -245,6 +276,7 @@ pub struct RoutingTable {
     hosts: HostMap<usize>,
     certificates: CertStore,
     budgets: HashMap<Box<str>, Budget>,
+    skew_secret: Option<SkewSecret>,
 }
 
 impl RoutingTable {
@@ -253,8 +285,16 @@ impl RoutingTable {
     /// # Errors
     ///
     /// Returns [`CompileError`] for an invalid host, an unknown tenant, declarations that
-    /// conflict (every [`Conflict`] is reported at once) or a certificate that cannot be served.
+    /// conflict (every [`Conflict`] is reported at once), a certificate that cannot be served or a
+    /// `skew_secret` that is too short.
     pub fn compile(snapshot: &Snapshot) -> Result<Self, CompileError> {
+        if snapshot
+            .skew_secret
+            .as_ref()
+            .is_some_and(|secret| !secret.is_long_enough())
+        {
+            return Err(CompileError::SkewSecretTooShort);
+        }
         let tenants: HashSet<&str> = snapshot.tenants.iter().map(|tenant| &*tenant.id).collect();
         let mut claims = Vec::new();
         for (index, app) in snapshot.apps.iter().enumerate() {
@@ -291,6 +331,7 @@ impl RoutingTable {
                 .iter()
                 .map(|tenant| (tenant.id.clone(), tenant.budget))
                 .collect(),
+            skew_secret: snapshot.skew_secret.clone(),
         })
     }
 
@@ -343,6 +384,12 @@ impl RoutingTable {
     #[must_use]
     pub fn certificates(&self) -> &CertStore {
         &self.certificates
+    }
+
+    /// The key signing session cookies, when the snapshot sets a `skew_secret`.
+    #[must_use]
+    pub fn skew_secret(&self) -> Option<&SkewSecret> {
+        self.skew_secret.as_ref()
     }
 }
 
@@ -438,6 +485,7 @@ mod test {
             }],
             apps,
             certificates: Vec::new(),
+            skew_secret: None,
         }
     }
 

@@ -91,6 +91,7 @@ fn rejection(err: &CompileError) -> Vec<Value> {
         CompileError::InvalidHost { .. } => other("invalid_host"),
         CompileError::UnknownTenant { .. } => other("unknown_tenant"),
         CompileError::Certificate(_) => other("invalid_certificate"),
+        CompileError::SkewSecretTooShort => other("invalid_skew_secret"),
     }
 }
 
