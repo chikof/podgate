@@ -129,7 +129,7 @@ pub fn resolve(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::snapshot::Snapshot;
+    use podgate_model::Snapshot;
 
     fn table(json: &str) -> RoutingTable {
         let snapshot: Snapshot = serde_json::from_str(json).expect("valid snapshot");

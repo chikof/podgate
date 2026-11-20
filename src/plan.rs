@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::snapshot::TlsMode;
 use crate::table::{CompiledApp, RoutingTable};
+use podgate_model::TlsMode;
 
 /// The `kind` strings of the built-in posture changes. Middleware kinds add their own, such as
 /// `filters_removed` and `filters_changed` from the `wasm` middleware.
@@ -176,7 +176,7 @@ mod test {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::snapshot::Snapshot;
+    use podgate_model::Snapshot;
 
     fn app(id: &str, hosts: &[&str], port: u16, extra: &Value) -> Value {
         let mut app = json!({

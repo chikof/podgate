@@ -253,7 +253,7 @@ fn weaken_etag(response: &mut ResponseHeader) {
 mod test {
     use super::*;
     use crate::budget::Budgets;
-    use crate::snapshot::Budget;
+    use podgate_model::Budget;
 
     fn request(accept: Option<&str>) -> RequestHeader {
         let mut request = RequestHeader::build("GET", b"/", None).expect("request");

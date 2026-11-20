@@ -1,6 +1,6 @@
 //! Scale to zero: hold requests for a sleeping app until it wakes, and report idle apps.
 //!
-//! An app with [`crate::snapshot::ScaleToZero`] may have no upstream at all. A request for it is not refused: it
+//! An app with [`podgate_model::ScaleToZero`] may have no upstream at all. A request for it is not refused: it
 //! is *held* ([`Wake::hold`]) until a snapshot gives the app an upstream or `wake_timeout_secs`
 //! pass. Holding starts a *wake cycle*, which lasts while at least one request of the app is
 //! held; the first held request of a cycle emits [`EventKind::WakeRequested`], later ones emit
@@ -365,7 +365,7 @@ impl BackgroundService for WakeService {
 mod test {
     use super::*;
     use crate::events::EventFeed;
-    use crate::snapshot::Snapshot;
+    use podgate_model::Snapshot;
 
     fn table(servers: &str, idle_secs: u64) -> RoutingTable {
         let json = format!(

@@ -99,7 +99,7 @@ impl Default for Executor {
 mod test {
     use super::*;
     use crate::budget::Budgets;
-    use crate::snapshot::Budget;
+    use podgate_model::Budget;
 
     fn tenant(max_buffer_bytes: u64) -> Arc<TenantBudget> {
         Budgets::new().tenant(

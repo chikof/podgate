@@ -1,6 +1,6 @@
 # Architecture
 
-podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS control plane pushes over a unix-socket admin API. One package with a library (testable) and a thin binary. `## Target architecture` is the design every spec builds on; `## Snapshot model v2` is the routing, service and middleware model that replaces the v1 snapshot entities and assigns every module to an owner; `## Layout` and the sections after it describe what exists today.
+podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS control plane pushes over a unix-socket admin API. A Cargo workspace: the daemon is the root package (a library, testable, and a thin binary) and the other crates live under `crates/`. `## Target architecture` is the design every spec builds on; `## Snapshot model v2` is the routing, service and middleware model that replaces the v1 snapshot entities and assigns every module to an owner; `## Layout` and the sections after it describe what exists today.
 
 ## Layout
 
@@ -10,7 +10,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/lib.rs` | Module declarations, re-exports, `init_tracing`, and `run(config)`, which builds the Pingora `Server`. |
 | `src/config.rs` | `Config` and `LogFormat` read from environment variables; `ConfigError` names the bad variable. |
 | `src/error.rs` | `AppError`: the one error clients see, `{"error": "..."}` with a status. Conversions from `ApplyError` and `RouteError`; a rejected snapshot lists its `conflicts` as objects. |
-| `src/snapshot.rs`, `src/snapshot/*.rs` | `Snapshot` and the entities under it (`App`, `Router`, `Declared`, `Revision`, entry point policies, L4 and observability models): the serde model of `PUT /v1/snapshot`. |
+| `crates/podgate-model/` | The `podgate-model` crate: `Snapshot` and the entities under it (`App`, `Router`, `Declared`, `Revision`, `SkewSecret`, entry point policies, L4 and observability models), the serde model of `PUT /v1/snapshot`. Depends on `serde` and `serde_json` only (`schemars` behind the `schema` feature), so the daemon, `podgate-provider` and tools that build snapshots share the types without compiling Pingora or wasmtime. Files: `src/lib.rs` (envelope entities), `src/{entry_point,l4,observe,secret}.rs`. Kind configuration stays an opaque `serde_json::Map` in `Declared`; the daemon's kind modules parse it. Import path: `podgate_model::{Snapshot, App, ...}`. New crates go under `crates/` (`podgate-provider` in change 0069); the root `Cargo.toml` is `[workspace]` plus the daemon `[package]`, with `[workspace.lints]` shared by every member. |
 | `src/host.rs` | Host patterns (`HostPattern`), request host normalization, `HostMap` (exact beats one-label wildcard). |
 | `src/table.rs` | `RoutingTable` (compiled snapshot: apps with routers, middleware stages, services and revisions; weighted pick over `serving` revisions; `rematch`), `TableHandle` (atomic swap, `apply`), `CompileError`, `ApplyError`. |
 | `src/conflict.rs` | `Conflict`: one typed variant per conflict code (`host_conflict`, `route_ambiguity`, `tls_policy_conflict`, `cross_tenant_wildcard`, `cross_tenant_catch_all`) and the pass that finds all of them in the routers of a snapshot. |
@@ -68,7 +68,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `examples/slow_upstream.rs` | A backend with a fixed latency and capacity (`slow_upstream <addr> <latency_ms> <capacity>`), for `scripts/load-fairness.sh`. |
 | `scripts/load-fairness.sh` | Load test of the per-tenant fair queue: tenant A floods at 1000 rps, tenant B sends 10 rps, with `oha` against the `podgate` binary and `slow_upstream`; see `## Backend admission`. |
 | `scripts/bench-proxies.sh`, `bench/` | Benchmark of podgate against Caddy and Traefik on one machine: the script, the Caddy and Traefik configs and the podgate snapshot it renders. `examples/fast_upstream.rs` is its backend and `examples/bench_cert.rs` writes the shared certificate. Method and results: `docs/benchmarks.md`. |
-| `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
+| `Dockerfile`, `.dockerignore` | Multi-stage image on distroless; the dependency-cache layer copies each workspace member's manifest, so a new crate adds one `COPY` line. |
 
 ### Adding a feature
 
@@ -76,7 +76,7 @@ Features are added by extension, so parallel work merges as one-line changes:
 
 - **Proxy callback.** Each `ProxyHttp` callback in `src/proxy.rs` is a short sequence of calls into per-feature modules. A feature adds `src/<feature>.rs` with its logic as plain functions, one field on `Ctx` (default in `Gateway::new_ctx`), and one line in each callback it hooks. Core host routing stays in `route.rs`.
 - **Admin endpoint.** A feature adds `src/admin/<feature>.rs` with `fn routes() -> Router<AppState>` and one `.merge(<feature>::routes())` line in `admin::router`. Handlers return `Result<_, AppError>`.
-- **Snapshot field.** Add the field to the entity in `snapshot.rs` with `#[serde(default)]`, never `deny_unknown_fields`; compile it in `table.rs`. An absent field means the feature is off.
+- **Snapshot field.** Add the field to the entity in `crates/podgate-model/src/lib.rs` with `#[serde(default)]`, never `deny_unknown_fields`; compile it in `table.rs`. An absent field means the feature is off.
 - **Test.** Use `tests/common`; one `tests/<feature>.rs` per feature, unit tests in a `mod test` leaf of the module.
 
 ## Target architecture
@@ -511,7 +511,7 @@ Already outside, keyed by app and revision: in-flight counters (`inflight.rs`), 
 
 |Area|Files|Built by 0022|Feature specs that fill it|
 |---|---|---|---|
-|Model (shared)|`src/snapshot.rs`, `src/snapshot/{entry_point,l4,observe}.rs`|All envelope types; `Declared`|Add optional envelope fields only|
+|Model (shared)|`crates/podgate-model/src/{lib,entry_point,l4,observe,secret}.rs`|All envelope types; `Declared`|Add optional envelope fields only|
 |Compile (shared)|`src/compile.rs`, `src/table.rs`, `src/conflict.rs`, `src/error.rs`|The passes, `Invalid` and `Rejected`, `CompileContext`, all conflict codes|None; new codes go through `Invalid`|
 |Router|`src/router.rs`, `src/router/{tree,priority,path}.rs`|Index, order key, path normalization, tenant isolation of fallbacks|Specificity or ambiguity corrections|
 |Matcher leaves|`src/router/matcher.rs`, `src/router/matcher/*.rs`|`host`, `host_regexp`, `path`, `path_prefix`, `path_regexp`, `method`, `all`, `any`, `not`|One spec for `header`, `header_regexp`, `query`, `query_regexp`; one for `client_ip` (needs forwarded-header trust)|
@@ -721,6 +721,6 @@ docker run --rm -p 8080:8080 -v podgate-admin:/run/podgate podgate
 
 ## Conventions
 
-- Lints in `Cargo.toml` (`docs/rust-style.md`); `exhaustive_*` allowed because this is application code.
+- Lints in the root `Cargo.toml` `[workspace.lints]`, inherited by every crate (`docs/rust-style.md`); `exhaustive_*` allowed because this is application code.
 - Dependencies: add only when std cannot do it in a few lines; `cargo deny check` gates licences and advisories. Pingora is built with `proxy`, `lb` and `rustls`: no C TLS stack in the binary.
 - Tests: unit tests in a `mod test` leaf, end-to-end tests in `tests/<feature>.rs` on `tests/common`.

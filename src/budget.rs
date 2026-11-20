@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::error::AppError;
-use crate::snapshot::Budget;
 use crate::table::RoutingTable;
+use podgate_model::Budget;
 
 /// The budget and the live usage of one tenant.
 #[derive(Debug)]
@@ -417,7 +417,7 @@ mod test {
 
     #[test]
     fn budget_guard_render_lists_live_tenants_and_escapes_labels() {
-        use crate::snapshot::{Snapshot, Tenant};
+        use podgate_model::{Snapshot, Tenant};
         let snapshot = Snapshot {
             version: 1,
             tenants: vec![Tenant {

@@ -27,9 +27,9 @@ use serde_json::Value;
 
 use crate::budget::TenantBudget;
 use crate::compile::Invalid;
-use crate::snapshot::{App, Declared};
 use crate::table::CompiledApp;
 use crate::wasm as engine;
+use podgate_model::{App, Declared};
 
 pub mod wasm;
 
@@ -191,7 +191,7 @@ macro_rules! kinds {
             /// `middleware_not_built` for a planned type nobody has built, `unknown_middleware`
             /// for any other type, else whatever the kind's own compile refuses with.
             pub fn compile(
-                declared: &$crate::snapshot::Declared,
+                declared: &podgate_model::Declared,
                 cx: &mut $crate::middleware::CompileCx<'_>,
             ) -> Result<Self, $crate::compile::Invalid> {
                 match &*declared.kind {
@@ -516,12 +516,12 @@ mod test {
         }
 
         pub(super) fn compile(declared: &Declared) -> Result<Stage, Invalid> {
-            let app = crate::snapshot::App {
+            let app = podgate_model::App {
                 id: "a".into(),
                 tenant: "t".into(),
                 declared_by: "test".into(),
-                tls: crate::snapshot::TlsPolicy {
-                    mode: crate::snapshot::TlsMode::Acme,
+                tls: podgate_model::TlsPolicy {
+                    mode: podgate_model::TlsMode::Acme,
                     client_ca_pem: None,
                     pass_client_cert: false,
                 },

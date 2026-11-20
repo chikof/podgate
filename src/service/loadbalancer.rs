@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use super::lb::{Balancer, PickCx};
 use crate::compile::Invalid;
-use crate::snapshot::Declared;
+use podgate_model::Declared;
 
 /// The configuration of a `loadbalancer`.
 #[derive(Debug, Deserialize)]

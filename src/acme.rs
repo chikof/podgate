@@ -43,8 +43,8 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 
 use crate::events::{EventFeed, EventKind};
-use crate::snapshot;
 use crate::table::TableHandle;
+use podgate_model as snapshot;
 
 pub use http01::serve_challenge;
 pub use plan::{CertInfo, Plan, PlanError};

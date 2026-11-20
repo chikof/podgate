@@ -1,6 +1,6 @@
 //! Services: where a routed request goes. A router names a service; the service picks a server.
 //!
-//! A service is a [`crate::snapshot::Declared`] object of one `type`. `loadbalancer` is built;
+//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer` is built;
 //! `weighted`, `mirroring` and `failover` are planned and refused with `service_not_built`; any
 //! other type is `invalid_service`. A router's service is looked up in the revision the request
 //! picked, then in the app's own services. Each kind lives in its own file:
@@ -33,7 +33,7 @@ mod weighted;
 use std::net::SocketAddr;
 
 use crate::compile::Invalid;
-use crate::snapshot::Declared;
+use podgate_model::Declared;
 
 pub use lb::PickCx;
 pub use loadbalancer::{LoadBalancer, Server, ServerState};

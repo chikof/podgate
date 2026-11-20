@@ -15,9 +15,9 @@ use thiserror::Error;
 
 use crate::clientauth::{self, HandshakeVerifier};
 use crate::host::{self, HostMap, HostPattern};
-use crate::snapshot::Certificate;
 use crate::sni;
 use crate::table::TableHandle;
+use podgate_model::Certificate;
 
 /// A certificate in a snapshot that cannot be served.
 #[derive(Debug, Error, PartialEq, Eq)]

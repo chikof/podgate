@@ -6,7 +6,7 @@
 //! is in `docs/architecture.md`. `main.rs` stays thin; everything testable lives here:
 //!
 //! - [`Config`]: settings read from environment variables.
-//! - [`Snapshot`]: the JSON model of a pushed snapshot.
+//! - [`podgate_model::Snapshot`]: the JSON model of a pushed snapshot.
 //! - [`wasm`]: WASM request filters (proxy-wasm subset) with fuel and memory limits.
 //! - [`acme`]: HA ACME issuance with ARI renewal, HTTP-01 answers and on-demand TLS.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
@@ -60,7 +60,6 @@ pub mod route;
 pub mod router;
 pub mod service;
 pub mod skew;
-pub mod snapshot;
 pub mod sni;
 pub mod table;
 pub mod tls;
@@ -89,7 +88,6 @@ pub use fairq::Backends;
 pub use inflight::{Inflight, InflightGuard};
 pub use outcomes::Outcomes;
 pub use proxy::{Ctx, Gateway};
-pub use snapshot::Snapshot;
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
 pub use wake::{Wake, WakeService};
 

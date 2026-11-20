@@ -27,9 +27,9 @@ use crate::entry::CompileContext;
 use crate::middleware;
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, PickCx};
-use crate::skew::SkewSecret;
-use crate::snapshot::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
 use crate::tls::{CertError, CertStore};
+use podgate_model::SkewSecret;
+use podgate_model::{App, Budget, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy};
 
 /// A snapshot the compiler refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -356,7 +356,7 @@ impl CompiledApp {
 
     /// The canary policy as declared, `None` when the app has none.
     #[must_use]
-    pub fn canary_policy(&self) -> Option<&crate::snapshot::Canary> {
+    pub fn canary_policy(&self) -> Option<&podgate_model::Canary> {
         self.canary.as_deref().map(Runtime::policy)
     }
 

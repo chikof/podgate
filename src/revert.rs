@@ -41,8 +41,8 @@ use crate::events::{EventFeed, EventKind};
 use crate::inflight::Inflight;
 use crate::outcomes::{Counts, Outcomes, RING_SECS};
 use crate::plan;
-use crate::snapshot::Snapshot;
 use crate::table::{Replaced, TableHandle};
+use podgate_model::Snapshot;
 
 /// Length of the watch when the snapshot does not set `revert_window_secs`.
 pub const DEFAULT_WINDOW_SECS: u64 = 60;

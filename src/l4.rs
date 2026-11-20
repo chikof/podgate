@@ -1,5 +1,5 @@
-//! TCP and UDP routing (layer 4). The model is in [`crate::snapshot::Tcp`] and
-//! [`crate::snapshot::Udp`]; the runtime is not built. Pingora has no UDP support and no L4
+//! TCP and UDP routing (layer 4). The model is in [`podgate_model::Tcp`] and
+//! [`podgate_model::Udp`]; the runtime is not built. Pingora has no UDP support and no L4
 //! router, so these will run as podgate's own services on tokio; their specs read
 //! `pingora-core` before promising what TCP gives for free.
 //!
@@ -10,7 +10,7 @@ mod tcp;
 mod udp;
 
 use crate::compile::Invalid;
-use crate::snapshot::App;
+use podgate_model::App;
 
 /// The refusal for an app that declares L4 routers or services, `None` when it declares none.
 #[must_use]

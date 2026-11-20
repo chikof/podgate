@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::host::HostPattern;
 use crate::router::{CompiledRouter, Tier};
-use crate::snapshot::App;
+use podgate_model::App;
 
 fn describe_ambiguity(
     host: Option<&str>,

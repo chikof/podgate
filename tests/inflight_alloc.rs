@@ -8,7 +8,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use podgate::route::Selected;
-use podgate::{EventFeed, Inflight, RoutingTable, Snapshot};
+use podgate::{EventFeed, Inflight, RoutingTable};
+use podgate_model::Snapshot;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 

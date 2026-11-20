@@ -25,7 +25,7 @@ mod tree;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::host::HostPattern;
-use crate::snapshot::{App, EntryPointPolicy, Router};
+use podgate_model::{App, EntryPointPolicy, Router};
 
 pub use matcher::{Claim, Matcher, Spec, View};
 pub use priority::Key;

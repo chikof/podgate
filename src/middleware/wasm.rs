@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 use super::{CompileCx, Flow, Kind, RequestCx};
 use crate::compile::Invalid;
-use crate::snapshot::Declared;
 use crate::wasm::{CompiledFilter, Reason, run_filter};
+use podgate_model::Declared;
 
 /// The configuration of a `wasm` middleware.
 #[derive(Clone, PartialEq, Eq, Deserialize)]

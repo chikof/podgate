@@ -13,14 +13,12 @@
 //! never pins a request of another app. Verification is constant-time. Without a `skew_secret`
 //! the feature is off: no cookie is read or set.
 
-use std::fmt;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
-use serde::{Deserialize, Serialize};
+use podgate_model::SkewSecret;
 use sha2::Sha256;
 
 use crate::route::Selected;
@@ -37,42 +35,12 @@ const LEN_PREFIX: usize = 2;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The HMAC key for session cookies: the snapshot's `skew_secret`. Never printed: `Debug` hides it.
-///
-/// Any string deserializes; [`RoutingTable::compile`] refuses one shorter than [`Self::MIN_LEN`].
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SkewSecret(String);
-
-impl fmt::Debug for SkewSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SkewSecret([redacted])")
-    }
-}
-
-impl SkewSecret {
-    /// Shortest secret the compiler accepts, in bytes.
-    pub const MIN_LEN: usize = 16;
-
-    /// Wraps `secret`; length is checked by [`RoutingTable::compile`].
-    #[must_use]
-    pub fn new(secret: impl Into<String>) -> Self {
-        Self(secret.into())
-    }
-
-    /// Whether the secret is long enough to key the cookie HMAC.
-    #[must_use]
-    pub fn is_long_enough(&self) -> bool {
-        self.0.len() >= Self::MIN_LEN
-    }
-
-    /// An HMAC over `payload` keyed with the secret. `None` only if the HMAC rejects the key,
-    /// which it does for no length.
-    fn mac(&self, payload: &[u8]) -> Option<HmacSha256> {
-        let mut mac = HmacSha256::new_from_slice(self.0.as_bytes()).ok()?;
-        mac.update(payload);
-        Some(mac)
-    }
+/// An HMAC over `payload` keyed with `secret`. `None` only if the HMAC rejects the key, which it
+/// does for no length.
+fn mac(secret: &SkewSecret, payload: &[u8]) -> Option<HmacSha256> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload);
+    Some(mac)
 }
 
 /// `len(app) || app || revision`: what the MAC covers and the cookie carries.
@@ -88,7 +56,7 @@ fn payload(app: &str, revision: &str) -> Option<Vec<u8>> {
 /// The signed cookie value pinning a session to `app`/`revision`.
 fn sign(secret: &SkewSecret, app: &str, revision: &str) -> Option<String> {
     let mut bytes = payload(app, revision)?;
-    let tag = secret.mac(&bytes)?.finalize().into_bytes();
+    let tag = mac(secret, &bytes)?.finalize().into_bytes();
     bytes.extend_from_slice(&tag);
     Some(URL_SAFE_NO_PAD.encode(bytes))
 }
@@ -101,7 +69,7 @@ fn verify(secret: &SkewSecret, value: &str, app: &str) -> Option<String> {
     }
     let bytes = URL_SAFE_NO_PAD.decode(value).ok()?;
     let (payload, tag) = bytes.split_at_checked(bytes.len().checked_sub(MAC_LEN)?)?;
-    secret.mac(payload)?.verify_slice(tag).ok()?;
+    mac(secret, payload)?.verify_slice(tag).ok()?;
     let (len, rest) = payload.split_at_checked(LEN_PREFIX)?;
     let app_len = usize::from(u16::from_be_bytes([*len.first()?, *len.get(1)?]));
     let (signed_app, revision) = rest.split_at_checked(app_len)?;

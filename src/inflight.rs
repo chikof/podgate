@@ -44,8 +44,8 @@ use arc_swap::ArcSwap;
 
 use crate::events::{EventFeed, EventKind};
 use crate::route::Selected;
-use crate::snapshot::RevisionState;
 use crate::table::RoutingTable;
+use podgate_model::RevisionState;
 
 /// Two levels so a lookup borrows `&str` and does not allocate.
 type Registry = HashMap<Box<str>, HashMap<Box<str>, Arc<Counter>>>;
@@ -357,7 +357,7 @@ mod test {
 
     use super::*;
     use crate::events::Event;
-    use crate::snapshot::Snapshot;
+    use podgate_model::Snapshot;
 
     fn table(version: u64, state: &str) -> RoutingTable {
         let json = format!(

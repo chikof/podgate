@@ -3,21 +3,24 @@
 # Run:    docker run --rm -p 8080:8080 -v podgate-admin:/run/podgate podgate
 
 FROM rust:1.99-slim AS build
-# Pingora's zlib-ng build needs cmake.
+# Pingora's zlib-ng build needs cmake, make and a C++ compiler (the slim image has none).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake \
+    && apt-get install -y --no-install-recommends cmake g++ make \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-# Cache dependencies: build a stub first so source edits do not rebuild them.
+# Cache dependencies: build stubs first so source edits do not rebuild them. Every workspace member needs
+# its manifest here (the `members = ["crates/*"]` glob must resolve) and a stub source.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src \
+COPY crates/podgate-model/Cargo.toml crates/podgate-model/Cargo.toml
+RUN mkdir src crates/podgate-model/src \
     && echo 'fn main() {}' > src/main.rs \
-    && touch src/lib.rs \
+    && touch src/lib.rs crates/podgate-model/src/lib.rs \
     && cargo build --release --locked \
-    && rm -rf src
+    && rm -rf src crates/podgate-model/src
 COPY src ./src
+COPY crates ./crates
 # Touch so cargo sees the real sources as newer than the stub build.
-RUN touch src/main.rs src/lib.rs && cargo build --release --locked
+RUN touch src/main.rs src/lib.rs crates/podgate-model/src/lib.rs && cargo build --release --locked
 # The runtime image has no shell, so the admin socket directory is made here and copied over.
 RUN mkdir -p /out/run/podgate
 

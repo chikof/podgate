@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::error::AppError;
-use crate::snapshot::Snapshot;
+use podgate_model::Snapshot;
 
 /// Largest accepted snapshot body.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;

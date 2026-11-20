@@ -1,7 +1,7 @@
 //! Entry points (listeners) as the request path sees them.
 //!
 //! Where an entry point listens is process configuration, because Pingora binds its sockets
-//! before it runs; what it allows is snapshot data ([`crate::snapshot::EntryPointPolicy`]).
+//! before it runs; what it allows is snapshot data ([`podgate_model::EntryPointPolicy`]).
 //! Today the process has two entry points, `web` (plain HTTP, `PROXY_ADDR`) and `websecure`
 //! (TLS, `PROXY_TLS_ADDR`); the `ENTRY_POINTS` setting, proxy protocol, forwarded-header trust,
 //! timeouts and the other policy fields belong to the entry point spec, which fills this file.

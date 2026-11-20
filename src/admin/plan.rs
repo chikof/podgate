@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use super::AppState;
 use crate::error::AppError;
 use crate::plan::{self, Plan};
-use crate::snapshot::Snapshot;
+use podgate_model::Snapshot;
 
 /// Largest accepted snapshot body; the same as `PUT /v1/snapshot`.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;

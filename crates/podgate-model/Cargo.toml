@@ -1,0 +1,19 @@
+[package]
+name = "podgate-model"
+description = "The snapshot types podgate's control-plane API speaks, with no proxy dependencies"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = { version = "1.2.3", optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[features]
+schema = ["dep:schemars"]

@@ -1,12 +1,22 @@
-[package]
-name = "podgate"
-description = "Memory-safe reverse proxy for our PaaS, built on Pingora"
-version = "0.1.0"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.99"
 # Not published: `cargo deny` treats private crates as licence-exempt.
 publish = false
+
+[package]
+name = "podgate"
+description = "Memory-safe reverse proxy for our PaaS, built on Pingora"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
@@ -22,6 +32,7 @@ http = "1.5.0"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "time", "x509-parser", "rcgen"] }
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
+podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
 regex = "1.13.2"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
@@ -36,6 +47,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 wasmtime = { version = "50.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
 x509-parser = { version = "0.18.1", default-features = false }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 # tests/common: raw HTTP/1.1 over TCP and unix sockets, plus a tiny upstream server.
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
@@ -44,13 +58,13 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 h2 = "0.4.20"
 wat = "1.263.0"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review
 missing_docs = "warn"           # public items are documented
 unreachable_pub = "warn"        # pub only where the API really exposes it
 variant_size_differences = "warn" # enum variants of very different size waste space; box the big one
 
-[lints.clippy]
+[workspace.lints.clippy]
 # imports
 wildcard_imports = "warn"
 enum_glob_use = "warn"

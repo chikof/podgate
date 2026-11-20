@@ -16,7 +16,7 @@ use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
 use crate::host::{HostMap, HostPattern};
-use crate::snapshot::{Acme, Snapshot, TlsMode};
+use podgate_model::{Acme, Snapshot, TlsMode};
 
 /// A snapshot's ACME settings or certificates that cannot be used.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -321,7 +321,7 @@ fn validate(acme: &Acme) -> Result<(), PlanError> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::snapshot::Snapshot;
+    use podgate_model::Snapshot;
 
     fn snapshot(acme: &str, apps: &str, certificates: &str) -> Snapshot {
         serde_json::from_str(&format!(

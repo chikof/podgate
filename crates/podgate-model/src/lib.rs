@@ -1,5 +1,9 @@
 //! The routing snapshot the control plane pushes: the JSON model of `PUT /v1/snapshot`.
 //!
+//! This crate depends on `serde` and `serde_json` only, so a program that builds snapshots does not
+//! compile the proxy. The daemon compiles a [`Snapshot`] into its routing table and parses the
+//! kind configuration held in [`Declared`].
+//!
 //! The entities and fields are in `docs/architecture.md` (`## Snapshot model v2`). Envelope
 //! entities ([`Snapshot`], [`App`], [`Router`], [`Revision`]) ignore unknown fields, so an older
 //! podgate accepts a newer snapshot that only adds optional envelope fields; give each new field
@@ -12,15 +16,15 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::skew::SkewSecret;
-
 mod entry_point;
 mod l4;
 mod observe;
+mod secret;
 
 pub use entry_point::EntryPointPolicy;
 pub use l4::{Tcp, Udp};
 pub use observe::Observability;
+pub use secret::SkewSecret;
 
 /// The complete desired state of one node. Replaces the previous snapshot as a whole.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +139,7 @@ pub struct Router {
     /// Entry points the router listens on. Absent: every HTTP and HTTPS entry point.
     #[serde(default)]
     pub entry_points: Option<Vec<Box<str>>>,
-    /// The matcher tree, parsed by `crate::router::matcher`: an object with exactly one key.
+    /// The matcher tree, parsed by the daemon's `router::matcher`: an object with exactly one key.
     #[serde(rename = "match")]
     pub matcher: Value,
     /// Higher goes first among the routers of one tenant. Absent: `0`. Never orders routers of
@@ -173,7 +177,8 @@ pub struct Declared {
 
 /// Canary policy of an app: the rollout of one revision, judged by its own `5xx` rate.
 ///
-/// The snapshot owns the policy; podgate owns the live share at runtime (see [`crate::canary`]).
+/// The snapshot owns the policy; podgate owns the live share at runtime (see `crate::canary` in
+/// the daemon).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Canary {
     /// The canary's [`Revision::id`]; it must be `serving`. Its own `weight` is ignored: the
@@ -275,7 +280,7 @@ impl fmt::Debug for Certificate {
     }
 }
 
-/// How certificates are issued and which node issues them. `crate::acme` reads
+/// How certificates are issued and which node issues them. the daemon's `acme` module reads
 /// every field.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Acme {
@@ -367,5 +372,84 @@ mod test {
         assert_eq!(router.matcher["host"], "a.test");
         assert_eq!(router.priority, None);
         assert!(router.chain.is_empty());
+    }
+
+    #[test]
+    fn model_roundtrip_is_stable() {
+        let input = serde_json::json!({
+            "version": 7,
+            "tenants": [{"id": "acme", "weight": 2, "budget": {"max_inflight": 100, "max_buffer_bytes": 1_048_576}}],
+            "apps": [{
+                "id": "shop",
+                "tenant": "acme",
+                "declared_by": "podkit/agent",
+                "tls": {"mode": "on_demand", "client_ca_pem": "ca", "pass_client_cert": true},
+                "routers": [{
+                    "name": "web",
+                    "entry_points": ["websecure"],
+                    "match": {"host": "shop.test"},
+                    "priority": 5,
+                    "chain": ["strip"],
+                    "service": "web",
+                    "observability": {"access_log": false},
+                    "declared_by": "label"
+                }],
+                "middlewares": [{"name": "strip", "type": "strip_prefix", "prefix": "/api"}],
+                "default_chain": ["headers"],
+                "services": [{"name": "web", "type": "loadbalancer", "servers": [{"url": "http://10.0.0.1:80"}]}],
+                "transports": [{"name": "t", "type": "transport", "insecure": true}],
+                "revisions": [{
+                    "id": "r7",
+                    "state": "retiring",
+                    "weight": 10,
+                    "services": [{"name": "web", "type": "loadbalancer", "servers": []}]
+                }],
+                "allow_domain_fronting": true,
+                "record_bodies": true,
+                "scale_to_zero": {"idle_secs": 300, "wake_timeout_secs": 12},
+                "canary": {"revision": "r8", "step_percent": 10, "interval_secs": 30, "max_error_permille": 20},
+                "tcp": {
+                    "routers": [{"name": "db", "service": "pg"}],
+                    "services": [{"name": "pg", "type": "loadbalancer"}],
+                    "middlewares": [{"name": "allow", "type": "ip_allow"}]
+                },
+                "udp": {"routers": [{"name": "dns", "service": "d"}], "services": [{"name": "d", "type": "loadbalancer"}]}
+            }],
+            "certificates": [{"hosts": ["*.shop.test"], "cert_pem": "cert", "key_pem": "key"}],
+            "skew_secret": "abababababababab",
+            "revert_window_secs": 90,
+            "acme": {
+                "issuer_node": "node-a",
+                "directory_url": "https://acme.test/dir",
+                "contact": ["mailto:ops@shop.test"],
+                "eab": {"key_id": "kid", "hmac_key": "hmac"},
+                "account_key_pem": "key",
+                "challenges": [{"token": "t", "key_authorization": "t.k"}],
+                "requested_hosts": ["x.shop.test"]
+            },
+            "entry_points": [{
+                "name": "websecure",
+                "tenants": ["acme"],
+                "forwarded_headers": {"trusted": ["10.0.0.0/8"]},
+                "proxy_protocol": {"trusted": []},
+                "timeouts": {"idle_secs": 60},
+                "http2": {"max_streams": 100},
+                "redirect": {"to": "web"},
+                "allow_encoded_slash": true
+            }],
+            "observability": {
+                "access_log": {"format": "json"},
+                "metrics": {"enabled": true},
+                "tracing": {"sample": 0.1}
+            }
+        });
+
+        let snapshot: Snapshot = serde_json::from_value(input.clone()).expect("parses");
+        assert_eq!(serde_json::to_value(&snapshot).expect("to value"), input);
+
+        let first = serde_json::to_string(&snapshot).expect("serializes");
+        let again: Snapshot = serde_json::from_str(&first).expect("reparses");
+        assert_eq!(again, snapshot);
+        assert_eq!(serde_json::to_string(&again).expect("serializes"), first);
     }
 }

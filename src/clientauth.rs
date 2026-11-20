@@ -48,9 +48,9 @@ use thiserror::Error;
 
 use crate::error::AppError;
 use crate::router::Matched;
-use crate::snapshot::App;
 use crate::sni;
 use crate::table::RoutingTable;
+use podgate_model::App;
 
 /// The request header that carries the verified client certificate's subject to an app with
 /// `pass_client_cert`. Removed from every incoming request.

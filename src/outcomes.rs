@@ -407,7 +407,7 @@ mod test {
 
     #[test]
     fn sync_drops_removed_revisions_and_apps() {
-        use crate::snapshot::Snapshot;
+        use podgate_model::Snapshot;
 
         let outcomes = Outcomes::new();
         let base = Instant::now();

@@ -139,7 +139,7 @@ struct Matched<'a> {
 #[derive(Debug, Serialize)]
 struct RevisionView<'a> {
     id: &'a str,
-    state: crate::snapshot::RevisionState,
+    state: podgate_model::RevisionState,
     /// As configured in the snapshot.
     weight: u16,
     /// What the picker uses for new requests right now: `0` unless the revision is `serving`

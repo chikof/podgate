@@ -33,8 +33,8 @@ use tokio::time::{MissedTickBehavior, sleep, timeout};
 use super::plan::{CertInfo, Plan, decode_hmac_key};
 use super::{Acme, PrivateKeyPem};
 use crate::events::{EventFeed, EventKind};
-use crate::snapshot::{self, ExternalAccount};
 use crate::table::TableHandle;
+use podgate_model::{self as snapshot, ExternalAccount};
 
 /// How often the loop looks at the table.
 const TICK: Duration = Duration::from_secs(1);

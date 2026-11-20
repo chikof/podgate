@@ -59,8 +59,8 @@ use thiserror::Error;
 
 use crate::events::{EventFeed, EventKind};
 use crate::outcomes::Outcomes;
-use crate::snapshot::{App, Canary, RevisionState};
 use crate::table::{CompiledApp, TableHandle};
+use podgate_model::{App, Canary, RevisionState};
 
 /// Fewest requests of the canary in a window before its error rate means anything.
 pub const MIN_REQUESTS: u64 = 20;
@@ -426,8 +426,8 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::snapshot::Snapshot;
     use crate::table::{CompileError, RoutingTable, TableHandle};
+    use podgate_model::Snapshot;
 
     fn snapshot(canary: &serde_json::Value) -> Snapshot {
         serde_json::from_value(json!({

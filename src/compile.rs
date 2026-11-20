@@ -28,10 +28,10 @@ use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
 use crate::service::{self, Service};
-use crate::snapshot::{App, Declared, EntryPointPolicy, RevisionState, Snapshot};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::CertStore;
 use crate::wasm as engine;
+use podgate_model::{App, Declared, EntryPointPolicy, RevisionState, Snapshot};
 
 /// One configuration problem: a stable code, a message, and optional extra fields for the `422`
 /// body (the WASM rejection adds `module` and `name`, for example).
