@@ -173,17 +173,14 @@ async fn circuit_open_does_not_hit_upstream() {
 
 #[tokio::test]
 async fn circuit_opens_on_unreachable_upstream() {
-    let dead = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        listener.local_addr().expect("addr")
-    };
+    let refused = common::refused();
     let config = json!({
         "trip_when": { "network_error_ratio": 0.5 },
         "check_period_ms": 10,
         "min_requests": 5,
         "fallback_secs": 60,
     });
-    let podgate = serve(&config, dead).await;
+    let podgate = serve(&config, refused.addr).await;
     let first = podgate.get("a.test", "/").await;
     assert_eq!(first.status, 502, "{first:?}");
     until_open(&podgate).await;

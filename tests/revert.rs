@@ -11,14 +11,6 @@ use common::{Podgate, Upstream, app, revision_on, serving, snapshot, with_filter
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
-/// An address nothing listens on: connecting is refused, so the proxy answers `502`.
-fn dead_addr() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a free port")
-        .local_addr()
-        .expect("local addr")
-}
-
 async fn reverted_events(podgate: &Podgate) -> Vec<Value> {
     let events = podgate.admin_get("/v1/events?after=0").await.json();
     events["events"]
@@ -49,12 +41,13 @@ fn with_window(mut snapshot: Value, secs: u64) -> Value {
 #[tokio::test]
 async fn auto_revert_on_5xx() {
     let podgate = Podgate::start().await;
+    let refused = common::refused();
     let good = Upstream::start("good").await;
     let healthy = snapshot(1, &[app("a", &["a.test"], &[serving("r1", good.addr)])]);
     assert_eq!(podgate.push_snapshot(&healthy).await.status, 200);
 
     let broken = with_window(
-        snapshot(2, &[app("a", &["a.test"], &[serving("r2", dead_addr())])]),
+        snapshot(2, &[app("a", &["a.test"], &[serving("r2", refused.addr)])]),
         20,
     );
     assert_eq!(podgate.push_snapshot(&broken).await.status, 200);
@@ -84,8 +77,9 @@ async fn auto_revert_on_5xx() {
 #[tokio::test]
 async fn auto_revert_ignores_unchanged_apps() {
     let podgate = Podgate::start().await;
+    let refused = common::refused();
     let good = Upstream::start("good").await;
-    let broken_b = app("b", &["b.test"], &[serving("r1", dead_addr())]);
+    let broken_b = app("b", &["b.test"], &[serving("r1", refused.addr)]);
     let a = app("a", &["a.test"], &[serving("r1", good.addr)]);
     let before = snapshot(1, &[a.clone(), broken_b.clone()]);
     assert_eq!(podgate.push_snapshot(&before).await.status, 200);
@@ -165,6 +159,7 @@ async fn auto_revert_ignores_wake_timeouts() {
 #[tokio::test]
 async fn auto_revert_releases_held_request() {
     let podgate = Arc::new(Podgate::start().await);
+    let refused = common::refused();
     let good = Upstream::start("good").await;
     let before = snapshot(
         1,
@@ -181,7 +176,7 @@ async fn auto_revert_releases_held_request() {
             2,
             &[
                 sleepy("s", "s.test", &[], 30),
-                app("b", &["b.test"], &[serving("r1", dead_addr())]),
+                app("b", &["b.test"], &[serving("r1", refused.addr)]),
             ],
         ),
         20,

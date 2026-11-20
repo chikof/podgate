@@ -289,10 +289,7 @@ async fn overview_includes_runtime_state() {
     let failing = Backend::start(502, Duration::ZERO).await;
     let fine = Backend::start(200, Duration::ZERO).await;
     let slow = Backend::start(200, Duration::from_secs(30)).await;
-    let dead = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        probe.local_addr().expect("addr")
-    };
+    let refused = common::refused();
 
     // `a` ejects its failing server, `b` health checks a dead one, `c` has a request in flight
     // and a circuit breaker, `d` a canary.
@@ -311,7 +308,7 @@ async fn overview_includes_runtime_state() {
     let mut b = app(
         "b",
         &["b.test"],
-        &[revision_on("r1", &[dead], 100, "serving")],
+        &[revision_on("r1", &[refused.addr], 100, "serving")],
     );
     b["revisions"][0]["services"][0]["health_check"] =
         json!({"path": "/healthz", "interval_secs": 1, "timeout_secs": 1});
@@ -849,10 +846,7 @@ async fn overview_size_bounded() {
 async fn overview_follows_swap_and_revert() {
     let podgate = Podgate::start().await;
     let good = Upstream::start("good").await;
-    let dead = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        probe.local_addr().expect("addr")
-    };
+    let refused = common::refused();
     push(
         &podgate,
         &snapshot(1, &[app("a", &["a.test"], &[serving("r1", good.addr)])]),
@@ -865,7 +859,7 @@ async fn overview_follows_swap_and_revert() {
     let mut broken = snapshot(
         2,
         &[
-            app("a", &["a.test"], &[serving("r2", dead)]),
+            app("a", &["a.test"], &[serving("r2", refused.addr)]),
             app("extra", &["extra.test"], &[serving("r1", good.addr)]),
         ],
     );
@@ -877,7 +871,7 @@ async fn overview_follows_swap_and_revert() {
     assert_eq!(app_of(&swapped, "a")["revisions"][0]["id"], "r2");
     assert_eq!(
         app_of(&swapped, "a")["services"][0]["servers"][0]["url"],
-        format!("http://{dead}")
+        format!("http://{}", refused.addr)
     );
 
     for _ in 0..30 {

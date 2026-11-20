@@ -117,6 +117,30 @@ pub fn free_ports(count: usize) -> Vec<u16> {
         .collect()
 }
 
+/// A loopback address that refuses connections, for a test that needs a dead upstream or collector.
+///
+/// The socket is bound but never listens, so a connect is refused and the kernel will not hand the
+/// port to another test's `127.0.0.1:0` bind while the value lives. A listener that is bound,
+/// read for its port and dropped frees the port, and under the parallel gate another test's
+/// backend can get it and answer where the test expects a refusal. Keep the value until the end
+/// of the test.
+pub struct Refused {
+    _socket: tokio::net::TcpSocket,
+    pub addr: SocketAddr,
+}
+
+pub fn refused() -> Refused {
+    let socket = tokio::net::TcpSocket::new_v4().expect("refused socket");
+    socket
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("bind refused socket");
+    let addr = socket.local_addr().expect("refused addr");
+    Refused {
+        _socket: socket,
+        addr,
+    }
+}
+
 fn free_port() -> u16 {
     free_ports(1)[0]
 }

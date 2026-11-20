@@ -259,13 +259,13 @@ async fn failures_ring() {
 
 #[tokio::test]
 async fn failures_records_podgate_generated_5xx() {
-    let dead = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr");
+    let refused = common::refused();
     let podgate = Podgate::start().await;
     let pushed = podgate
-        .push_snapshot(&snapshot(1, &[app_a(&[serving("r1", dead)], false)]))
+        .push_snapshot(&snapshot(
+            1,
+            &[app_a(&[serving("r1", refused.addr)], false)],
+        ))
         .await;
     assert_eq!(pushed.status, 200, "{pushed:?}");
     assert!(proxy(&podgate, "GET", "/x", &[], b"").await.status >= 500);
