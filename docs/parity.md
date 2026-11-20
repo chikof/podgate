@@ -10,11 +10,11 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| Several named listeners | `entryPoints.<n>.address` | listener addresses, `bind` | 0028 (`ENTRY_POINTS`, process config) |
-| Per-router entry point list | `entryPoints` on a router | site address | 0028; unbound names rejected |
-| Per-tenant entry point access | none | none | 0028 |
-| TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 (parse), 0058, 0062 |
 | Forwarded-header trust | `forwardedHeaders.trustedIPs`, `insecure` | `trusted_proxies`, `client_ip_headers` | built: `forwarded_headers {trusted_ips, insecure}` per entry point; untrusted peers' headers are removed |
+| Several named listeners | `entryPoints.<n>.address` | listener addresses, `bind` | built (`ENTRY_POINTS`, process config; `PROXY_ADDR` and `PROXY_TLS_ADDR` stay as the `web` and `websecure` shorthand) |
+| Per-router entry point list | `entryPoints` on a router | site address | built (unbound names rejected as `unknown_entry_point`, `tcp` and `udp` ones as `entry_point_protocol`) |
+| Per-tenant entry point access | none | none | built (`EntryPointPolicy.tenants`, `entry_point_forbidden`) |
+| TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 parses them (startup stops naming the entry point), 0058, 0062 |
 | `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | 0097 (Traefik's set minus `-Server`, which is opt-in; found missing by the 0020 benchmark) |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | 0030 |

@@ -8,6 +8,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::service::upstream_policy::UpstreamPolicy;
+use crate::entry::{self, EntryPoint};
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
 /// snapshot compiles always find threads.
@@ -48,8 +49,9 @@ const _: () =
 ///
 /// | Variable | Default | Meaning |
 /// |---|---|---|
-/// | `PROXY_ADDR` | `127.0.0.1:8080` | Plain HTTP proxy listener. |
-/// | `PROXY_TLS_ADDR` | unset | HTTPS proxy listener; unset means no TLS listener. |
+/// | `ENTRY_POINTS` | unset | Named listeners, `name=address/protocol[;proxy_protocol]` comma separated, protocol `http`, `https`, `tcp` or `udp`. Replaces `PROXY_ADDR` and `PROXY_TLS_ADDR`; setting both is an error. |
+/// | `PROXY_ADDR` | `127.0.0.1:8080` | Shorthand for the entry point `web=<addr>/http`. |
+/// | `PROXY_TLS_ADDR` | unset | Shorthand for the entry point `websecure=<addr>/https`; unset means no TLS listener. |
 /// | `ADMIN_SOCKET` | `/run/podgate/admin.sock` | Unix socket of the admin API. |
 /// | `REQUEST_TIMEOUT_SECS` | `30` | Admin request and upstream I/O limit, 1..=3600. |
 /// | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
@@ -62,10 +64,9 @@ const _: () =
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// Address of the plain HTTP proxy listener.
-    pub proxy_addr: SocketAddr,
-    /// Address of the HTTPS proxy listener, when enabled.
-    pub proxy_tls_addr: Option<SocketAddr>,
+    /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
+    /// (`PROXY_TLS_ADDR`, when set). Never empty.
+    pub entry_points: Vec<EntryPoint>,
     /// Path of the admin API's unix socket.
     pub admin_socket: PathBuf,
     /// Admin requests running longer than this many seconds get `408 Request Timeout`;
@@ -94,8 +95,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            proxy_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            proxy_tls_addr: None,
+            entry_points: vec![EntryPoint::web(SocketAddr::from(([127, 0, 0, 1], 8080)))],
             admin_socket: PathBuf::from("/run/podgate/admin.sock"),
             request_timeout_secs: NonZeroU16::MIN.saturating_add(29),
             log_format: LogFormat::Pretty,
@@ -165,11 +165,45 @@ impl Config {
     /// Returns [`ConfigError`] naming the first variable that is set but invalid.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let mut config = Self::default();
-        if let Some(raw) = lookup("PROXY_ADDR") {
-            config.proxy_addr = parse_addr("PROXY_ADDR", &raw)?;
-        }
-        if let Some(raw) = lookup("PROXY_TLS_ADDR") {
-            config.proxy_tls_addr = Some(parse_addr("PROXY_TLS_ADDR", &raw)?);
+        let proxy_addr = lookup("PROXY_ADDR");
+        let proxy_tls_addr = lookup("PROXY_TLS_ADDR");
+        if let Some(raw) = lookup("ENTRY_POINTS") {
+            let shorthand: Vec<&str> = [
+                proxy_addr.as_ref().map(|_| "PROXY_ADDR"),
+                proxy_tls_addr.as_ref().map(|_| "PROXY_TLS_ADDR"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !shorthand.is_empty() {
+                return Err(ConfigError {
+                    var: "ENTRY_POINTS",
+                    reason: format!(
+                        "cannot be set together with {}: they are the shorthand for the entry points web and websecure; use one or the other",
+                        shorthand.join(" and ")
+                    )
+                    .into(),
+                });
+            }
+            if raw.trim().is_empty() {
+                return Err(ConfigError {
+                    var: "ENTRY_POINTS",
+                    reason: "is empty".into(),
+                });
+            }
+            config.entry_points = entry::parse_list(&raw).map_err(|err| ConfigError {
+                var: "ENTRY_POINTS",
+                reason: err.to_string().into(),
+            })?;
+        } else {
+            if let Some(raw) = proxy_addr {
+                config.entry_points = vec![EntryPoint::web(parse_addr("PROXY_ADDR", &raw)?)];
+            }
+            if let Some(raw) = proxy_tls_addr {
+                config
+                    .entry_points
+                    .push(EntryPoint::websecure(parse_addr("PROXY_TLS_ADDR", &raw)?));
+            }
         }
         if let Some(raw) = lookup("ADMIN_SOCKET") {
             let path = raw.trim();
@@ -295,8 +329,10 @@ mod test {
         assert_eq!(
             parsed,
             Ok(Config {
-                proxy_addr: SocketAddr::from(([0, 0, 0, 0], 9000)),
-                proxy_tls_addr: Some(SocketAddr::from(([0, 0, 0, 0], 9443))),
+                entry_points: vec![
+                    EntryPoint::web(SocketAddr::from(([0, 0, 0, 0], 9000))),
+                    EntryPoint::websecure(SocketAddr::from(([0, 0, 0, 0], 9443))),
+                ],
                 admin_socket: PathBuf::from("/tmp/admin.sock"),
                 request_timeout_secs: NonZeroU16::new(5).expect("5 is not zero"),
                 log_format: LogFormat::Json,
@@ -315,6 +351,9 @@ mod test {
         for (var, value) in [
             ("PROXY_ADDR", "nope"),
             ("PROXY_TLS_ADDR", "nope"),
+            ("ENTRY_POINTS", " "),
+            ("ENTRY_POINTS", "web=nope/http"),
+            ("ENTRY_POINTS", "web=127.0.0.1:80"),
             ("ADMIN_SOCKET", " "),
             ("REQUEST_TIMEOUT_SECS", "0"),
             ("REQUEST_TIMEOUT_SECS", "abc"),
@@ -335,5 +374,42 @@ mod test {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn entry_points_replace_the_shorthand() {
+        let parsed = config(&[(
+            "ENTRY_POINTS",
+            "public=0.0.0.0:80/http,internal=127.0.0.1:81/http,secure=0.0.0.0:443/https",
+        )])
+        .expect("parses");
+        let names: Vec<&str> = parsed.entry_points.iter().map(|e| &*e.name).collect();
+        assert_eq!(names, ["public", "internal", "secure"]);
+    }
+
+    #[test]
+    fn entry_points_refuse_the_shorthand_and_name_both() {
+        for shorthand in ["PROXY_ADDR", "PROXY_TLS_ADDR"] {
+            let err = config(&[
+                ("ENTRY_POINTS", "web=127.0.0.1:80/http"),
+                (shorthand, "127.0.0.1:81"),
+            ])
+            .expect_err("both set");
+            let text = err.to_string();
+            assert!(
+                text.contains("ENTRY_POINTS") && text.contains(shorthand),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_entry_is_printed_with_the_variable() {
+        let err =
+            config(&[("ENTRY_POINTS", "a=127.0.0.1:80/http,b=oops/http")]).expect_err("bad entry");
+        assert_eq!(
+            err.to_string(),
+            "invalid ENTRY_POINTS: entry \"b=oops/http\": \"oops\" is not a socket address like 0.0.0.0:8080 (invalid socket address syntax)"
+        );
     }
 }

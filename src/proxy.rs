@@ -77,6 +77,9 @@ pub struct Ctx {
     /// The routing table this request started with. Loaded once, so a snapshot swap in the
     /// middle of the request cannot change its routing.
     pub table: Arc<RoutingTable>,
+    /// The name of the entry point the request arrived on (`web`, `websecure`, or a name from
+    /// `ENTRY_POINTS`): the listener, not a guess from the TLS flag.
+    pub entry_point: Arc<str>,
     /// The router the request matched, set by `request_filter`. Indices into `table`.
     pub matched: Option<Matched>,
     /// Who the client is and what scheme and host it used, decided in the stage that normalizes
@@ -117,8 +120,8 @@ pub struct Ctx {
     pub lease: Option<Lease>,
 }
 
-/// The reverse proxy logic: one instance serves every listener.
-#[derive(Debug)]
+/// The reverse proxy logic: one instance per entry point, all sharing the same handles.
+#[derive(Debug, Clone)]
 pub struct Gateway {
     table: TableHandle,
     inflight: Inflight,
@@ -130,6 +133,7 @@ pub struct Gateway {
     outcomes: Outcomes,
     wasm: wasm::Executor,
     upstream_policy: UpstreamPolicy,
+    entry_point: Arc<str>,
 }
 
 impl Gateway {
@@ -149,7 +153,16 @@ impl Gateway {
             wasm: wasm::Executor::default(),
             upstream_policy: UpstreamPolicy::builtin(),
             backends: Backends::new(),
+            entry_point: Arc::from(entry::WEB),
         }
+    }
+
+    /// Serves the entry point called `name`: requests this gateway handles arrive on that
+    /// listener, and only routers that listen on it match. Without this the gateway is `web`.
+    #[must_use]
+    pub fn with_entry_point(mut self, name: &str) -> Self {
+        self.entry_point = Arc::from(name);
+        self
     }
 
     /// Charges tenants against `budgets`, a registry shared with the admin API's metrics.
@@ -265,6 +278,7 @@ impl ProxyHttp for Gateway {
     fn new_ctx(&self) -> Ctx {
         Ctx {
             table: self.table.load(),
+            entry_point: Arc::clone(&self.entry_point),
             matched: None,
             forwarded: ForwardedView::default(),
             route: None,
@@ -294,11 +308,11 @@ impl ProxyHttp for Gateway {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
-        ctx.forwarded = ForwardedView::of(session, tls, ctx.table.forwarded_trust(entry::of(tls)));
+        ctx.forwarded = ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point));
         let found = route::matching(
             &ctx.table,
             session.req_header(),
-            entry::of(tls),
+            &ctx.entry_point,
             tls,
             ctx.forwarded.known_client(),
         );

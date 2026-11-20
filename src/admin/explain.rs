@@ -24,7 +24,8 @@ struct Params {
     url: String,
     /// The request method. Absent: `GET`.
     method: Option<String>,
-    /// The entry point the request arrives on. Absent: `web` for `http`, `websecure` for `https`.
+    /// The entry point the request arrives on. Absent: the bound entry points of the URL's scheme
+    /// are tried in order (`web` for `http` and `websecure` for `https` by default).
     entry_point: Option<String>,
     /// The resolved client address to match `client_ip` routers against. Absent: none matches.
     client_ip: Option<IpAddr>,
@@ -33,7 +34,8 @@ struct Params {
 /// `200` with the app, tenant, declaring source, matched router, the routers it shadows, the
 /// revisions with their effective weights and servers, and the pipeline, all read from the live
 /// routing table. `404 {"error": "not found", "nearest_wildcard": ...}` when no router matches.
-/// `400` for a missing or invalid `url`, an invalid `method` or a malformed query.
+/// `400` for a missing or invalid `url`, an invalid `method`, a malformed query or an
+/// `entry_point` this node did not bind.
 async fn get_explain(
     State(state): State<AppState>,
     params: Result<Query<Params>, QueryRejection>,
@@ -51,6 +53,15 @@ async fn get_explain(
         None => target,
     };
     let table = state.table().load();
+    if let Some(name) = params
+        .entry_point
+        .as_deref()
+        .filter(|name| !table.context().knows(name))
+    {
+        return Err(AppError::BadRequest(
+            format!("entry point {name} is not bound by this node").into(),
+        ));
+    }
     Ok(match explain::explain(&table, &target) {
         Ok(explanation) => Json(explanation).into_response(),
         Err(miss) => (StatusCode::NOT_FOUND, Json(miss)).into_response(),

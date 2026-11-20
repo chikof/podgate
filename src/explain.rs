@@ -13,10 +13,10 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::canary;
-use crate::entry;
+use crate::entry::Protocol;
 use crate::host;
 use crate::pipeline;
-use crate::router::{View, path};
+use crate::router::{Candidate, View, path};
 use crate::table::RoutingTable;
 
 /// What a caller asks about: a request as the proxy would see it.
@@ -48,9 +48,9 @@ pub enum TargetError {
 
 impl Target {
     /// Parses the query of `GET /v1/explain`. `method` defaults to `GET`; the scheme decides
-    /// whether the request is treated as arriving over TLS (`https`) and so on which entry
-    /// point (`web` or `websecure`) unless `entry_point` names one. The path is normalized as
-    /// the proxy does.
+    /// whether the request is treated as arriving over TLS (`https`). `entry_point` names the
+    /// listener it arrives on; without it every bound entry point of that scheme is tried.
+    /// The path is normalized as the proxy does.
     ///
     /// # Errors
     ///
@@ -100,12 +100,6 @@ impl Target {
         self.client_ip = Some(crate::client_ip::normalize(client_ip));
         self
     }
-
-    fn entry_point(&self) -> &str {
-        self.entry_point
-            .as_deref()
-            .unwrap_or_else(|| entry::of(self.tls))
-    }
 }
 
 /// The answer for a request with a route: `200` body of `GET /v1/explain`.
@@ -119,8 +113,11 @@ pub struct Explanation<'a> {
     method: &'a str,
     /// The normalized path.
     path: &'a str,
-    /// The entry point the request is taken to arrive on.
+    /// The entry point the request is taken to arrive on: the one asked for, else the first
+    /// bound entry point of the URL's scheme on which a router matches.
     entry_point: &'a str,
+    /// The HTTP and HTTPS entry points the matched router listens on.
+    reachable_on: Vec<&'a str>,
     app: &'a str,
     tenant: &'a str,
     declared_by: &'a str,
@@ -177,6 +174,48 @@ pub struct Miss {
     /// The declared wildcard nearest to the host, or `None` when no declared wildcard shares a
     /// suffix with it; see [`RoutingTable::nearest_wildcard`] for what "nearest" means.
     nearest_wildcard: Option<String>,
+    /// The HTTP and HTTPS entry points on which the request does match a router: the router
+    /// exists but listens elsewhere than the entry point asked about.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routed_on: Vec<String>,
+}
+
+/// The entry points a request is tried on: the one `entry_point` names, else every bound entry
+/// point of the URL's scheme, in the order the process lists them.
+fn asked<'a>(table: &'a RoutingTable, target: &'a Target) -> Vec<&'a str> {
+    if let Some(name) = target.entry_point.as_deref() {
+        return vec![name];
+    }
+    let wanted = if target.tls {
+        Protocol::Https
+    } else {
+        Protocol::Http
+    };
+    table
+        .context()
+        .entry_points()
+        .filter(|(_, protocol)| *protocol == wanted)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The routers that match `target` arriving on `entry_point`, best first.
+fn route_on<'v>(
+    table: &RoutingTable,
+    target: &'v Target,
+    request: &'v RequestHeader,
+    entry_point: &'v str,
+    tls: bool,
+) -> Vec<Candidate<'v>> {
+    let view = View {
+        host: &target.host,
+        path: &target.path,
+        entry_point,
+        tls,
+        request,
+        client_ip: target.client_ip,
+    };
+    table.index().find_all(table.apps(), &view)
 }
 
 /// Explains how `table` routes `target`.
@@ -185,9 +224,10 @@ pub struct Miss {
 ///
 /// [`Miss`] when no router matches.
 pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explanation<'a>, Miss> {
-    let miss = || Miss {
+    let plain_miss = || Miss {
         error: "not found",
         nearest_wildcard: table.nearest_wildcard(&target.host),
+        routed_on: Vec::new(),
     };
     let mut request = RequestHeader::build(
         target.method.as_str(),
@@ -198,19 +238,29 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
         .as_bytes(),
         None,
     )
-    .map_err(|_| miss())?;
+    .map_err(|_| plain_miss())?;
     request
         .insert_header("host", target.host.as_str())
-        .map_err(|_| miss())?;
-    let view = View {
-        host: &target.host,
-        path: &target.path,
-        entry_point: target.entry_point(),
-        tls: target.tls,
-        request: &request,
-        client_ip: target.client_ip,
+        .map_err(|_| plain_miss())?;
+    let miss = || Miss {
+        routed_on: table
+            .context()
+            .entry_points()
+            .filter(|(_, protocol)| protocol.is_http())
+            .filter(|(name, protocol)| {
+                !route_on(table, target, &request, name, *protocol == Protocol::Https).is_empty()
+            })
+            .map(|(name, _)| name.to_owned())
+            .collect(),
+        ..plain_miss()
     };
-    let candidates = table.index().find_all(table.apps(), &view);
+    let (entry_point, candidates) = asked(table, target)
+        .into_iter()
+        .find_map(|name| {
+            let found = route_on(table, target, &request, name, target.tls);
+            (!found.is_empty()).then_some((name, found))
+        })
+        .ok_or_else(miss)?;
     let best = candidates.first().ok_or_else(miss)?;
     let (app, router) = table.router(best.matched).ok_or_else(miss)?;
     Ok(Explanation {
@@ -218,7 +268,12 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
         host: &target.host,
         method: target.method.as_str(),
         path: &target.path,
-        entry_point: target.entry_point(),
+        entry_point,
+        reachable_on: table
+            .context()
+            .http_entry_points()
+            .filter(|name| router.listens_on(name))
+            .collect(),
         app: app.id(),
         tenant: app.tenant(),
         declared_by: app.declared_by(),
@@ -300,12 +355,13 @@ mod test {
             Target::parse("https://A.Test:8443/x/./y?q=1", Some("POST"), None).expect("parses");
         assert_eq!(target.host, "a.test");
         assert_eq!(target.path, "/x/y");
-        assert_eq!(target.entry_point(), "websecure");
+        assert!(target.tls && target.entry_point.is_none());
+        let plain = explained("http://a.test/", None);
+        assert_eq!(plain["entry_point"], "web");
+        assert_eq!(plain["reachable_on"], json!(["web", "websecure"]));
         assert_eq!(
-            Target::parse("http://a.test/", None, None)
-                .expect("plain")
-                .entry_point(),
-            "web"
+            explained("https://a.test/", None)["entry_point"],
+            "websecure"
         );
         assert_eq!(Target::parse("a.test", None, None), Err(TargetError::Url));
         assert!(matches!(

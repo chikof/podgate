@@ -27,7 +27,7 @@ async fn explain_known_host() {
         plain.json(),
         json!({
             "version": 4, "host": "a.test", "method": "POST", "path": "/x",
-            "entry_point": "web",
+            "entry_point": "web", "reachable_on": ["web", "websecure"],
             "app": "a", "tenant": "t1", "declared_by": "tests/a",
             "matched": {"router": "default", "priority": 0, "pattern": "a.test", "kind": "exact"},
             "considered": ["default"],

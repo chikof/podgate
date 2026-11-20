@@ -604,6 +604,7 @@ pub struct RoutingTable {
     weights: HashMap<Box<str>, u32>,
     skew_secret: Option<SkewSecret>,
     forwarded: HashMap<Box<str>, Trust>,
+    context: CompileContext,
 }
 
 impl RoutingTable {
@@ -654,6 +655,7 @@ impl RoutingTable {
                 .collect(),
             skew_secret: snapshot.skew_secret.clone(),
             forwarded: crate::client_ip::policies(snapshot),
+            context: context.clone(),
         })
     }
 
@@ -746,6 +748,12 @@ impl RoutingTable {
     #[must_use]
     pub fn certificates(&self) -> &CertStore {
         &self.certificates
+    }
+
+    /// The entry points this table was compiled for, with their protocols.
+    #[must_use]
+    pub fn context(&self) -> &CompileContext {
+        &self.context
     }
 
     /// The key signing session cookies, when the snapshot sets a `skew_secret`.

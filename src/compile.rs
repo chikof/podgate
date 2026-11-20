@@ -446,26 +446,42 @@ fn routers_of(
                                 format!("entry point {name} is not bound by this node"),
                             ),
                         ));
-                    } else if !admits(name) {
-                        rejected.push(Rejected::new(
-                            app,
-                            at.clone(),
-                            Invalid::new(
-                                "entry_point_forbidden",
-                                format!("entry point {name} does not admit tenant {}", app.tenant),
-                            ),
-                        ));
+                    } else {
+                        if context.protocol_of(name).is_some_and(|p| !p.is_http()) {
+                            rejected.push(Rejected::new(
+                                app,
+                                at.clone(),
+                                Invalid::new(
+                                    "entry_point_protocol",
+                                    format!(
+                                        "entry point {name} is not http or https, so an HTTP router cannot listen on it"
+                                    ),
+                                ),
+                            ));
+                        }
+                        if !admits(name) {
+                            rejected.push(Rejected::new(
+                                app,
+                                at.clone(),
+                                Invalid::new(
+                                    "entry_point_forbidden",
+                                    format!(
+                                        "entry point {name} does not admit tenant {}",
+                                        app.tenant
+                                    ),
+                                ),
+                            ));
+                        }
                     }
                 }
             }
             None => {
                 let open: Vec<Box<str>> = context
-                    .entry_points()
-                    .iter()
+                    .http_entry_points()
                     .filter(|name| admits(name))
-                    .cloned()
+                    .map(Box::from)
                     .collect();
-                if open.len() != context.entry_points().len() {
+                if open.len() != context.entry_points().count() {
                     compile.narrow_entry_points(open.into_boxed_slice());
                 }
             }

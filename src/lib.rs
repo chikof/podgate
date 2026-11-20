@@ -73,7 +73,7 @@ pub mod wasm;
 use std::sync::Arc;
 
 use anyhow::Context;
-use pingora::proxy::http_proxy_service;
+use pingora::proxy::http_proxy_service_with_name;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora::server::{RunArgs, Server};
 use pingora::services::background::background_service;
@@ -97,20 +97,21 @@ pub use wake::{Wake, WakeService};
 
 /// Builds the Pingora server from `config` and runs it until SIGTERM, SIGINT or SIGQUIT.
 ///
-/// Services: the HTTP proxy listener, the HTTPS listener when `PROXY_TLS_ADDR` is set, and the
-/// admin API on the unix socket. `/readyz` reports the admin API, not the proxy listeners: Pingora
-/// binds them on its own schedule and retries while a port is busy. On SIGTERM
-/// `/readyz` turns `503`, the proxy stops accepting, and the process exits after
+/// Services: one HTTP or HTTPS proxy listener per entry point (`ENTRY_POINTS`, or `PROXY_ADDR` and
+/// `PROXY_TLS_ADDR`), and the admin API on the unix socket. `/readyz` reports the admin API, not
+/// the proxy listeners: Pingora binds them on its own schedule and retries while a port is busy.
+/// On SIGTERM `/readyz` turns `503`, the proxy stops accepting, and the process exits after
 /// `REQUEST_TIMEOUT_SECS` so in-flight requests finish.
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE` is invalid, the admin socket cannot be bound or the TLS
-/// listener cannot be configured.
+/// Fails when `UPSTREAM_POLICY_FILE` is invalid, an entry point is `tcp` or `udp` or sets
+/// `proxy_protocol` (not built yet), a TLS listener cannot be configured, or the admin socket
+/// cannot be bound.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let table = TableHandle::with_context(
-        entry::CompileContext::default()
+        entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
             .with_upstream_policy(upstream_policy.clone()),
     );
@@ -127,8 +128,6 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     );
     let backends = Backends::new();
     let timeout = config.request_timeout();
-    let admin_listener = admin::bind(&config.admin_socket)
-        .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
 
     let server_conf = ServerConf {
         threads: std::thread::available_parallelism().map_or(1, usize::from),
@@ -139,30 +138,51 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.bootstrap();
 
     let failures = Failures::new();
-    let mut proxy = http_proxy_service(
-        &server.configuration,
-        Gateway::new(table.clone(), inflight.clone(), timeout)
-            .with_budgets(budgets.clone())
-            .with_backends(backends.clone())
-            .with_failures(failures.clone())
-            .with_wake(wake.clone())
-            .with_outcomes(outcomes.clone())
-            .with_upstream_policy(upstream_policy.clone())
-            .with_wasm(wasm::Executor::new(
-                config.wasm_max_concurrent.get(),
-                config.wasm_queue_timeout(),
-            )),
-    );
-    proxy.add_tcp(&config.proxy_addr.to_string());
-    if let Some(tls_addr) = config.proxy_tls_addr {
-        let settings = tls::listener_settings(table.clone())
-            .map_err(|err| anyhow::anyhow!("cannot configure the TLS listener: {err}"))?;
-        proxy.add_tls_with_settings(&tls_addr.to_string(), None, settings);
-        proxy
-            .endpoints()
-            .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(acme.clone())));
+    let gateway = Gateway::new(table.clone(), inflight.clone(), timeout)
+        .with_budgets(budgets.clone())
+        .with_backends(backends.clone())
+        .with_failures(failures.clone())
+        .with_wake(wake.clone())
+        .with_outcomes(outcomes.clone())
+        .with_upstream_policy(upstream_policy.clone())
+        .with_wasm(wasm::Executor::new(
+            config.wasm_max_concurrent.get(),
+            config.wasm_queue_timeout(),
+        ));
+    for point in &config.entry_points {
+        let mut proxy = http_proxy_service_with_name(
+            &server.configuration,
+            gateway.clone().with_entry_point(&point.name),
+            &format!("entry point {}", point.name),
+        );
+        let addr = point.addr.to_string();
+        match point.protocol {
+            entry::Protocol::Http => proxy.add_tcp(&addr),
+            entry::Protocol::Https => {
+                let settings = tls::listener_settings(table.clone()).map_err(|err| {
+                    anyhow::anyhow!("cannot configure the TLS entry point {}: {err}", point.name)
+                })?;
+                proxy.add_tls_with_settings(&addr, None, settings);
+                proxy
+                    .endpoints()
+                    .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(acme.clone())));
+            }
+            entry::Protocol::Tcp | entry::Protocol::Udp => anyhow::bail!(
+                "entry point {} is {}: TCP and UDP entry points are not built yet",
+                point.name,
+                point.protocol.as_str()
+            ),
+        }
+        if point.proxy_protocol {
+            anyhow::bail!(
+                "entry point {}: proxy_protocol is not built yet",
+                point.name
+            );
+        }
+        server.add_service(proxy);
     }
-    server.add_service(proxy);
+    let admin_listener = admin::bind(&config.admin_socket)
+        .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
     server.add_service(background_service("acme issuer", acme));
     server.add_service(background_service(
         "scale to zero",
@@ -187,8 +207,12 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     ));
 
     tracing::info!(
-        proxy = %config.proxy_addr,
-        tls = ?config.proxy_tls_addr,
+        entry_points = %config
+            .entry_points
+            .iter()
+            .map(|point| format!("{}={}/{}", point.name, point.addr, point.protocol.as_str()))
+            .collect::<Vec<_>>()
+            .join(","),
         admin = %config.admin_socket.display(),
         "starting"
     );
