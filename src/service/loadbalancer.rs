@@ -7,14 +7,16 @@
 //!
 //! `servers` may be empty: the service then has no server, and a `scale_to_zero` app wakes on
 //! the first request. Built today: `http://ip:port` and `https://ip:port` servers and the
-//! algorithms `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma` and `random` (see
-//! [`super::lb`]); only `weighted_round_robin` takes server weights, and a weight of `0` there
-//! means the server receives nothing. An `https://` server is reached through the service's
+//! algorithms `round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma`, `random`,
+//! `ip_hash`, `uri_hash`, `header_hash` and `hrw` (see [`super::lb`]); `algorithm` is a name or
+//! an object such as `{"type": "header_hash", "header": "x-tenant"}`. Only
+//! `weighted_round_robin` and the hashing algorithms take server weights, and a weight of `0`
+//! there means the server receives nothing. An `https://` server is reached through the service's
 //! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
 //! `health_check` probes the servers ([`super::health`]), `passive` ejects servers that fail real
 //! requests ([`super::outlier`]), `sticky` pins a client to one server by cookie
 //! ([`super::sticky`]), and a service declares at most 256 servers. Planned fields (a `false`
-//! `pass_host_header`), planned algorithms and `h2c://` servers are refused with
+//! `pass_host_header`) and `h2c://` servers are refused with
 //! `service_not_built`; a server named by host name is `dns_upstream_not_built`.
 //!
 //! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
@@ -43,7 +45,7 @@ use podgate_model::{Declared, SkewSecret};
 struct Config {
     servers: Vec<ServerConfig>,
     #[serde(default)]
-    algorithm: Option<String>,
+    algorithm: Option<Value>,
     #[serde(default)]
     health_check: Option<Value>,
     #[serde(default)]
@@ -209,7 +211,7 @@ impl LoadBalancer {
                 ));
             }
         }
-        let balancer = Balancer::compile(config.algorithm.as_deref(), &servers)?;
+        let balancer = Balancer::compile(config.algorithm.as_ref(), &servers)?;
         Ok(Self {
             servers,
             balancer,

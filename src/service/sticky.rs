@@ -492,6 +492,7 @@ mod test {
         let cx = PickCx {
             request: &presented,
             excluded: &tried,
+            client: None,
         };
         assert_eq!(sticky.pinned(cx, &servers), None, "a retry moves on");
         assert_eq!(sticky.pinned(cx, &servers[1..]), None);

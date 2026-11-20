@@ -46,13 +46,26 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-const ALGORITHMS: [&str; 5] = [
+const ALGORITHMS: [&str; 9] = [
     "round_robin",
     "weighted_round_robin",
     "least_conn",
     "p2c_ewma",
     "random",
+    "ip_hash",
+    "uri_hash",
+    "header_hash",
+    "hrw",
 ];
+
+/// The `algorithm` of the service for `name`: `header_hash` needs its header.
+fn declared(name: &str) -> serde_json::Value {
+    if name == "header_hash" {
+        serde_json::json!({ "type": "header_hash", "header": "x-key" })
+    } else {
+        serde_json::json!(name)
+    }
+}
 
 /// One app per algorithm, host `<algorithm>.test`, with ten servers (so `least_conn` also takes
 /// its two-candidates path) of which the first is unhealthy-to-be.
@@ -74,7 +87,7 @@ fn table() -> RoutingTable {
                 "tls": {"mode": "acme"},
                 "routers": [{"name": "all", "match": {"host": format!("{algorithm}.test")}, "service": "web"}],
                 "revisions": [{"id": "r", "weight": 1, "state": "serving", "services": [
-                    {"name": "web", "type": "loadbalancer", "algorithm": algorithm, "servers": servers}]}]
+                {"name": "web", "type": "loadbalancer", "algorithm": declared(algorithm), "servers": servers}]}]
             })
         })
         .collect();
@@ -90,7 +103,12 @@ fn table() -> RoutingTable {
 #[test]
 fn balancer_pick_allocates_nothing() {
     let table = table();
-    let request = RequestHeader::build("GET", b"/", None).expect("request");
+    // The hashing algorithms hash the key when there is one and fall back to a random server
+    // when there is not: pick both.
+    let mut keyed = RequestHeader::build("GET", b"/some/path?q=1", None).expect("request");
+    keyed.insert_header("x-key", "tenant-1").expect("header");
+    let bare = RequestHeader::build("GET", b"/", None).expect("request");
+    let client: std::net::IpAddr = [192, 0, 2, 7].into();
     let tried = ["127.0.0.1:3".parse().expect("addr")];
     for (index, algorithm) in ALGORITHMS.iter().enumerate() {
         let app = table.app(index).expect("app");
@@ -98,7 +116,7 @@ fn balancer_pick_allocates_nothing() {
             .service(0, 0)
             .and_then(|service| service.servers().first());
         // Warm up: first use may initialise lazily.
-        drop(app.pick(0, PickCx::new(&request)).expect("a server"));
+        drop(app.pick(0, PickCx::new(&keyed)).expect("a server"));
 
         let before = ALLOCATIONS.load(Ordering::Relaxed);
         for round in 0..1000 {
@@ -109,8 +127,9 @@ fn balancer_pick_allocates_nothing() {
                 }
             }
             let cx = PickCx {
-                request: &request,
+                request: if round % 3 == 0 { &bare } else { &keyed },
                 excluded: if round % 2 == 0 { &tried } else { &[] },
+                client: (round % 5 != 0).then_some(client),
             };
             let pick = app.pick(0, cx).expect("a server is left");
             drop(pick);

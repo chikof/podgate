@@ -2,39 +2,49 @@
 //!
 //! [`Balancer`] picks the index of one server per request. Built: `round_robin`,
 //! `weighted_round_robin`, `least_conn`, `p2c_ewma` (power of two choices on the EWMA of response
-//! latency) and `random`. Planned and refused with `service_not_built`: `ip_hash`, `uri_hash` and
-//! `header_hash`; any other name is `invalid_service`.
+//! latency), `random`, and the hashing ones `ip_hash`, `uri_hash`, `header_hash` (consistent
+//! hashing on a ring, `ring.rs`) and `hrw` (rendezvous hashing). Any other name is
+//! `invalid_service`. `algorithm` is a name or an object `{"type": "header_hash", "header":
+//! "x-tenant"}`; the options an algorithm does not take are refused.
 //!
 //! Adding an algorithm: a file in `lb/` with a type that has `compile` and `pick`, one variant
-//! in [`Balancer`] and one arm in each of its `match` statements, and its name removed from
-//! `UNBUILT`. Every algorithm skips servers that [`PickCx::allows`] refuses (not
-//! [`Server::available`], or already tried by this request) and returns `None` when none is left.
+//! in [`Balancer`] and one arm in each of its `match` statements. Every algorithm skips servers
+//! that [`PickCx::allows`] refuses (not [`Server::available`], or already tried by this request)
+//! and returns `None` when none is left.
 //! A pick reads atomics only: it takes no lock and allocates nothing, which `tests/lb_alloc.rs`
-//! pins. Whatever must outlive a snapshot push (the turn counter, the random stream) is in the
-//! [`ServiceState`] passed to `pick`, whatever belongs to one server in its
-//! [`super::ServerState`]; see [`super::state`].
+//! pins. Whatever must outlive a snapshot push (the turn counter, the random stream, the secret
+//! key of the hashing algorithms) is in the [`ServiceState`] passed to `pick`, whatever belongs
+//! to one server in its [`super::ServerState`]; see [`super::state`].
 
+mod header_hash;
+mod hrw;
+mod ip_hash;
 mod least_conn;
 mod p2c_ewma;
 mod random;
+mod ring;
 mod round_robin;
+mod uri_hash;
 mod weighted_round_robin;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use pingora::http::RequestHeader;
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::state::Observe;
 use super::{Server, ServiceState};
 use crate::compile::Invalid;
+use header_hash::HeaderHash;
+use hrw::Hrw;
+use ip_hash::IpHash;
 use least_conn::LeastConn;
 use p2c_ewma::P2cEwma;
 use random::Random;
 use round_robin::RoundRobin;
+use uri_hash::UriHash;
 use weighted_round_robin::WeightedRoundRobin;
-
-/// Algorithms that are planned and not built yet.
-const UNBUILT: [&str; 3] = ["ip_hash", "uri_hash", "header_hash"];
 
 /// What a balancer may look at to pick a server.
 #[derive(Debug, Clone, Copy)]
@@ -43,16 +53,27 @@ pub struct PickCx<'a> {
     pub request: &'a RequestHeader,
     /// The addresses this request already went to, which a retry must not choose again.
     pub excluded: &'a [SocketAddr],
+    /// The client address the entry point's forwarding policy resolved
+    /// ([`crate::client_ip::ForwardedView::known_client`]), for `ip_hash` and `hrw`; `None` when
+    /// the connection had no IP peer. Never read from a header here.
+    pub client: Option<IpAddr>,
 }
 
 impl<'a> PickCx<'a> {
-    /// A first attempt at `request`: nothing is excluded.
+    /// A first attempt at `request`: nothing is excluded, the client is not known.
     #[must_use]
     pub fn new(request: &'a RequestHeader) -> Self {
         Self {
             request,
             excluded: &[],
+            client: None,
         }
+    }
+
+    /// The same pick for the client `client`.
+    #[must_use]
+    pub fn with_client(self, client: Option<IpAddr>) -> Self {
+        Self { client, ..self }
     }
 
     /// Whether `server` may take this request: available and not excluded.
@@ -75,6 +96,14 @@ pub enum Balancer {
     P2cEwma(P2cEwma),
     /// A uniformly random server.
     Random(Random),
+    /// The same client address always goes to the same server (consistent hashing).
+    IpHash(IpHash),
+    /// The same path always goes to the same server (consistent hashing).
+    UriHash(UriHash),
+    /// The same header value always goes to the same server (consistent hashing).
+    HeaderHash(HeaderHash),
+    /// Rendezvous hashing of the client address.
+    Hrw(Hrw),
 }
 
 /// Refuses a weight other than `1` for an algorithm that does not use weights: ignoring a
@@ -122,16 +151,62 @@ fn pair(cx: PickCx<'_>, servers: &[Server], shared: &ServiceState) -> Option<(us
     Some((first, second))
 }
 
+/// The object form of `algorithm`: the name as `type`, and the options of the algorithms that
+/// have any.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Object {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    header: Option<String>,
+    #[serde(default)]
+    include_query: Option<bool>,
+}
+
 impl Balancer {
-    /// Builds the algorithm called `name` (`round_robin` when absent) for `servers`.
+    /// Builds the algorithm `algorithm` declares for `servers`: a name or an object
+    /// `{"type": name, ...options}`, `round_robin` when absent.
     ///
     /// # Errors
     ///
-    /// `service_not_built` for a planned algorithm, `invalid_service` for an unknown name or
-    /// servers the algorithm cannot take (a weight where weights are not used, no weight at all
-    /// for `weighted_round_robin`).
-    pub fn compile(name: Option<&str>, servers: &[Server]) -> Result<Self, Invalid> {
-        match name.unwrap_or("round_robin") {
+    /// `invalid_service` for an unknown name or option, an option the algorithm does not take,
+    /// a missing required option (`header` of `header_hash`), or servers the algorithm cannot
+    /// take (a weight where weights are not used, no weight above `0` where they are).
+    pub fn compile(algorithm: Option<&Value>, servers: &[Server]) -> Result<Self, Invalid> {
+        let object;
+        let (name, header, include_query) = match algorithm {
+            None => ("round_robin", None, None),
+            Some(Value::String(name)) => (name.as_str(), None, None),
+            Some(value @ Value::Object(_)) => {
+                object = Object::deserialize(value)
+                    .map_err(|err| Invalid::new("invalid_service", format!("algorithm: {err}")))?;
+                (
+                    object.kind.as_str(),
+                    object.header.as_deref(),
+                    object.include_query,
+                )
+            }
+            Some(_) => {
+                return Err(Invalid::new(
+                    "invalid_service",
+                    "algorithm must be a name or an object with a type",
+                ));
+            }
+        };
+        if header.is_some() && name != "header_hash" {
+            return Err(Invalid::new(
+                "invalid_service",
+                format!("algorithm {name} takes no header option, only header_hash does"),
+            ));
+        }
+        if include_query.is_some() && name != "uri_hash" {
+            return Err(Invalid::new(
+                "invalid_service",
+                format!("algorithm {name} takes no include_query option, only uri_hash does"),
+            ));
+        }
+        match name {
             "round_robin" => RoundRobin::compile(servers).map(Self::RoundRobin),
             "weighted_round_robin" => {
                 WeightedRoundRobin::compile(servers).map(Self::WeightedRoundRobin)
@@ -139,10 +214,12 @@ impl Balancer {
             "least_conn" => LeastConn::compile(servers).map(Self::LeastConn),
             "p2c_ewma" => P2cEwma::compile(servers).map(Self::P2cEwma),
             "random" => Random::compile(servers).map(Self::Random),
-            other if UNBUILT.contains(&other) => Err(Invalid::new(
-                "service_not_built",
-                format!("algorithm {other} is planned and not built yet"),
-            )),
+            "ip_hash" => IpHash::compile(servers).map(Self::IpHash),
+            "uri_hash" => {
+                UriHash::compile(servers, include_query.unwrap_or(false)).map(Self::UriHash)
+            }
+            "header_hash" => HeaderHash::compile(servers, header).map(Self::HeaderHash),
+            "hrw" => Hrw::compile(servers).map(Self::Hrw),
             other => Err(Invalid::new(
                 "invalid_service",
                 format!("unknown algorithm {other}"),
@@ -159,6 +236,10 @@ impl Balancer {
             Self::LeastConn(_) => "least_conn",
             Self::P2cEwma(_) => "p2c_ewma",
             Self::Random(_) => "random",
+            Self::IpHash(_) => "ip_hash",
+            Self::UriHash(_) => "uri_hash",
+            Self::HeaderHash(_) => "header_hash",
+            Self::Hrw(_) => "hrw",
         }
     }
 
@@ -171,6 +252,10 @@ impl Balancer {
             Self::LeastConn(algorithm) => algorithm.pick(cx, servers, shared),
             Self::P2cEwma(algorithm) => algorithm.pick(cx, servers, shared),
             Self::Random(algorithm) => algorithm.pick(cx, servers, shared),
+            Self::IpHash(algorithm) => algorithm.pick(cx, servers, shared),
+            Self::UriHash(algorithm) => algorithm.pick(cx, servers, shared),
+            Self::HeaderHash(algorithm) => algorithm.pick(cx, servers, shared),
+            Self::Hrw(algorithm) => algorithm.pick(cx, servers, shared),
         }
     }
 
@@ -182,7 +267,11 @@ impl Balancer {
             Self::RoundRobin(_)
             | Self::WeightedRoundRobin(_)
             | Self::LeastConn(_)
-            | Self::Random(_) => None,
+            | Self::Random(_)
+            | Self::IpHash(_)
+            | Self::UriHash(_)
+            | Self::HeaderHash(_)
+            | Self::Hrw(_) => None,
         }
     }
 }
@@ -221,7 +310,9 @@ mod test_support {
     }
 
     pub(super) fn request() -> RequestHeader {
-        RequestHeader::build("GET", b"/", None).expect("request")
+        let mut request = RequestHeader::build("GET", b"/", None).expect("request");
+        request.insert_header("x-key", "k").expect("header");
+        request
     }
 
     pub(super) fn set_active(server: &Server, active: u32) {
@@ -236,14 +327,25 @@ mod test {
     use super::test_support::{request, servers};
     use super::*;
     use crate::service::{Lease, ServerState};
+    use serde_json::json;
 
-    fn all(servers: &[Server]) -> [Balancer; 5] {
+    fn header_hash() -> Value {
+        json!({"type": "header_hash", "header": "x-key"})
+    }
+
+    fn all(servers: &[Server]) -> [Balancer; 9] {
+        let compile =
+            |algorithm: Value| Balancer::compile(Some(&algorithm), servers).expect("compiles");
         [
-            Balancer::compile(Some("round_robin"), servers).expect("round_robin"),
-            Balancer::compile(Some("weighted_round_robin"), servers).expect("wrr"),
-            Balancer::compile(Some("least_conn"), servers).expect("least_conn"),
-            Balancer::compile(Some("p2c_ewma"), servers).expect("p2c_ewma"),
-            Balancer::compile(Some("random"), servers).expect("random"),
+            compile(json!("round_robin")),
+            compile(json!("weighted_round_robin")),
+            compile(json!("least_conn")),
+            compile(json!("p2c_ewma")),
+            compile(json!("random")),
+            compile(json!("ip_hash")),
+            compile(json!("uri_hash")),
+            compile(header_hash()),
+            compile(json!("hrw")),
         ]
     }
 
@@ -264,6 +366,7 @@ mod test {
             let cx = PickCx {
                 request: &request,
                 excluded: &tried,
+                client: Some([192, 0, 2, 1].into()),
             };
             for _ in 0..50 {
                 assert_eq!(balancer.pick(cx, &up, &shared), Some(3), "{name}");
@@ -273,6 +376,7 @@ mod test {
             let cx = PickCx {
                 request: &request,
                 excluded: &tried,
+                client: Some([192, 0, 2, 1].into()),
             };
             assert_eq!(balancer.pick(cx, &up, &shared), None, "{name}");
             for server in &up {
@@ -296,23 +400,20 @@ mod test {
         let mut up = servers(2);
         up[1].weight = 3;
         for name in ["round_robin", "least_conn", "p2c_ewma", "random"] {
-            let err = Balancer::compile(Some(name), &up).expect_err("refused");
+            let err = Balancer::compile(Some(&json!(name)), &up).expect_err("refused");
             assert_eq!(err.code, "invalid_service", "{name}");
         }
-        assert!(Balancer::compile(Some("weighted_round_robin"), &up).is_ok());
+        for name in ["weighted_round_robin", "ip_hash", "uri_hash", "hrw"] {
+            assert!(Balancer::compile(Some(&json!(name)), &up).is_ok(), "{name}");
+        }
+        assert!(Balancer::compile(Some(&header_hash()), &up).is_ok());
     }
 
     #[test]
     fn names_are_checked() {
         let up = servers(1);
         assert_eq!(
-            Balancer::compile(Some("ip_hash"), &up)
-                .expect_err("planned")
-                .code,
-            "service_not_built"
-        );
-        assert_eq!(
-            Balancer::compile(Some("fastest"), &up)
+            Balancer::compile(Some(&json!("fastest")), &up)
                 .expect_err("unknown")
                 .code,
             "invalid_service"
@@ -321,6 +422,50 @@ mod test {
             Balancer::compile(None, &up).expect("default").name(),
             "round_robin"
         );
+    }
+
+    #[test]
+    fn hash_algorithm_options_strict() {
+        let up = servers(2);
+        let refused = |algorithm: Value| {
+            Balancer::compile(Some(&algorithm), &up)
+                .expect_err("refused")
+                .code
+        };
+        // A missing header, a header that is no name, an unknown field, a missing type.
+        assert_eq!(refused(json!("header_hash")), "invalid_service");
+        assert_eq!(refused(json!({"type": "header_hash"})), "invalid_service");
+        assert_eq!(
+            refused(json!({"type": "header_hash", "header": "not a name"})),
+            "invalid_service"
+        );
+        assert_eq!(
+            refused(json!({"type": "header_hash", "header": "x-tenant", "extra": "x"})),
+            "invalid_service"
+        );
+        assert_eq!(refused(json!({"header": "x-tenant"})), "invalid_service");
+        assert_eq!(refused(json!(7)), "invalid_service");
+        // An option of another algorithm is refused, not ignored.
+        assert_eq!(
+            refused(json!({"type": "ip_hash", "header": "x-tenant"})),
+            "invalid_service"
+        );
+        assert_eq!(
+            refused(json!({"type": "header_hash", "header": "x", "include_query": true})),
+            "invalid_service"
+        );
+        assert_eq!(
+            refused(json!({"type": "round_robin", "include_query": true})),
+            "invalid_service"
+        );
+        assert!(
+            Balancer::compile(
+                Some(&json!({"type": "uri_hash", "include_query": true})),
+                &up
+            )
+            .is_ok()
+        );
+        assert!(Balancer::compile(Some(&json!({"type": "random"})), &up).is_ok());
     }
 
     #[test]

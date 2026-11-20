@@ -2404,6 +2404,7 @@ dependencies = [
  "md-5",
  "miniz_oxide",
  "pingora",
+ "pingora-ketama",
  "podgate-model",
  "prost",
  "rcgen",

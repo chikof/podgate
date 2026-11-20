@@ -8,7 +8,8 @@
 //!   ejection, `active` by every [`Lease`], `ewma_us` and `ewma_at_ms` by the `p2c_ewma`
 //!   balancer. Balancers read [`ServerState::available`] and nothing else about health.
 //! - [`ServiceState`]: per service, the turn counter of the cyclic balancers (`round_robin`,
-//!   `weighted_round_robin`) and the source of pseudo-random numbers of the random ones.
+//!   `weighted_round_robin`), the source of pseudo-random numbers of the random ones, and the
+//!   secret key of the hashing balancers (`ip_hash`, `uri_hash`, `header_hash`, `hrw`).
 //! - [`Lease`]: what one request holds of the server it was sent to. Taking it counts the
 //!   request in `active`, dropping it uncounts it, and [`Lease::responded`] feeds the latency
 //!   to the balancer that asked for it.
@@ -42,6 +43,7 @@
 //! - A new service type that needs state adds one arm to the `match` in `Registry::settle`.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hash, RandomState};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -105,10 +107,13 @@ impl ServerState {
     }
 }
 
-/// What the balancers of one service share: a counter that survives snapshot pushes.
+/// What the balancers of one service share: a counter and a hash key that survive snapshot
+/// pushes.
 #[derive(Debug, Default)]
 pub struct ServiceState {
     next: AtomicU64,
+    /// The secret key of the hashing balancers, random per service and process.
+    key: RandomState,
 }
 
 impl ServiceState {
@@ -117,7 +122,16 @@ impl ServiceState {
     pub fn with_seed(seed: u64) -> Self {
         Self {
             next: AtomicU64::new(seed),
+            key: RandomState::new(),
         }
+    }
+
+    /// A keyed hash (SipHash) of `value` under a secret the service keeps for its lifetime: the
+    /// same value always gives the same number here, and nobody outside the process can
+    /// choose a value that lands on a given number or server.
+    #[must_use]
+    pub fn keyed_hash<T: Hash>(&self, value: T) -> u64 {
+        self.key.hash_one(value)
     }
 
     /// The next turn: `0`, `1`, `2`, and so on, shared by every request of the service.

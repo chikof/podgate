@@ -89,7 +89,8 @@ pub fn matching(
 /// Picks a revision and a backend for a request that matched `matched`. A valid session cookie
 /// (see [`crate::skew`]) pins it to the revision it names while that revision is `serving` or
 /// `retiring`; otherwise the weighted pick decides. The [`Lease`] counts the request on the
-/// chosen server: keep it until the request ends.
+/// chosen server: keep it until the request ends. `client` is the resolved client address for
+/// the hashing balancers ([`crate::client_ip::ForwardedView::known_client`]).
 ///
 /// # Errors
 ///
@@ -100,9 +101,10 @@ pub fn select(
     table: &RoutingTable,
     matched: Matched,
     request: &RequestHeader,
+    client: Option<IpAddr>,
 ) -> Result<(Selected, Lease), RouteError> {
     let app = table.app(matched.app).ok_or(RouteError::NoRoute)?;
-    let cx = PickCx::new(request);
+    let cx = PickCx::new(request).with_client(client);
     let (pick, pinned) = match skew::pinned(table, app, matched.router, cx) {
         Some(pick) => (pick, true),
         None => (
@@ -149,7 +151,7 @@ pub fn resolve(
 ) -> Result<Selected, RouteError> {
     let matched =
         matching(table, request, entry_point, tls, client_ip).ok_or(RouteError::NoRoute)?;
-    select(table, matched, request).map(|(selected, _lease)| selected)
+    select(table, matched, request, client_ip).map(|(selected, _lease)| selected)
 }
 
 #[cfg(test)]

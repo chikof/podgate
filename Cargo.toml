@@ -43,6 +43,7 @@ ipnet = "2.12.2"
 md-5 = "0.11.0"
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
+pingora-ketama = "0.9"
 podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
 prost = "0.14"
 regex = "1.13.2"

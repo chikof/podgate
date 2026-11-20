@@ -457,7 +457,12 @@ impl ProxyHttp for Gateway {
         }
         let mut attempts = 0;
         loop {
-            let (selected, lease) = match route::select(&ctx.table, matched, session.req_header()) {
+            let (selected, lease) = match route::select(
+                &ctx.table,
+                matched,
+                session.req_header(),
+                ctx.forwarded.known_client(),
+            ) {
                 Ok(chosen) => chosen,
                 Err(RouteError::NoUpstream) => {
                     let held = self.wake.hold(

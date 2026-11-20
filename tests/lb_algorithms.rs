@@ -237,12 +237,6 @@ async fn unknown_algorithm_rejected() {
     assert_eq!(unknown.status, 422, "{}", unknown.body);
     assert_eq!(conflict_codes(&unknown.json())[0], "invalid_service");
 
-    let planned = podgate
-        .push_snapshot(&balanced(1, "ip_hash", &servers, "x"))
-        .await;
-    assert_eq!(planned.status, 422, "{}", planned.body);
-    assert_eq!(conflict_codes(&planned.json())[0], "service_not_built");
-
     // A weight where weights are not used is refused too, never ignored.
     let mut weighted = balanced(1, "least_conn", &servers, "x");
     weighted["apps"][0]["revisions"][0]["services"][0]["servers"][0]["weight"] = json!(3);
