@@ -35,7 +35,7 @@ fn is_unreserved(byte: u8) -> bool {
 }
 
 /// Decodes the unreserved escapes of one segment; `Ok(None)` when it needs no change.
-fn clean_segment(segment: &str) -> Result<Option<String>, Refused> {
+fn clean_segment(segment: &str, allow_encoded_slash: bool) -> Result<Option<String>, Refused> {
     if !segment.contains('%') {
         return Ok(None);
     }
@@ -54,6 +54,12 @@ fn clean_segment(segment: &str) -> Result<Option<String>, Refused> {
             return Err(Refused::Malformed);
         };
         let decoded = high << 4 | low;
+        if decoded == b'/' && allow_encoded_slash {
+            // Kept as an escape: it is data inside this segment, never a separator.
+            out.push_str("%2F");
+            index += 3;
+            continue;
+        }
         if matches!(decoded, b'/' | b'\\' | 0) {
             return Err(Refused::EncodedSeparator);
         }
@@ -74,13 +80,25 @@ fn clean_segment(segment: &str) -> Result<Option<String>, Refused> {
 ///
 /// [`Refused`] for a path that cannot be normalized without changing what it names.
 pub fn normalize(raw: &str) -> Result<Cow<'_, str>, Refused> {
+    normalize_with(raw, false)
+}
+
+/// [`normalize`], for an entry point that may allow an encoded slash (`allow_encoded_slash`). It
+/// changes one thing: `%2F` is kept as an escape inside its segment instead of refusing the
+/// path. It is never decoded into a separator, so matching and the upstream see one segment. An
+/// encoded backslash and NUL stay refused.
+///
+/// # Errors
+///
+/// [`Refused`] for a path that cannot be normalized without changing what it names.
+pub fn normalize_with(raw: &str, allow_encoded_slash: bool) -> Result<Cow<'_, str>, Refused> {
     if !raw.starts_with('/') {
         return Ok(Cow::Borrowed(raw));
     }
     let mut kept: Vec<Cow<'_, str>> = Vec::new();
     let mut trailing = raw.ends_with('/');
     for segment in raw.split('/') {
-        let cleaned = clean_segment(segment)?;
+        let cleaned = clean_segment(segment, allow_encoded_slash)?;
         let value = cleaned.as_deref().unwrap_or(segment);
         let is_dot = matches!(value, "." | "..");
         if is_dot && cleaned.is_some() {
@@ -166,5 +184,21 @@ mod test {
         for raw in ["/a%", "/a%2", "/a%zz"] {
             assert_eq!(normalize(raw), Err(Refused::Malformed), "{raw}");
         }
+    }
+
+    #[test]
+    fn an_allowed_encoded_slash_stays_inside_its_segment() {
+        let allowed = |raw| normalize_with(raw, true).map(Cow::into_owned);
+        assert_eq!(allowed("/a%2fb/c"), Ok("/a%2Fb/c".to_owned()));
+        assert_eq!(allowed("/a%2Fb/./c"), Ok("/a%2Fb/c".to_owned()));
+        assert_eq!(allowed("/%2f/x"), Ok("/%2F/x".to_owned()));
+        assert_eq!(allowed("/a%2F..%2Fb"), Ok("/a%2F..%2Fb".to_owned()));
+        for raw in ["/a%5cb", "/a%00b", "/%2e%2e/x", "/a%2fb%"] {
+            assert!(allowed(raw).is_err(), "{raw}");
+        }
+        assert_eq!(
+            normalize_with("/a%2fb", false),
+            Err(Refused::EncodedSeparator)
+        );
     }
 }

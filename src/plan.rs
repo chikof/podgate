@@ -198,6 +198,13 @@ pub fn diff(live: &RoutingTable, candidate: &RoutingTable) -> Plan {
             });
         }
     }
+    for (name, kind) in crate::entry::policy::relaxations(live, candidate) {
+        plan.posture_changes.push(PostureChange {
+            host: format!("{ENTRY_POINT_PREFIX}{name}").into(),
+            app: "".into(),
+            kind,
+        });
+    }
     plan
 }
 

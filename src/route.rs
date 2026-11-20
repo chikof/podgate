@@ -74,7 +74,8 @@ pub fn matching(
     client_ip: Option<IpAddr>,
 ) -> Option<Matched> {
     let host = request_host(request)?;
-    let path = path::normalize(request.uri.path()).ok()?;
+    let allow_slash = table.entry_policy(entry_point).allow_encoded_slash();
+    let path = path::normalize_with(request.uri.path(), allow_slash).ok()?;
     let view = View {
         host: &host,
         path: &path,

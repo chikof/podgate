@@ -84,7 +84,6 @@ pub mod wasm;
 use std::sync::Arc;
 
 use anyhow::Context;
-use pingora::proxy::http_proxy_service_with_name;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora::server::{RunArgs, Server};
 use pingora::services::background::background_service;
@@ -192,9 +191,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             std::time::Duration::from_secs(1),
         ));
     for point in &config.entry_points {
-        let mut proxy = http_proxy_service_with_name(
+        let mut proxy = entry::app::service(
             &server.configuration,
             gateway.clone().with_entry_point(&point.name),
+            table.clone(),
+            &point.name,
             &format!("entry point {}", point.name),
         );
         let addr = point.addr.to_string();

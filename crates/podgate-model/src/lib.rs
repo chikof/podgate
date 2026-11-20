@@ -21,7 +21,7 @@ mod l4;
 mod observe;
 mod secret;
 
-pub use entry_point::EntryPointPolicy;
+pub use entry_point::{EntryPointPolicy, UnderscoreHeaders};
 pub use l4::{Tcp, Udp};
 pub use observe::Observability;
 pub use secret::SkewSecret;
@@ -675,7 +675,9 @@ mod test {
                 "timeouts": {"idle_secs": 60},
                 "http2": {"max_streams": 100},
                 "redirect": {"to": "web"},
-                "allow_encoded_slash": true
+                "allow_encoded_slash": true,
+                "max_header_bytes": 16384,
+                "underscore_headers": "delete"
             }],
             "observability": {
                 "access_log": {"format": "json"},

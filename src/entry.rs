@@ -15,6 +15,7 @@
 //! The listener a request arrived on is `Ctx.entry_point` (set from [`crate::Gateway`]'s name,
 //! one gateway per listener), which `route::matching` filters routers by.
 
+pub mod app;
 pub mod policy;
 pub mod proxy_protocol;
 
@@ -234,6 +235,7 @@ pub struct CompileContext {
     upstream_policy: UpstreamPolicy,
     tls_floor: TlsVersion,
     static_roots: StaticRoots,
+    addrs: Vec<(Box<str>, SocketAddr)>,
 }
 
 impl Default for CompileContext {
@@ -258,13 +260,30 @@ impl CompileContext {
             upstream_policy: UpstreamPolicy::allow_all(),
             tls_floor: TlsVersion::V1_2,
             static_roots: StaticRoots::default(),
+            addrs: Vec::new(),
         }
     }
 
-    /// A context for the listeners `points`.
+    /// A context for the listeners `points`, with their addresses (an entry point `redirect`
+    /// builds its `Location` from the target's).
     #[must_use]
     pub fn of_entry_points(points: &[EntryPoint]) -> Self {
-        Self::new(points.iter().map(|point| (&*point.name, point.protocol)))
+        let mut context = Self::new(points.iter().map(|point| (&*point.name, point.protocol)));
+        context.addrs = points
+            .iter()
+            .map(|point| (point.name.clone(), point.addr))
+            .collect();
+        context
+    }
+
+    /// Where the entry point called `name` listens, when the process told the compiler. A
+    /// context built by [`Self::new`] knows no addresses.
+    #[must_use]
+    pub fn addr_of(&self, name: &str) -> Option<SocketAddr> {
+        self.addrs
+            .iter()
+            .find(|(bound, _)| &**bound == name)
+            .map(|(_, addr)| *addr)
     }
 
     /// Lets the tenants called `tenants` declare routers that match hosts nobody claims (a
@@ -397,14 +416,19 @@ pub fn is_tls(session: &Session) -> bool {
 }
 
 /// Normalizes the path of `request` (see [`crate::router::path`]) and rewrites the request with
-/// the result, so routing, middlewares and the upstream all see one path.
+/// the result, so routing, middlewares and the upstream all see one path. `allow_encoded_slash`
+/// is the entry point's policy: it keeps an encoded `/` as data inside its segment instead of
+/// refusing the request (see [`path::normalize_with`]).
 ///
 /// # Errors
 ///
 /// [`Refused`] for a path that cannot be normalized without changing what it names; the request
 /// must be answered `400`.
-pub fn normalize_request(request: &mut RequestHeader) -> Result<(), Refused> {
-    let normalized = match path::normalize(request.uri.path())? {
+pub fn normalize_request(
+    request: &mut RequestHeader,
+    allow_encoded_slash: bool,
+) -> Result<(), Refused> {
+    let normalized = match path::normalize_with(request.uri.path(), allow_encoded_slash)? {
         std::borrow::Cow::Borrowed(_) => return Ok(()),
         std::borrow::Cow::Owned(path) => path,
     };
@@ -429,7 +453,7 @@ mod test {
     #[test]
     fn the_request_is_rewritten_to_the_path_that_was_matched() {
         let mut request = RequestHeader::build("GET", b"/a/./b//c?x=1", None).expect("request");
-        normalize_request(&mut request).expect("normalizes");
+        normalize_request(&mut request, false).expect("normalizes");
         assert_eq!(request.uri.path(), "/a/b/c");
         assert_eq!(request.uri.query(), Some("x=1"));
     }
@@ -437,13 +461,22 @@ mod test {
     #[test]
     fn a_clean_request_is_untouched_and_a_bad_one_refused() {
         let mut clean = RequestHeader::build("GET", b"/a?x=1", None).expect("request");
-        normalize_request(&mut clean).expect("clean");
+        normalize_request(&mut clean, false).expect("clean");
         assert_eq!(
             clean.uri.path_and_query().map(|pq| pq.as_str()),
             Some("/a?x=1")
         );
         let mut bad = RequestHeader::build("GET", b"/a%2fb", None).expect("request");
-        assert_eq!(normalize_request(&mut bad), Err(Refused::EncodedSeparator));
+        assert_eq!(
+            normalize_request(&mut bad, false),
+            Err(Refused::EncodedSeparator)
+        );
+        let mut allowed = RequestHeader::build("GET", b"/a%2fb/c?x=1", None).expect("request");
+        normalize_request(&mut allowed, true).expect("allowed");
+        assert_eq!(
+            allowed.uri.path_and_query().map(|pq| pq.as_str()),
+            Some("/a%2Fb/c?x=1")
+        );
     }
 
     #[test]

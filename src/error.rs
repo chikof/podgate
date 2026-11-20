@@ -77,6 +77,10 @@ pub enum AppError {
     /// The client did not send the whole body a `buffering` middleware holds in time: `408`.
     #[error("request body timed out")]
     RequestTimeout,
+    /// The request head (request line and headers) is over the entry point's `max_header_bytes`:
+    /// `431`.
+    #[error("request header fields too large")]
+    HeadersTooLarge,
     /// The upstream response is over a `buffering` middleware's `max_response_body_bytes`: `502`.
     #[error("upstream response too large")]
     UpstreamResponseTooLarge,
@@ -155,6 +159,7 @@ impl AppError {
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+            Self::HeadersTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             Self::UpstreamResponseTooLarge => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -223,6 +228,7 @@ impl AppError {
             Self::PayloadTooLarge => "payload_too_large",
             Self::ExpectationFailed => "expectation_failed",
             Self::RequestTimeout => "request_timeout",
+            Self::HeadersTooLarge => "headers_too_large",
             Self::UpstreamResponseTooLarge => "upstream_response_too_large",
             Self::Saturated => "backend_saturated",
             Self::WakeTimeout => "wake_timeout",

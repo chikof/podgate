@@ -42,17 +42,22 @@ async fn get_explain(
 ) -> Result<Response, AppError> {
     let Query(params) =
         params.map_err(|err| AppError::BadRequest(format!("invalid query: {err}").into()))?;
-    let target = Target::parse(
+    let table = state.table().load();
+    let allow_encoded_slash = params
+        .entry_point
+        .as_deref()
+        .is_some_and(|name| table.entry_policy(name).allow_encoded_slash());
+    let target = Target::parse_with(
         &params.url,
         params.method.as_deref(),
         params.entry_point.as_deref(),
+        allow_encoded_slash,
     )
     .map_err(|err| AppError::BadRequest(err.to_string().into()))?;
     let target = match params.client_ip {
         Some(client_ip) => target.with_client_ip(client_ip),
         None => target,
     };
-    let table = state.table().load();
     if let Some(name) = params
         .entry_point
         .as_deref()

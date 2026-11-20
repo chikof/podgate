@@ -24,6 +24,7 @@ use crate::client_ip::Trust;
 use crate::clientauth::ClientAuth;
 use crate::conflict;
 use crate::entry::CompileContext;
+use crate::entry::policy as entry_policy;
 use crate::host::HostPattern;
 use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
@@ -380,6 +381,9 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
             }
         }
     }
+    for (name, invalid) in entry_policy::check_all(&snapshot.entry_points, context) {
+        rejected.push(Rejected::snapshot(format!("entry point {name}"), invalid));
+    }
     for app in &snapshot.apps {
         let mut problem =
             |at: String, invalid: Invalid| rejected.push(Rejected::new(app, at, invalid));
@@ -433,19 +437,7 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
 }
 
 fn unsupported_policy_field(policy: &EntryPointPolicy) -> Option<&'static str> {
-    if policy.proxy_protocol.is_some() {
-        Some("proxy_protocol")
-    } else if policy.timeouts.is_some() {
-        Some("timeouts")
-    } else if policy.http2.is_some() {
-        Some("http2")
-    } else if policy.redirect.is_some() {
-        Some("redirect")
-    } else if policy.allow_encoded_slash.is_some() {
-        Some("allow_encoded_slash")
-    } else {
-        None
-    }
+    policy.proxy_protocol.is_some().then_some("proxy_protocol")
 }
 
 fn duplicates<'a>(

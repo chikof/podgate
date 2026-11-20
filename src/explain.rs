@@ -64,6 +64,21 @@ impl Target {
         method: Option<&str>,
         entry_point: Option<&str>,
     ) -> Result<Self, TargetError> {
+        Self::parse_with(url, method, entry_point, false)
+    }
+
+    /// [`Self::parse`] for an entry point whose policy allows an encoded slash
+    /// (`allow_encoded_slash`): `%2F` stays in its segment instead of refusing the path.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::parse`].
+    pub fn parse_with(
+        url: &str,
+        method: Option<&str>,
+        entry_point: Option<&str>,
+        allow_encoded_slash: bool,
+    ) -> Result<Self, TargetError> {
         let uri: Uri = url.parse().map_err(|_| TargetError::Url)?;
         let tls = match uri.scheme_str() {
             Some("https") => true,
@@ -81,7 +96,7 @@ impl Target {
                 Method::from_bytes(raw.as_bytes()).map_err(|_| TargetError::Method(raw.into()))?
             }
         };
-        let path = path::normalize(uri.path())
+        let path = path::normalize_with(uri.path(), allow_encoded_slash)
             .map_err(|refused| TargetError::Path(refused.to_string().into()))?
             .into_owned();
         Ok(Self {
@@ -137,8 +152,22 @@ pub struct Explanation<'a> {
     /// The canary policy and its live share; absent when the app has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     canary: Option<canary::Status<'a>>,
+    /// Set when the entry point redirects every request before routing: the router above is
+    /// the one that would match, but this redirect answers first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry_redirect: Option<RedirectView<'a>>,
     /// The stages the request goes through, in order; see [`crate::pipeline`].
     pipeline: Vec<serde_json::Value>,
+}
+
+/// The redirect an entry point answers every request with.
+#[derive(Debug, Serialize)]
+struct RedirectView<'a> {
+    to: &'a str,
+    status: u16,
+    scheme: &'static str,
+    /// `null` when the target listens on the default port of its scheme.
+    port: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -390,6 +419,15 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
             })
             .collect(),
         canary: app.canary(),
+        entry_redirect: table
+            .entry_policy(entry_point)
+            .redirect_to()
+            .map(|redirect| RedirectView {
+                to: redirect.to(),
+                status: redirect.status(),
+                scheme: redirect.scheme(),
+                port: redirect.port(),
+            }),
         pipeline: pipeline::describe(app, router, target.tls),
     })
 }

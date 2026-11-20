@@ -25,6 +25,7 @@ use crate::clientauth::{self, ClientAuth};
 use crate::compile::{self, Rejected};
 use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
+use crate::entry::policy::{self as entry_policy, Policy as EntryPolicy};
 use crate::middleware;
 use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
@@ -657,6 +658,7 @@ pub struct RoutingTable {
     weights: HashMap<Box<str>, u32>,
     skew_secret: Option<SkewSecret>,
     forwarded: HashMap<Box<str>, Trust>,
+    entry_policies: HashMap<Box<str>, EntryPolicy>,
     context: CompileContext,
     access_log: Option<Arc<Policy>>,
     series: TableSeries,
@@ -717,6 +719,7 @@ impl RoutingTable {
                 .collect(),
             skew_secret: snapshot.skew_secret.clone(),
             forwarded: crate::client_ip::policies(snapshot),
+            entry_policies: entry_policy::build(snapshot, context),
             context: context.clone(),
             // `compile::shape` refused an invalid policy before this runs.
             access_log: access_log::compile(snapshot).ok().flatten(),
@@ -860,6 +863,23 @@ impl RoutingTable {
     /// Every entry point that has a forwarded-header policy, with it, by name.
     pub fn forwarded_trusts(&self) -> impl Iterator<Item = (&str, &Trust)> {
         self.forwarded.iter().map(|(name, trust)| (&**name, trust))
+    }
+
+    /// The request policy of the entry point called `entry_point`: redirect, timeouts, HTTP/2
+    /// limits, encoded slash and header rules. [`EntryPolicy::none`] when the snapshot
+    /// says nothing about it.
+    #[must_use]
+    pub fn entry_policy(&self, entry_point: &str) -> &EntryPolicy {
+        self.entry_policies
+            .get(entry_point)
+            .unwrap_or(EntryPolicy::none())
+    }
+
+    /// Every entry point that has a request policy, with it, by name.
+    pub fn entry_policies(&self) -> impl Iterator<Item = (&str, &EntryPolicy)> {
+        self.entry_policies
+            .iter()
+            .map(|(name, policy)| (&**name, policy))
     }
 
     /// The access log policy for a request that matched `matched` (`None`: it matched no router),

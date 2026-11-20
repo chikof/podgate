@@ -8,12 +8,16 @@
 //! Order, with the reason each stage sits where it does:
 //!
 //! 1. `acme_http01`: answers a validation request before any route exists.
-//! 2. `entry_point`: normalizes the path (the path that is matched is the path that is served),
-//!    so a request with an unsafe path is refused first, then settles who the client is: the
+//! 2. `entry_point`: applies the entry point's policy ([`crate::entry::policy`]): a head over
+//!    `max_header_bytes` is `431` and `underscore_headers` deletes or refuses underscored header
+//!    names, then the session timeouts are set. It normalizes the path (the path that is matched
+//!    is the path that is served; `allow_encoded_slash` decides whether an encoded `/` is refused),
+//!    so a request with an unsafe path is refused, then settles who the client is: the
 //!    forwarding headers of a peer the entry point does not trust are removed ([`crate::client_ip`]).
 //!    The `x-forwarded-tls-client-cert*` headers are removed from every request, trusted peer or
 //!    not ([`crate::middleware::pass_tls_client_cert::strip`]); only the `pass_tls_client_cert`
-//!    middleware writes them, later, in the chain.
+//!    middleware writes them, later, in the chain. Last, an entry point with a `redirect` answers
+//!    every request that got this far with it, and nothing below runs.
 //! 3. `route`: picks the router. No match is `404`.
 //! 4. `sni_check`: over TLS, the matched app decides whether a request may name a host other
 //!    than the SNI. It runs for requests no router matched too (they get `421`, not `404`).

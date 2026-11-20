@@ -542,15 +542,30 @@ impl ProxyHttp for Gateway {
         // A cache refresh subrequest has no connection of its own: it carries what the request
         // that spawned it knew, and skips the checks that read the client's connection.
         let inherited = cache::refresh::inherited(session);
+        if let Some(inherited) = &inherited {
+            ctx.entry_point = Arc::clone(&inherited.entry_point);
+        }
         // Before routing: a validation request names a host that may have no route yet.
         if inherited.is_none() && acme::serve_challenge(session, &ctx.table).await? {
             return Ok(true);
+        }
+        // The entry point's policy: head limits and header rules first, then the session timeouts.
+        let table = Arc::clone(&ctx.table);
+        let policy = table.entry_policy(&ctx.entry_point);
+        if inherited.is_none() {
+            if let Err(err) = policy.check_head(session.req_header_mut()) {
+                respond::write_error(session, &err).await?;
+                return Ok(true);
+            }
+            policy.apply_timeouts(session);
         }
         // Before matching: the path that is matched is the path that is served.
         let tls = inherited
             .as_ref()
             .map_or_else(|| entry::is_tls(session), |inherited| inherited.tls);
-        if let Err(refused) = entry::normalize_request(session.req_header_mut()) {
+        if let Err(refused) =
+            entry::normalize_request(session.req_header_mut(), policy.allow_encoded_slash())
+        {
             let err = AppError::BadRequest(refused.to_string().into());
             respond::write_error(session, &err).await?;
             return Ok(true);
@@ -558,12 +573,14 @@ impl ProxyHttp for Gateway {
         // Whatever the route: no client-supplied certificate header ever reaches an upstream.
         middleware::pass_tls_client_cert::strip(session.req_header_mut());
         ctx.forwarded = match &inherited {
-            Some(inherited) => {
-                ctx.entry_point = Arc::clone(&inherited.entry_point);
-                inherited.forwarded.clone()
-            }
+            Some(inherited) => inherited.forwarded.clone(),
             None => ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point)),
         };
+        // The entry point may answer every request with a redirect, before routing. A refresh
+        // subrequest was not redirected, or it would not exist.
+        if inherited.is_none() && policy.redirect(session, &ctx.forwarded).await? {
+            return Ok(true);
+        }
         let found = route::matching(
             &ctx.table,
             session.req_header(),

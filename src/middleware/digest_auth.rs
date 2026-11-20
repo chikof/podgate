@@ -330,7 +330,9 @@ fn uri_matches(request: &RequestHeader, claimed: &str) -> bool {
     RequestHeader::build("GET", claimed.as_bytes(), None)
         .ok()
         .and_then(|mut original| {
-            crate::entry::normalize_request(&mut original).ok()?;
+            // The client signed the path as it sent it; an encoded slash that got this far was
+            // allowed by the entry point and is data here too.
+            crate::entry::normalize_request(&mut original, true).ok()?;
             Some(original)
         })
         .is_some_and(|original| original.uri.path_and_query() == request.uri.path_and_query())
