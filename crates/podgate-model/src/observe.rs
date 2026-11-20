@@ -9,6 +9,7 @@ use serde_json::Value;
 
 /// Snapshot-wide observability settings; a router may override them per router.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Observability {
     /// Structured access log: `format`, `fields`, `headers`, `filters`, `sampling_percent`; a
     /// boolean switches it off or on with the defaults. Absent: nothing is logged.

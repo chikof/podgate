@@ -59,7 +59,7 @@ const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
 const CHARGE_BLOCK: u64 = 64 * 1024;
 
 /// The configuration of a `buffering` middleware.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Largest request body, in bytes; a larger one is refused with `413`.

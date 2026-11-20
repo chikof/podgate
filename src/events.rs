@@ -103,6 +103,15 @@ pub enum EventKind {
         /// The private key, PKCS#8 PEM.
         key_pem: PrivateKeyPem,
     },
+    /// An operator took the snapshot over from the writer that owned it: a push with
+    /// `?takeover=true` from another `podgate-writer` name was accepted. Not emitted for the
+    /// first push of a process, which only pins its writer.
+    WriterChanged {
+        /// The writer that owned the snapshot; `null` when the first push sent no writer name.
+        from: Option<Box<str>>,
+        /// The writer that owns it now.
+        to: Box<str>,
+    },
     /// A `circuit_breaker` middleware opened its circuit: it answers without an
     /// upstream until its fallback is over. Emitted again when a circuit re-opens during recovery.
     CircuitOpened {

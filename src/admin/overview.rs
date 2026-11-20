@@ -102,6 +102,7 @@ async fn get_overview(
     let boot_id = state.events().boot_id().to_owned();
     let entry_points = state.entry_points();
     let metrics_addr = state.metrics_addr();
+    let writer = state.writer().name();
     // Walking a large table and serializing megabytes stays off the admin runtime's workers.
     let body = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -112,6 +113,7 @@ async fn get_overview(
             boot_id: &boot_id,
             entry_points: &entry_points,
             metrics_addr,
+            writer: writer.as_deref(),
         };
         overview::render(&table, &runtime, &query)
     })

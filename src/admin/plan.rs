@@ -6,12 +6,10 @@ use axum::routing::post;
 use axum::{Json, Router};
 
 use super::AppState;
+use super::snapshot::{MAX_BODY_BYTES, parse};
+use super::writer::Claim;
 use crate::error::AppError;
 use crate::plan::{self, Plan};
-use podgate_model::Snapshot;
-
-/// Largest accepted snapshot body; the same as `PUT /v1/snapshot`.
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -21,10 +19,14 @@ pub(super) fn routes() -> Router<AppState> {
 
 /// Diffs the pushed snapshot against the live table and applies nothing. `200` with the
 /// [`Plan`]; `400`, `409` and `422` exactly as `PUT /v1/snapshot` answers the same body, since
-/// the plan runs the same version check and compiler.
-async fn post_plan(State(state): State<AppState>, body: Bytes) -> Result<Json<Plan>, AppError> {
-    let snapshot: Snapshot = serde_json::from_slice(&body)
-        .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
+/// the plan runs the same writer check, version check and compiler.
+async fn post_plan(
+    State(state): State<AppState>,
+    claim: Claim,
+    body: Bytes,
+) -> Result<Json<Plan>, AppError> {
+    state.writer().check(&claim)?;
+    let snapshot = parse(&body)?;
     let live = state.table().load();
     // Compiling can be slow (WASM filter modules): keep it off the admin runtime's workers.
     let table = state.table().clone();

@@ -123,7 +123,7 @@ pub(crate) fn render(out: &mut String) {
 }
 
 /// The configuration of a `pass_tls_client_cert` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     /// Send the certificate chain in `X-Forwarded-Tls-Client-Cert`.
@@ -133,7 +133,7 @@ pub struct Config {
 }
 
 /// The fields of `X-Forwarded-Tls-Client-Cert-Info`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -176,7 +176,9 @@ fn any(attributes: [Attribute; 8]) -> bool {
 }
 
 /// The parts of the subject name to send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields, default)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -219,7 +221,9 @@ impl Subject {
 
 /// The parts of the issuer name to send. Like [`Subject`] without the organizational unit, as in
 /// Traefik.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields, default)]
 #[allow(
     clippy::struct_excessive_bools,

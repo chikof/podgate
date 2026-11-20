@@ -18,7 +18,7 @@ use podgate_model::Declared;
 const KIND: &str = "strip_prefix";
 
 /// The configuration of a `strip_prefix` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Prefixes, each starting with `/`; the first one that matches is removed.

@@ -13,7 +13,10 @@ mod health;
 mod metrics;
 mod overview;
 mod plan;
+pub(crate) mod schema;
 mod snapshot;
+mod validate;
+mod writer;
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -34,6 +37,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use self::writer::Writer;
 use crate::budget::Budgets;
 use crate::entry::EntryPoint;
 use crate::error::AppError;
@@ -66,6 +70,8 @@ pub struct AppState {
     entry_points: Arc<[EntryPoint]>,
     metrics_addr: Option<std::net::SocketAddr>,
     overview_slots: Arc<Semaphore>,
+    validate_slots: Arc<Semaphore>,
+    writer: Writer,
 }
 
 impl AppState {
@@ -95,6 +101,8 @@ impl AppState {
             entry_points: Arc::default(),
             metrics_addr: None,
             overview_slots: Arc::new(Semaphore::new(overview::MAX_CONCURRENT)),
+            validate_slots: Arc::new(Semaphore::new(validate::MAX_CONCURRENT)),
+            writer: Writer::default(),
         }
     }
 
@@ -261,6 +269,16 @@ impl AppState {
     pub fn overview_slots(&self) -> &Arc<Semaphore> {
         &self.overview_slots
     }
+
+    /// The slots that cap concurrent `POST /v1/snapshot/validate` compiles.
+    fn validate_slots(&self) -> &Arc<Semaphore> {
+        &self.validate_slots
+    }
+
+    /// Who owns the live snapshot.
+    fn writer(&self) -> &Writer {
+        &self.writer
+    }
 }
 
 async fn not_found() -> AppError {
@@ -269,8 +287,9 @@ async fn not_found() -> AppError {
 
 /// Builds the router with all routes and middleware.
 ///
-/// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`,
-/// `GET /v1/explain`, `GET /v1/overview`, `GET /v1/apps/{app}/failures`,
+/// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`,
+/// `POST /v1/snapshot/validate`, `GET /v1/snapshot/version`, `GET /v1/schema`,
+/// `GET /v1/events`, `GET /v1/explain`, `GET /v1/overview`, `GET /v1/apps/{app}/failures`,
 /// `POST /v1/apps/{app}/failures/{id}/replay`;
 /// anything else is a JSON 404.
 ///
@@ -292,6 +311,9 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(explain::routes())
         .merge(failures::routes())
         .merge(overview::routes())
+        .merge(schema::routes())
+        .merge(validate::routes())
+        .merge(writer::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)

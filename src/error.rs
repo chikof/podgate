@@ -37,6 +37,13 @@ pub enum AppError {
     /// The request contradicts the current state: `409 Conflict`.
     #[error("{0}")]
     Conflict(Box<str>),
+    /// A push came from a writer other than the one that owns the live snapshot:
+    /// `409 Conflict`, with the owner under `writer` (`null` when the owner sent no name).
+    #[error("snapshot is owned by {}", owner(.writer.as_deref()))]
+    WriterOwned {
+        /// The owning writer's name.
+        writer: Option<Box<str>>,
+    },
     /// A snapshot the compiler refused: `422`, with objects under `conflicts`, each with a `code`.
     #[error("snapshot rejected")]
     SnapshotRejected(Vec<Value>),
@@ -129,6 +136,7 @@ impl AppError {
             Self::ClientCertRequired => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::WriterOwned { .. } => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unavailable(_)
             | Self::NoHealthyUpstream
@@ -226,6 +234,7 @@ impl AppError {
             Self::LimiterBusy => "limiter_busy",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
+            Self::WriterOwned { .. } => "writer_owned",
             Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
         }
     }
@@ -237,6 +246,7 @@ impl AppError {
             Self::SnapshotRejected(conflicts) => {
                 json!({ "error": self.to_string(), "conflicts": conflicts })
             }
+            Self::WriterOwned { writer } => json!({ "error": self.to_string(), "writer": writer }),
             _ => json!({ "error": self.to_string() }),
         }
     }
@@ -271,6 +281,14 @@ fn rejection(err: &CompileError) -> Vec<Value> {
             .map(clientauth::Rejection::to_json)
             .collect(),
     }
+}
+
+/// Who owns the snapshot, for the message of [`AppError::WriterOwned`].
+fn owner(writer: Option<&str>) -> String {
+    writer.map_or_else(
+        || "an unnamed writer".to_owned(),
+        |name| format!("writer {name}"),
+    )
 }
 
 impl From<RouteError> for AppError {

@@ -8,11 +8,14 @@
 //!
 //! # Adding a kind
 //!
-//! 1. Write `src/middleware/<kind>.rs`: a config struct with `#[serde(deny_unknown_fields)]`, a
-//!    type implementing [`Kind`] (only the hooks it needs; the rest do nothing), unit tests.
+//! 1. Write `src/middleware/<kind>.rs`: a config struct with `#[serde(deny_unknown_fields)]` that
+//!    derives `schemars::JsonSchema` (the schema `GET /v1/schema` serves), a type implementing
+//!    [`Kind`] (only the hooks it needs; the rest do nothing), unit tests.
 //! 2. In the `kinds!` list, replace `"<kind>" => unbuilt` by `"<kind>" => Variant(<kind>::Type)`
-//!    and add `mod <kind>;` below. Nothing else in the crate changes: the compiler, explain, the
-//!    plan's posture diff and the proxy callbacks already call the chain.
+//!    and add `mod <kind>;` below; add `"<kind>" => <kind>::Config,` to the `schemas!` list (the
+//!    test `every_built_kind_has_a_schema` fails without it). Nothing else in the crate changes:
+//!    the compiler, explain, the plan's posture diff and the proxy callbacks already call the
+//!    chain.
 //! 3. Test it end to end in `tests/mw_<kind>.rs`.
 //!
 //! Until step 2, a snapshot that names the kind is refused with `middleware_not_built`.
@@ -293,7 +296,7 @@ macro_rules! kinds {
         }
 
         /// Types that are planned and not built yet.
-        const UNBUILT: &[&str] = &[ $($unbuilt,)* ];
+        pub const UNBUILT: &[&str] = &[ $($unbuilt,)* ];
 
         #[allow(
             unreachable_patterns,
@@ -540,6 +543,55 @@ kinds! {
     "grpc_web" => unbuilt,
 
     "respond" => Respond(respond::Respond),
+}
+
+/// Generates [`schemas`] from one list: `"type" => path::Config,` for a built kind, whose
+/// configuration struct derives `schemars::JsonSchema`. Keep one entry per line, a blank line
+/// between entries, like `kinds!`.
+macro_rules! schemas {
+    ($($ty:literal => $config:ty,)*) => {
+        /// The JSON Schema of the configuration of every built middleware type, by type name.
+        #[must_use]
+        pub fn schemas() -> Vec<(&'static str, Value)> {
+            vec![$(($ty, $crate::admin::schema::of::<$config>()),)*]
+        }
+    };
+}
+
+schemas! {
+    "wasm" => wasm::Config,
+
+    "add_prefix" => add_prefix::Config,
+
+    "strip_prefix" => strip_prefix::Config,
+
+    "strip_prefix_regex" => strip_prefix_regex::Config,
+
+    "replace_path" => replace_path::Config,
+
+    "replace_path_regex" => replace_path_regex::Config,
+
+    "redirect_scheme" => redirect_scheme::Config,
+
+    "redirect_regex" => redirect_regex::Config,
+
+    "headers" => headers::Config,
+
+    "content_type" => content_type::Config,
+
+    "basic_auth" => basic_auth::Config,
+
+    "digest_auth" => digest_auth::Config,
+
+    "ip_allow_list" => ip_allow_list::Config,
+
+    "circuit_breaker" => circuit_breaker::Config,
+
+    "buffering" => buffering::Config,
+
+    "compress" => compress::Config,
+
+    "pass_tls_client_cert" => pass_tls_client_cert::Config,
 }
 
 /// A compiled middleware and the name it was declared under.

@@ -87,7 +87,7 @@ const MAX_LATENCY_MS: u64 = 600_000;
 const STATUS_END: u16 = 1000;
 
 /// The configuration of a `circuit_breaker` middleware.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// What opens the circuit; any one of the triggers does.
@@ -128,7 +128,7 @@ const fn default_response_code() -> u16 {
 }
 
 /// The triggers, any-of. At least one is required.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TripWhen {
     /// Trips when more than this share of the window's requests ended in a network error: the
@@ -148,7 +148,7 @@ pub struct TripWhen {
 
 /// Responses with a status in `from..to` per response with a status in `over_from..over_to`.
 /// Both ranges are half open, as in Traefik.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseCodeRatio {
     /// First status of the counted range.
@@ -170,7 +170,7 @@ const fn default_over_to() -> u16 {
 }
 
 /// A latency quantile and the limit it must stay under.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LatencyQuantile {
     /// The quantile as a percentage, `0..=100`: `50.0` is the median, `99.0` the 99th percentile.

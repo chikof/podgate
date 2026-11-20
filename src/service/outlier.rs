@@ -74,9 +74,9 @@ pub struct State {
 const _: () = assert!(std::mem::size_of::<State>() == 16);
 
 /// The configuration of `passive`, as written.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     consecutive_failures: u32,
     ejection_secs: u32,
     max_ejection_percent: u8,

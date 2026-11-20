@@ -28,6 +28,7 @@ pub use secret::SkewSecret;
 
 /// The complete desired state of one node. Replaces the previous snapshot as a whole.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Snapshot {
     /// Strictly increasing; a snapshot not newer than the live one is refused.
     pub version: u64,
@@ -61,6 +62,7 @@ pub struct Snapshot {
 
 /// One tenant of the PaaS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Tenant {
     /// Unique id; apps name it in [`App::tenant`].
     pub id: Box<str>,
@@ -72,6 +74,7 @@ pub struct Tenant {
 
 /// Resource limits of a tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Budget {
     /// Most requests the tenant may have in flight.
     pub max_inflight: u32,
@@ -82,6 +85,7 @@ pub struct Budget {
 /// One app: the unit of tenancy and deployment. It owns its routers, middlewares, services and
 /// transports; every name resolves inside the app only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct App {
     /// Unique id.
     pub id: Box<str>,
@@ -133,6 +137,7 @@ pub struct App {
 
 /// One router: a matcher, a middleware chain and a service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Router {
     /// Unique among the app's routers.
     pub name: Box<str>,
@@ -165,6 +170,7 @@ pub struct Router {
 /// The envelope only knows the name and the type; the module of that type owns the rest and
 /// parses it strictly.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Declared {
     /// Unique among the app's objects of this kind of object.
     pub name: Box<str>,
@@ -211,6 +217,7 @@ impl fmt::Debug for Declared {
 /// The snapshot owns the policy; podgate owns the live share at runtime (see `crate::canary` in
 /// the daemon).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Canary {
     /// The canary's [`Revision::id`]; it must be `serving`. Its own `weight` is ignored: the
     /// canary's share replaces it.
@@ -227,6 +234,7 @@ pub struct Canary {
 
 /// Scale-to-zero policy of an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScaleToZero {
     /// Seconds without a request after which the app is reported idle (`app_idle`).
     pub idle_secs: u64,
@@ -241,6 +249,7 @@ fn default_wake_timeout_secs() -> u64 {
 
 /// How an app gets certificates, plus optional client authentication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TlsPolicy {
     /// Where certificates come from.
     pub mode: TlsMode,
@@ -314,6 +323,7 @@ impl TlsPolicy {
 
 /// A TLS protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TlsVersion {
     /// TLS 1.2.
     #[serde(rename = "1.2")]
@@ -325,6 +335,7 @@ pub enum TlsVersion {
 
 /// Whether and how clients are asked for a certificate (Traefik's `clientAuthType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ClientAuthMode {
     /// Ask for a certificate; serve clients with none and trust none.
@@ -339,6 +350,7 @@ pub enum ClientAuthMode {
 
 /// The ACME challenge the issuer answers for an `acme` app's hosts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ChallengeKind {
     /// Answered over plain HTTP by every node; cannot prove a wildcard.
     #[default]
@@ -356,6 +368,7 @@ pub enum ChallengeKind {
 
 /// Certificate source for an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     /// Issued for the app's declared hosts.
@@ -366,6 +379,7 @@ pub enum TlsMode {
 
 /// One deployed version of an app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Revision {
     /// Unique within its app.
     pub id: Box<str>,
@@ -380,6 +394,7 @@ pub struct Revision {
 
 /// Lifecycle state of a revision; see `docs/architecture.md` (`### Revision states`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RevisionState {
     /// Gets new sessions by weight.
@@ -392,6 +407,7 @@ pub enum RevisionState {
 
 /// A certificate chain and its private key, served for the listed hosts.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Certificate {
     /// Hosts the certificate answers for: exact names or `*.` wildcards.
     pub hosts: Vec<Box<str>>,
@@ -418,6 +434,7 @@ impl fmt::Debug for Certificate {
 /// How certificates are issued and which node issues them. the daemon's `acme` module reads
 /// every field.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Acme {
     /// `NODE_NAME` of the one node that orders certificates. Every other node ignores the
     /// ordering fields and only serves `challenges`.
@@ -454,6 +471,7 @@ pub struct Acme {
 /// One published DNS-01 TXT record. Carries no credential: it names a record that is already
 /// public.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DnsReady {
     /// The record's name, `_acme-challenge.<domain>`.
@@ -465,6 +483,7 @@ pub struct DnsReady {
 
 /// External account binding credentials, as a CA hands them out.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExternalAccount {
     /// The key identifier.
     pub key_id: String,
@@ -477,6 +496,7 @@ pub struct ExternalAccount {
 /// (TLS-ALPN-01: the host that an `acme-tls/1` handshake proves with a challenge
 /// certificate over `key_authorization`) is set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Challenge {
     /// The HTTP-01 challenge token.
     #[serde(default, skip_serializing_if = "Option::is_none")]

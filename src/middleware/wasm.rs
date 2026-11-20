@@ -19,7 +19,7 @@ use crate::wasm::{CompiledFilter, Reason, run_filter};
 use podgate_model::Declared;
 
 /// The configuration of a `wasm` middleware.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The module in the WebAssembly binary format, standard base64.

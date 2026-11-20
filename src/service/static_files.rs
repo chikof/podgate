@@ -50,9 +50,9 @@ pub const NO_SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFI
 const DEFAULT_MAX_FILE_BYTES: u64 = 4 << 30;
 
 /// The configuration of a `static` service.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     root: String,
     #[serde(default)]
     index: Option<Vec<String>>,
@@ -69,7 +69,7 @@ struct Config {
 }
 
 /// `Cache-Control` values by file extension.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CacheControl {
     #[serde(default)]

@@ -17,7 +17,7 @@ use podgate_model::Declared;
 const KIND: &str = "add_prefix";
 
 /// The configuration of an `add_prefix` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The prefix, starting with `/`.

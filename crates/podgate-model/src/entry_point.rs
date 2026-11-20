@@ -10,6 +10,7 @@ use serde_json::Value;
 
 /// The policy for the entry point called `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EntryPointPolicy {
     /// The entry point this policy is for; the process must have bound it.
     pub name: Box<str>,

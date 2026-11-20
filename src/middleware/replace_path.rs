@@ -17,7 +17,7 @@ use podgate_model::Declared;
 const KIND: &str = "replace_path";
 
 /// The configuration of a `replace_path` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The new path, starting with `/`.

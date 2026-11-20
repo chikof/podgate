@@ -20,7 +20,7 @@ use podgate_model::Declared;
 const KIND: &str = "replace_path_regex";
 
 /// The configuration of a `replace_path_regex` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// A regular expression (Rust `regex` syntax, unanchored).

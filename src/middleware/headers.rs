@@ -51,7 +51,7 @@ pub(super) const FORBIDDEN: &[&str] = &[
 const REGEX_SIZE_LIMIT: usize = 1 << 16;
 
 /// The configuration of a `headers` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     /// Edits to the request on its way to the upstream.
@@ -63,7 +63,7 @@ pub struct Config {
 }
 
 /// Headers to set (overwrite) and remove.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Edits {
     /// Header name to value. An empty value is refused: removal is `remove`.
@@ -73,7 +73,7 @@ pub struct Edits {
 }
 
 /// Response edits: [`Edits`] and the security headers.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct ResponseEdits {
     /// Header name to value.
@@ -85,7 +85,7 @@ pub struct ResponseEdits {
 }
 
 /// The standard security headers. A field that is absent adds nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Security {
     /// `Strict-Transport-Security`, added to responses of TLS connections only.
@@ -109,7 +109,7 @@ pub struct Security {
 }
 
 /// `Strict-Transport-Security`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Hsts {
     /// `max-age`, in seconds; `0` tells browsers to forget the policy.
@@ -123,7 +123,7 @@ pub struct Hsts {
 }
 
 /// Cross-origin resource sharing.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Cors {
     /// Allowed origins, exact (`scheme://host[:port]`), or `*` for any.

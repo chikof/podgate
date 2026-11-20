@@ -59,14 +59,14 @@ const TAG_LEN: usize = 16;
 const ENCODED_LEN: usize = 22;
 
 /// `sticky` as declared.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     cookie: CookieConfig,
 }
 
 /// `sticky.cookie` as declared.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CookieConfig {
     #[serde(default)]

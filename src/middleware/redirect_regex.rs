@@ -37,7 +37,7 @@ use podgate_model::Declared;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// The configuration of a `redirect_regex` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The pattern, over `scheme://host[:port]/path?query`.

@@ -27,9 +27,9 @@ use podgate_model::Declared;
 const MAX_PATTERNS: usize = 64;
 
 /// The configuration of a `compress` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     #[serde(default = "default_algorithms")]
     algorithms: Vec<String>,
     min_bytes: Option<u64>,

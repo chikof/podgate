@@ -24,7 +24,7 @@ Every list is `{"total": n, "items": [...]}`. `total` counts what the filters se
 
 | Section | Content |
 |---|---|
-| `summary` | `version`, `applied_at` (seconds since the Unix epoch when the live table was compiled; a revert counts), `boot_id` (as on the event feed), `metrics_addr` (when the process has a `METRICS_ADDR` listener), counts of `tenants`, `apps`, `routers`, `services`, and `servers` by `healthy`, `unhealthy` and `ejected`. The counts cover the whole node, whatever the filters say. |
+| `summary` | `version`, `applied_at` (seconds since the Unix epoch when the live table was compiled; a revert counts), `boot_id` (as on the event feed), `metrics_addr` (when the process has a `METRICS_ADDR` listener), `writer` (the `podgate-writer` that owns the snapshot, when the owner sent a name; see `docs/ref/admin-tools.md`), counts of `tenants`, `apps`, `routers`, `services`, and `servers` by `healthy`, `unhealthy` and `ejected`. The counts cover the whole node, whatever the filters say. |
 | `entry_points` | Per listener: `name`, `protocol`, `address`, `proxy_protocol` (only when on), `forwarded_headers` (`nobody`, `listed_peers` or `everyone`). |
 | `tenants` | `id`, `weight`, `budget`, `apps`, and live `inflight` and `buffer_bytes`. |
 | `certificates` | `hosts`, `issuer`, `not_after` (seconds since the Unix epoch), `source` (`acme` when the issuer renews it, else `snapshot`). Never a chain or a key. |
@@ -38,7 +38,7 @@ An app has:
 - `middlewares`: `name`, `type`, and `config`, which is the kind's `describe()` output. A circuit breaker shows its `phase` there.
 - `recent`: `window_secs` (300), `requests` and `errors_5xx` from the same counters auto-revert and the canary read.
 
-A field of a feature that is not configured is absent, not `null`: a service without `health_check` has no `healthy`, an app without a canary has no `canary`. The snapshot's writer name is not on the node yet and is absent too.
+A field of a feature that is not configured is absent, not `null`: a service without `health_check` has no `healthy`, an app without a canary has no `canary`, and a snapshot whose writer sent no name (or none yet) has no `summary.writer`.
 
 ## Bounds
 

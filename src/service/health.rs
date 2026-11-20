@@ -211,7 +211,7 @@ struct StatusRange {
     high: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 enum StatusSpec {
     Code(u16),
@@ -245,9 +245,9 @@ impl StatusSpec {
 }
 
 /// The fields of a `health_check`, as written.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     path: String,
     interval_secs: u64,
     timeout_secs: u64,

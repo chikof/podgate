@@ -989,7 +989,7 @@ impl TableHandle {
             self.metrics.rejected(&err);
             return Err(err);
         }
-        let table = RoutingTable::compile_with(snapshot, &self.context).map_err(|err| {
+        let table = self.compile(snapshot).map_err(|err| {
             let err = ApplyError::from(err);
             self.metrics.rejected(&err);
             err
@@ -1024,7 +1024,24 @@ impl TableHandle {
                 offered: snapshot.version,
             });
         }
-        Ok(RoutingTable::compile_with(snapshot, &self.context)?)
+        Ok(self.compile(snapshot)?)
+    }
+
+    /// Compiles `snapshot` as [`Self::apply`] would and discards the table: what `POST
+    /// /v1/snapshot/validate` answers with. It ignores the version, and touches no state: no
+    /// swap, no registry, no metric.
+    ///
+    /// # Errors
+    ///
+    /// The [`CompileError`] [`Self::apply`] would refuse the snapshot with.
+    pub fn validate(&self, snapshot: &Snapshot) -> Result<(), CompileError> {
+        self.compile(snapshot).map(drop)
+    }
+
+    /// The one compile every path uses: apply, plan, validate and revert cannot disagree on what
+    /// a snapshot means, because none compiles it any other way.
+    fn compile(&self, snapshot: &Snapshot) -> Result<RoutingTable, CompileError> {
+        RoutingTable::compile_with(snapshot, &self.context)
     }
 
     /// Puts `previous`, the snapshot of an earlier live table, back in service, but only while
@@ -1052,7 +1069,7 @@ impl TableHandle {
         }
         let mut restored = previous.clone();
         restored.version = keep_version;
-        self.swap(RoutingTable::compile_with(&restored, &self.context)?);
+        self.swap(self.compile(&restored)?);
         *self.source() = Some(Arc::new(restored));
         Ok(true)
     }

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Any string deserializes; the daemon's snapshot compiler refuses one shorter than
 /// [`Self::MIN_LEN`].
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct SkewSecret(String);
 

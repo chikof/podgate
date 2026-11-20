@@ -136,10 +136,23 @@ impl<'de> Deserialize<'de> for Cidr {
     }
 }
 
+impl schemars::JsonSchema for Cidr {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Cidr".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`."
+        })
+    }
+}
+
 /// How an IP-keyed feature (`ip_allow_list`, `rate_limit`, the hash balancers) picks the client
 /// out of the forwarding chain, as Traefik's `ipStrategy`. The default is the entry point's own
 /// decision, [`ForwardedView::client_ip`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IpStrategy {
     /// The position from the right of the forwarded chain, counted after `excluded` addresses
@@ -187,7 +200,7 @@ pub struct Trust {
     trusted: Box<[Cidr]>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TrustConfig {
     #[serde(default)]

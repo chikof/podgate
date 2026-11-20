@@ -153,6 +153,8 @@ pub struct Runtime<'a> {
     pub entry_points: &'a [EntryPoint],
     /// Where the read-only metrics listener serves, when the process has one.
     pub metrics_addr: Option<std::net::SocketAddr>,
+    /// The `podgate-writer` that owns the live snapshot, when the owner sent a name.
+    pub writer: Option<&'a str>,
 }
 
 /// Renders the overview of `table` as a JSON body of at most `query.max_bytes` bytes.
@@ -207,6 +209,9 @@ struct SummaryView<'a> {
     /// The read-only metrics listener, when the process has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     metrics_addr: Option<std::net::SocketAddr>,
+    /// The writer that owns the snapshot, when it sent a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    writer: Option<&'a str>,
     tenants: usize,
     apps: usize,
     routers: usize,
@@ -227,6 +232,7 @@ fn summary<'a>(table: &RoutingTable, runtime: &Runtime<'a>) -> SummaryView<'a> {
         applied_at: table.applied_at(),
         boot_id: runtime.boot_id,
         metrics_addr: runtime.metrics_addr,
+        writer: runtime.writer,
         tenants: table.tenant_ids().count(),
         apps: table.apps().len(),
         routers: 0,
@@ -810,6 +816,10 @@ mod test {
     }
 
     fn rendered(table: &RoutingTable, query: &Query) -> Value {
+        rendered_by(table, query, None)
+    }
+
+    fn rendered_by(table: &RoutingTable, query: &Query, writer: Option<&str>) -> Value {
         let budgets = Budgets::new();
         let events = EventFeed::new();
         let inflight = Inflight::new(events.clone());
@@ -821,6 +831,7 @@ mod test {
             boot_id: events.boot_id(),
             entry_points: &[],
             metrics_addr: None,
+            writer,
         };
         let body = render(table, &runtime, query).expect("renders");
         assert!(body.len() <= query.max_bytes, "{} bytes", body.len());
@@ -842,6 +853,22 @@ mod test {
             "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
             "apps": apps,
         })
+    }
+
+    #[test]
+    fn summary_names_the_writer_when_there_is_one() {
+        let table = table_of(&snapshot(&[app("a")]));
+        let query = Query {
+            sections: vec![Section::Summary],
+            ..Query::default()
+        };
+        let named = rendered_by(&table, &query, Some("podkit-agent"));
+        assert_eq!(named["summary"]["writer"], "podkit-agent");
+        let unnamed = rendered_by(&table, &query, None);
+        assert!(
+            unnamed["summary"].get("writer").is_none(),
+            "no writer, no field: {unnamed}"
+        );
     }
 
     #[test]

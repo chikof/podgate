@@ -81,7 +81,7 @@ const FAILURE_DELAY: Duration = Duration::from_secs(1);
 const FAILURE_SOURCES: usize = 4096;
 
 /// The configuration of a `digest_auth` middleware.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// htdigest entries, `user:realm:HA1`, where `HA1` is `hex(H(user:realm:password))`: 32 hex

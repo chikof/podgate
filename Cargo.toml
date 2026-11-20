@@ -44,7 +44,7 @@ md-5 = "0.11.0"
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 pingora-ketama = "0.9"
-podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
+podgate-model = { version = "0.1.0", path = "crates/podgate-model", features = ["schema"] }
 prost = "0.14"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 regex = "1.13.2"
@@ -52,6 +52,7 @@ rustix = { version = "1.1.6", features = ["fs"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 ruzstd = "0.9.1"
+schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -75,6 +76,7 @@ h2 = "0.4.20"
 wat = "1.263.0"
 # libzstd (C) only as the reference decoder in tests: the shipped encoder is ruzstd.
 zstd = { version = "0.14.4", default-features = false }
+jsonschema = { version = "0.61.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review

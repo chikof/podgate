@@ -19,7 +19,7 @@ use podgate_model::Declared;
 const KIND: &str = "strip_prefix_regex";
 
 /// The configuration of a `strip_prefix_regex` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Regular expressions (Rust `regex` syntax, unanchored); the first that matches a non-empty

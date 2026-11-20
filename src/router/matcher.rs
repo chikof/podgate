@@ -10,7 +10,7 @@
 //!
 //! Adding a leaf: a file in this directory with the four functions, one variant in [`Matcher`],
 //! and one arm in each of its `match` statements (the compiler lists them); remove the key from
-//! `UNBUILT`.
+//! `UNBUILT` and add its schema to `schema.rs` (`GET /v1/schema`).
 
 use std::fmt;
 use std::net::IpAddr;
@@ -32,6 +32,7 @@ mod path_prefix;
 mod path_regexp;
 mod query;
 mod query_regexp;
+mod schema;
 
 use client_ip::ClientIp;
 use header::Header;
@@ -45,6 +46,8 @@ use path_regexp::PathRegexp;
 use query::Query;
 use query_regexp::QueryRegexp;
 
+pub use schema::schemas;
+
 /// Deepest nesting of combinators a matcher may have.
 pub const MAX_DEPTH: usize = 8;
 
@@ -52,7 +55,7 @@ pub const MAX_DEPTH: usize = 8;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Leaves that are planned and not built: refused with `matcher_not_built`.
-const UNBUILT: [&str; 0] = [];
+pub const UNBUILT: [&str; 0] = [];
 
 /// Why a matcher is refused: a stable code and a message.
 #[derive(Debug, Clone, PartialEq, Eq)]

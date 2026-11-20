@@ -49,7 +49,7 @@ use crate::compile::Invalid;
 use podgate_model::Declared;
 
 /// The `type` of a transport in a snapshot.
-const KIND: &str = "servers_transport";
+pub(super) const KIND: &str = "servers_transport";
 
 /// What `min_tls_version: "1.2"` means: Pingora's rustls connector offers TLS 1.2 and 1.3 only.
 const MIN_TLS: &str = "1.2";
@@ -59,9 +59,9 @@ const REDACTED: &str = "[redacted]";
 
 /// The fields of a `servers_transport`, but for `client_cert`, which [`client_cert`] reads by
 /// hand so that no parse error quotes the key.
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     #[serde(default)]
     server_name: Option<String>,
     #[serde(default)]
@@ -70,6 +70,25 @@ struct Config {
     insecure_skip_verify: bool,
     #[serde(default)]
     min_tls_version: Option<String>,
+}
+
+/// The JSON Schema of a `servers_transport`: [`Config`] plus `client_cert`, which is read by hand
+/// and so is not a field of it.
+pub(super) fn schema() -> Value {
+    let mut schema = crate::admin::schema::of::<Config>();
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(
+            "client_cert".to_owned(),
+            serde_json::json!({
+                "type": "object",
+                "description": "The certificate chain (leaf first) and private key, PEM, presented to a server that asks for one.",
+                "properties": { "cert_pem": { "type": "string" }, "key_pem": { "type": "string" } },
+                "required": ["cert_pem", "key_pem"],
+                "additionalProperties": false
+            }),
+        );
+    }
+    schema
 }
 
 /// A compiled `servers_transport`.

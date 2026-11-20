@@ -40,17 +40,20 @@ use crate::compile::Invalid;
 use podgate_model::{Declared, SkewSecret};
 
 /// The configuration of a `loadbalancer`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     servers: Vec<ServerConfig>,
     #[serde(default)]
     algorithm: Option<Value>,
     #[serde(default)]
+    #[schemars(with = "Option<super::health::Config>")]
     health_check: Option<Value>,
     #[serde(default)]
+    #[schemars(with = "Option<super::outlier::Config>")]
     passive: Option<Value>,
     #[serde(default)]
+    #[schemars(with = "Option<super::sticky::Config>")]
     sticky: Option<Value>,
     #[serde(default)]
     pass_host_header: Option<bool>,
@@ -59,7 +62,7 @@ struct Config {
 }
 
 /// One server as declared.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     url: String,

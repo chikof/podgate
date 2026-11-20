@@ -11,6 +11,7 @@ use super::Declared;
 
 /// The TCP side of an app.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Tcp {
     /// Routers: `name`, `entry_points`, `match`, `tls`, `chain` and `service`, kept raw.
     #[serde(default)]
@@ -25,6 +26,7 @@ pub struct Tcp {
 
 /// The UDP side of an app.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Udp {
     /// Routers: `name`, `entry_points` and `service`, kept raw.
     #[serde(default)]

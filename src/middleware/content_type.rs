@@ -16,7 +16,7 @@ use crate::compile::Invalid;
 use podgate_model::Declared;
 
 /// The configuration of a `content_type` middleware.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Only `false` is accepted.

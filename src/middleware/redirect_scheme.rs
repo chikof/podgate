@@ -23,7 +23,7 @@ use crate::compile::Invalid;
 use podgate_model::Declared;
 
 /// The configuration of a `redirect_scheme` middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The scheme to redirect to: `http` or `https`.

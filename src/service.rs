@@ -59,7 +59,33 @@ pub use sticky::Sticky;
 pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transport, Upstream};
 
 /// Service types that are planned and not built yet.
-const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
+pub const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
+
+/// Generates [`schemas`] from one list: `"type" => path::Config,` for a built type, whose
+/// configuration struct derives `schemars::JsonSchema`. Keep one entry per line, a blank line
+/// between entries. The test `every_built_kind_has_a_schema` fails for a type that `Service::compile`
+/// builds and this list lacks.
+macro_rules! schemas {
+    ($($ty:literal => $config:ty,)*) => {
+        /// The JSON Schema of the configuration of every built service type, by type name.
+        #[must_use]
+        pub fn schemas() -> Vec<(&'static str, serde_json::Value)> {
+            vec![$(($ty, $crate::admin::schema::of::<$config>()),)*]
+        }
+    };
+}
+
+schemas! {
+    "loadbalancer" => loadbalancer::Config,
+
+    "static" => static_files::Config,
+}
+
+/// The `type` of an upstream transport in a snapshot and its JSON Schema.
+#[must_use]
+pub fn transport_schema() -> (&'static str, serde_json::Value) {
+    (transport::KIND, transport::schema())
+}
 
 /// A compiled service.
 #[derive(Debug)]

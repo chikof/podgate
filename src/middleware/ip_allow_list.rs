@@ -49,15 +49,15 @@ pub mod kind {
 }
 
 /// The configuration of an `ip_allow_list` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     source_range: Vec<Cidr>,
     #[serde(default)]
     ip_strategy: StrategyConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StrategyConfig {
     #[serde(default)]
