@@ -30,6 +30,7 @@ use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
 use crate::error::AppError;
 use crate::events::EventFeed;
+use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
@@ -41,6 +42,7 @@ pub mod circuit_breaker;
 pub mod compress;
 pub mod content_type;
 pub mod digest_auth;
+pub mod errors;
 pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
@@ -53,6 +55,7 @@ pub mod redirect_regex;
 pub mod redirect_scheme;
 pub mod replace_path;
 pub mod replace_path_regex;
+pub mod respond;
 pub mod state;
 pub mod strip_prefix;
 pub mod strip_prefix_regex;
@@ -119,6 +122,25 @@ pub struct ResponseCx<'a> {
     pub response: &'a ResponseHeader,
     /// The tenant's budget, to charge memory before allocating.
     pub tenant: Option<&'a Arc<TenantBudget>>,
+}
+
+/// What a page hook sees: the response that may be replaced and what a replacement needs.
+pub struct PageCx<'a> {
+    /// The client's request.
+    pub request: &'a RequestHeader,
+    /// The app the request was matched to.
+    pub app: &'a CompiledApp,
+    /// The revision the request was sent to (index into the app's revisions); `None` when none
+    /// was chosen.
+    pub revision: Option<usize>,
+    /// The status of the response that may be replaced.
+    pub status: u16,
+    /// The tenant's budget: a page is charged to it before it is fetched.
+    pub tenant: &'a Arc<TenantBudget>,
+    /// The operator's rule for the addresses the proxy may dial.
+    pub policy: &'a UpstreamPolicy,
+    /// Dials page servers.
+    pub fetcher: &'a errors::fetch::Fetcher,
 }
 
 /// A middleware type. Every hook has a default that does nothing.
@@ -219,6 +241,13 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         _state: &mut Self::State,
     ) -> Result<(), AppError> {
         Ok(())
+    }
+
+    /// Runs when the response is an error podgate may replace, before any of it has reached the
+    /// client: a stage that serves a replacement page returns it. Only the first stage (last in
+    /// chain order) that offers one counts. The default offers none.
+    fn response_page(&self, _cx: &PageCx<'_>) -> impl Future<Output = Option<errors::Page>> + Send {
+        std::future::ready(None)
     }
 
     /// The relaxations a plan must list when `new` replaces `self`, as stable `posture_changes`
@@ -443,6 +472,19 @@ macro_rules! kinds {
                     _ => Ok(()),
                 }
             }
+
+            async fn response_page(
+                &self,
+                cx: &$crate::middleware::PageCx<'_>,
+            ) -> Option<$crate::middleware::errors::Page> {
+                match self {
+                    $(
+                        Self::$variant(kind) => {
+                            $crate::middleware::Kind::response_page(kind, cx).await
+                        }
+                    )*
+                }
+            }
         }
     };
     ($($body:tt)*) => {
@@ -491,13 +533,13 @@ kinds! {
 
     "compress" => Compress(compress::Compress),
 
-    "errors" => unbuilt,
+    "errors" => Errors(errors::Errors),
 
     "pass_tls_client_cert" => PassTlsClientCert(pass_tls_client_cert::PassTlsClientCert),
 
     "grpc_web" => unbuilt,
 
-    "respond" => unbuilt,
+    "respond" => Respond(respond::Respond),
 }
 
 /// A compiled middleware and the name it was declared under.
@@ -667,6 +709,19 @@ pub fn run_response_head(
         }
     }
     Ok(())
+}
+
+/// Runs the page hooks of `chain` for a response with status `cx.status`, last stage first, and
+/// returns the first page a stage offers. `None` when no stage does: the response stands.
+pub async fn run_page(stages: &[Named], chain: &[usize], cx: &PageCx<'_>) -> Option<errors::Page> {
+    for index in chain.iter().rev() {
+        if let Some(named) = stages.get(*index)
+            && let Some(page) = named.stage.response_page(cx).await
+        {
+            return Some(page);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

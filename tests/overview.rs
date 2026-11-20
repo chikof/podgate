@@ -473,6 +473,16 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         plant("response-header-value"),
     );
     plants.extend([request_value.clone(), response_value.clone()]);
+    let (page_key, respond_header, respond_body) = (
+        plant("errors-page-key"),
+        plant("respond-header-value"),
+        plant("respond-body"),
+    );
+    plants.extend([
+        page_key.clone(),
+        respond_header.clone(),
+        respond_body.clone(),
+    ]);
 
     let kinds = vec![
         (
@@ -521,6 +531,14 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         (
             "in_flight_req",
             json!({"amount": 5, "source": {"header": "x-api-key"}, "max_sources": 64}),
+        ),
+        (
+            "errors",
+            json!({"status": ["500-599"], "service": "pinned", "query": format!("/{{status}}.html?key={page_key}")}),
+        ),
+        (
+            "respond",
+            json!({"status": 403, "headers": {"x-closed-by": respond_header}, "body": respond_body}),
         ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();

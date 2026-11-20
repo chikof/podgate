@@ -25,7 +25,11 @@
 //! refused by admission is never recorded as a failure. `response_filter` and
 //! `response_body_filter` run the failure capture first, then compression, then the chain's
 //! response hooks in reverse order; the chain's `response_head` hooks run before compression, so
-//! a middleware can replace an oversized response with an error. `request_body_filter` counts the
+//! a middleware can replace an oversized response with an error. Before all of that,
+//! `response_filter` (an upstream response) and `fail_to_proxy` (an error podgate made after it
+//! chose a server) ask the chain's `Kind::response_page` hooks for an error page; a page is
+//! written whole and the original response is dropped (`errors`).
+//! `request_body_filter` counts the
 //! body through the chain's `request_body` hooks. `logging` records the failure first, then the
 //! outcome, then tells the chain's middlewares the request is over (`Kind::finished`), and then releases the
 //! tenant slot, so the recorder sees the final status the client got. The backend slot is
@@ -42,12 +46,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Method;
 use pingora::Error;
 use pingora::ErrorSource;
-use pingora::ErrorType::{HTTPStatus, InternalError};
+use pingora::ErrorType::{ConnectionClosed, HTTPStatus, InternalError, ReadError, WriteError};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::Digest;
-use pingora::proxy::{ProxyHttp, Session};
+use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
 use crate::acme;
@@ -61,7 +66,7 @@ use crate::events::EventFeed;
 use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
-use crate::middleware::{self, Flow, RequestCx};
+use crate::middleware::{self, Flow, RequestCx, errors};
 use crate::observe::access_log::{self, AccessLog};
 use crate::observe::metrics;
 use crate::observe::tracing as trace;
@@ -140,6 +145,9 @@ pub struct Ctx {
     pub metrics: metrics::InFlight,
     /// The trace context of the request and its sampling verdict.
     pub trace: trace::State,
+    /// Whether an error page was tried for this response, the loop guard of the `errors`
+    /// middleware.
+    pub error_page: errors::Attempt,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -162,6 +170,7 @@ pub struct Gateway {
     events: EventFeed,
     access_log: Option<AccessLog>,
     tracer: trace::Tracer,
+    page_fetcher: errors::fetch::Fetcher,
 }
 
 impl Gateway {
@@ -186,6 +195,7 @@ impl Gateway {
             static_reads: StaticReads::default(),
             entry_point: Arc::from(entry::WEB),
             access_log: None,
+            page_fetcher: errors::fetch::Fetcher::default(),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
         }
@@ -369,6 +379,65 @@ impl Gateway {
         };
         middleware::run_finished(app.stages(), router.chain(), &cx, &mut ctx.chain);
     }
+
+    /// The page the router's chain offers for a response with `status`, fetched at most once
+    /// per request ([`errors::Attempt`] is the loop guard) and never for `HEAD`. `None` leaves
+    /// the response as it is: no page for this status, no tenant to charge, or a failed fetch.
+    async fn error_page(
+        &self,
+        request: &RequestHeader,
+        ctx: &mut Ctx,
+        status: u16,
+    ) -> Option<errors::Page> {
+        if ctx.error_page != errors::Attempt::Untried {
+            return None;
+        }
+        ctx.error_page = errors::Attempt::Tried;
+        if request.method == Method::HEAD {
+            return None;
+        }
+        let table = Arc::clone(&ctx.table);
+        let (app, router) = ctx.matched.and_then(|matched| table.router(matched))?;
+        if router.chain().is_empty() {
+            return None;
+        }
+        let cx = middleware::PageCx {
+            request,
+            app,
+            revision: ctx.route.as_ref().map(|selected| selected.revision),
+            status,
+            tenant: ctx.tenant_slot.as_ref()?.tenant(),
+            policy: &self.upstream_policy,
+            fetcher: &self.page_fetcher,
+        };
+        middleware::run_page(app.stages(), router.chain(), &cx).await
+    }
+
+    /// Writes `page` as the response with `status`: its content type and length, the cookies
+    /// podgate sets itself and the chain's response hooks, then the body.
+    async fn write_page(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        status: u16,
+        page: &errors::Page,
+    ) -> pingora::Result<()> {
+        let mut head = ResponseHeader::build(status, Some(3))?;
+        if let Some(content_type) = page.content_type() {
+            head.insert_header("content-type", content_type.clone())?;
+        }
+        head.insert_header("content-length", page.body().len().to_string())?;
+        skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), &mut head)?;
+        sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), &mut head)?;
+        let table = Arc::clone(&ctx.table);
+        if let Some((app, router)) = ctx.matched.and_then(|matched| table.router(matched)) {
+            middleware::run_response(app.stages(), router.chain(), &mut head, &mut ctx.chain)?;
+        }
+        session.write_response_header(Box::new(head), false).await?;
+        session
+            .write_response_body(Some(page.body().clone()), true)
+            .await
+    }
 }
 
 #[async_trait]
@@ -396,6 +465,7 @@ impl ProxyHttp for Gateway {
             access: access_log::Pending::new(),
             metrics: metrics::InFlight::begin(&self.entry),
             trace: trace::State::default(),
+            error_page: errors::Attempt::default(),
         }
     }
 
@@ -571,6 +641,18 @@ impl ProxyHttp for Gateway {
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         ctx.failures.upstream_response(upstream_response);
+        // An error page replaces the whole response, its headers and body. It is written here
+        // and the request then ends with an error, so Pingora sends nothing more: an upstream
+        // response with no body never reaches `response_body_filter`, which could not carry it.
+        let status = upstream_response.status.as_u16();
+        if let Some(page) = self.error_page(session.req_header(), ctx, status).await {
+            self.write_page(session, ctx, status, &page).await?;
+            ctx.error_page = errors::Attempt::Replaced;
+            return Err(Error::explain(
+                HTTPStatus(status),
+                "replaced by an error page",
+            ));
+        }
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         // Before compression: the chain judges the response as the upstream sent it.
@@ -638,7 +720,50 @@ impl ProxyHttp for Gateway {
         Ok(None)
     }
 
+    fn suppress_error_log(&self, _session: &Session, ctx: &Ctx, _error: &Error) -> bool {
+        ctx.error_page == errors::Attempt::Replaced
+    }
+
+    async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
+        // Pingora's own choice of status, so a page replaces exactly the answer it would send.
+        let code = match e.etype() {
+            HTTPStatus(code) => *code,
+            _ => match e.esource() {
+                ErrorSource::Upstream => 502,
+                ErrorSource::Downstream => match e.etype() {
+                    WriteError | ReadError | ConnectionClosed => 0,
+                    _ => 400,
+                },
+                ErrorSource::Internal | ErrorSource::Unset => 500,
+            },
+        };
+        if code > 0 {
+            // An error podgate made on the way to or from the upstream, with nothing written
+            // yet: the chain may offer a page for it.
+            let proxying = ctx.route.is_some() && *e.esource() != ErrorSource::Downstream;
+            if proxying
+                && session.response_written().is_none()
+                && let Some(page) = self.error_page(session.req_header(), ctx, code).await
+                && self.write_page(session, ctx, code, &page).await.is_ok()
+            {
+                return FailToProxy {
+                    error_code: code,
+                    can_reuse_downstream: false,
+                };
+            }
+            session.respond_error(code).await.unwrap_or_else(|err| {
+                tracing::error!("failed to send error response to downstream: {err}");
+            });
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
+    }
     async fn logging(&self, session: &mut Session, error: Option<&Error>, ctx: &mut Ctx) {
+        // A replaced response ends with the synthetic error `response_filter` returns; the
+        // observers judge the response that was written, not that error.
+        let error = error.filter(|_| ctx.error_page != errors::Attempt::Replaced);
         self.failures.log(session, ctx);
         outlier::observe(session, error, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
