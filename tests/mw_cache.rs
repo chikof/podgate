@@ -86,6 +86,11 @@ impl Seen {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+
+    /// How many header lines called `name` the request carried.
+    fn count(&self, name: &str) -> usize {
+        self.headers.iter().filter(|(key, _)| key == name).count()
+    }
 }
 
 type Handler = Arc<dyn Fn(&Seen, usize) -> Reply + Send + Sync>;
@@ -801,6 +806,29 @@ async fn cache_no_cache_revalidates() {
         Some("\"v1\""),
         "a conditional request"
     );
+    // The refresh subrequest runs the pipeline again from the pristine request: the forwarding
+    // headers are written once, from the original client, not appended and not from the
+    // subrequest's own (absent) peer.
+    for (at, request) in seen.iter().enumerate() {
+        assert_eq!(
+            request.count("x-forwarded-for"),
+            1,
+            "request {at}: {request:?}"
+        );
+        assert_eq!(
+            request.header("x-forwarded-for"),
+            Some("127.0.0.1"),
+            "request {at}"
+        );
+        assert_eq!(request.count("x-forwarded-proto"), 1, "request {at}");
+        assert_eq!(request.count("x-forwarded-host"), 1, "request {at}");
+        assert_eq!(
+            request.header("x-forwarded-host"),
+            Some("a.test"),
+            "request {at}"
+        );
+        assert_eq!(request.count("x-real-ip"), 1, "request {at}");
+    }
     let third = get(&podgate, "/n").await;
     assert_eq!(third.result(), "revalidated", "and so before every use");
     assert_eq!(backend.count(), 3);
