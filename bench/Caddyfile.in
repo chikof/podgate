@@ -1,0 +1,38 @@
+# Caddy 2.11 as scripts/bench-proxies.sh runs it. @NAME@ tokens are filled in by the script.
+{
+	# Defaults changed: admin API off, no automatic HTTPS (the certificate is given),
+	# only errors logged, HTTP/3 off (Pingora 0.9 has no HTTP/3 server, Traefik's is off by default).
+	admin off
+	auto_https off
+	log {
+		level ERROR
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+
+(backend) {
+	reverse_proxy 127.0.0.1:@BACKEND_PORT@ {
+		transport http {
+			versions 1.1
+			# Default 32 idle upstream connections per host would force reconnects at concurrency 64 and up.
+			keepalive_idle_conns_per_host 1024
+			compression off
+		}
+	}
+}
+
+http://a.test:@CADDY_HTTP_PORT@ {
+	import backend
+}
+
+https://a.test:@CADDY_TLS_PORT@ {
+	tls @CERT_DIR@/cert.pem @CERT_DIR@/key.pem
+	import backend
+}
+
+# Unknown Host: Caddy answers an empty 200 when no site matches, so the 404 is explicit.
+http://:@CADDY_HTTP_PORT@ {
+	respond "not found" 404
+}

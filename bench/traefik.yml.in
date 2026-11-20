@@ -1,0 +1,24 @@
+# Traefik 3.7 static configuration as scripts/bench-proxies.sh runs it.
+# Defaults changed: no update check or telemetry, ERROR logs only, no access log, no API or
+# dashboard, no metrics (all of these are off unless configured), 1024 idle connections per
+# backend instead of 200 so concurrency 256 keeps its upstream connections.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: ERROR
+
+entryPoints:
+  web:
+    address: 127.0.0.1:@TRAEFIK_HTTP_PORT@
+  websecure:
+    address: 127.0.0.1:@TRAEFIK_TLS_PORT@
+
+serversTransport:
+  maxIdleConnsPerHost: 1024
+
+providers:
+  file:
+    filename: @WORK_DIR@/traefik-dynamic.yml
+    watch: false

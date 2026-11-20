@@ -1,0 +1,22 @@
+# Traefik dynamic configuration: Host routing to the backend, plain and over TLS.
+http:
+  routers:
+    plain:
+      entryPoints: [web]
+      rule: Host(`a.test`)
+      service: backend
+    secure:
+      entryPoints: [websecure]
+      rule: Host(`a.test`)
+      service: backend
+      tls: {}
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:@BACKEND_PORT@
+
+tls:
+  certificates:
+    - certFile: @CERT_DIR@/cert.pem
+      keyFile: @CERT_DIR@/key.pem

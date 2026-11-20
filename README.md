@@ -26,6 +26,8 @@ Each row is a failure class that Traefik or Caddy leave open and that podgate cl
 
 No HTTP/3 yet: Pingora 0.9 has no HTTP/3 server, while Caddy and Traefik ship one.
 
+Measured against Caddy and Traefik on one machine: [`docs/benchmarks.md`](docs/benchmarks.md).
+
 ## Setup
 
 With Nix, `direnv allow` (or `devenv shell`) gives you the pinned Rust toolchain, the tools and the git hooks.

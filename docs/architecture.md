@@ -62,6 +62,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/acme.rs` | End-to-end against `pebble` (with `pebble-challtestsrv` as its DNS, so HTTP-01 is validated for real): the test plays the control plane. A missing `pebble` fails the tests. |
 | `examples/slow_upstream.rs` | A backend with a fixed latency and capacity (`slow_upstream <addr> <latency_ms> <capacity>`), for `scripts/load-fairness.sh`. |
 | `scripts/load-fairness.sh` | Load test of the per-tenant fair queue: tenant A floods at 1000 rps, tenant B sends 10 rps, with `oha` against the `podgate` binary and `slow_upstream`; see `## Backend admission`. |
+| `scripts/bench-proxies.sh`, `bench/` | Benchmark of podgate against Caddy and Traefik on one machine: the script, the Caddy and Traefik configs and the podgate snapshot it renders. `examples/fast_upstream.rs` is its backend and `examples/bench_cert.rs` writes the shared certificate. Method and results: `docs/benchmarks.md`. |
 | `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
 
 ### Adding a feature
