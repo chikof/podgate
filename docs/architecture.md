@@ -634,6 +634,8 @@ All settings are environment variables, read once at startup by `Config::from_en
 | `OTEL_EXPORTER_OTLP_CERTIFICATE` | unset | PEM file with the roots to trust for an `https` collector instead of the platform's. |
 | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` resource attribute of exported spans, at most 128 bytes. |
 | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks; a traced request is two spans, so the default is 500 traced requests a second. Each tenant may use half of it. Requests over either cap are not traced (`podgate_trace_rate_limited_total`). 1..=1000000. |
+| `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read once at startup; never part of a snapshot, which names a root of its own tenant and never supplies a path. Each directory is opened once as a `cap-std` handle. Unset: no tenant has a root. A bad file stops startup with `invalid STATIC_ROOTS_FILE: <path>: tenant "<id>" root "<name>": <reason>`. Reference: `docs/ref/svc-static.md`. |
+| `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | File-system operations (an open or one 64 KiB chunk read) static services run at once across all tenants, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after: 1`. See `docs/ref/svc-static.md`. |
 
 Add a setting: field on `Config`, a branch in `Config::from_lookup` that returns `ConfigError { var, .. }`, a row here and in `.env.example`, a case in the `test` module.
 

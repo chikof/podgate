@@ -30,7 +30,7 @@ use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{self, NamedTransport, Service, Transport};
+use crate::service::{self, NamedTransport, Service, TenantRoots, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::{CertStore, Options};
 use crate::wasm as engine;
@@ -241,6 +241,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             context.upstream_policy(),
             &transports,
             snapshot.skew_secret.as_ref(),
+            context.static_roots().of(&app.tenant),
             &mut rejected,
         );
         parts.push((stages, services));
@@ -726,11 +727,14 @@ fn services_of(
     policy: &UpstreamPolicy,
     transports: &[NamedTransport],
     skew_secret: Option<&SkewSecret>,
+    static_roots: Option<&TenantRoots>,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
         |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
-            declared, transports,
+            declared,
+            transports,
+            static_roots,
         )
         .and_then(|mut service| {
             service.bind_sticky(skew_secret, &app.id, &declared.name)?;
@@ -810,7 +814,7 @@ fn services_of(
                 ServiceRef::Own(index) => own.get(*index),
                 ServiceRef::App(index) => shared.get(*index),
             }
-            .is_some_and(|named| named.service.has_servers())
+            .is_some_and(|named| named.service.is_backed())
         });
         revisions.push(CompiledRevision::new(revision, own, routes, backed));
     }

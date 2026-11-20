@@ -267,6 +267,7 @@ impl Registry {
                             kept.servers.insert(key, Arc::clone(&server.state));
                         }
                     }
+                    Service::Static(_) => {}
                 }
             }
         }

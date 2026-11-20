@@ -28,6 +28,7 @@ base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bcrypt = "0.19.3"
 brotli = { version = "3.5.0", default-features = false, features = ["std"] }
 bytes = "1.12.2"
+cap-std = "4.0.3"
 crc32fast = "1.5.5"
 form_urlencoded = "1.2.2"
 getrandom = "0.4.3"
@@ -36,6 +37,7 @@ http = "1.5.0"
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "tls12", "rustls-platform-verifier", "ring"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
+httpdate = "1.0.3"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "time", "x509-parser", "rcgen"] }
 ipnet = "2.12.2"
 md-5 = "0.11.0"
@@ -44,6 +46,7 @@ pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
 prost = "0.14"
 regex = "1.13.2"
+rustix = { version = "1.1.6", features = ["fs"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 ruzstd = "0.9.1"

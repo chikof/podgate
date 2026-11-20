@@ -116,17 +116,19 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE` is invalid, an entry point is `tcp` or `udp` or sets
-/// `proxy_protocol` (not built yet), a TLS listener cannot be configured, or the admin socket
-/// cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
+/// Fails when `UPSTREAM_POLICY_FILE` or `STATIC_ROOTS_FILE` is invalid, an entry point is `tcp`
+/// or `udp` or sets `proxy_protocol` (not built yet), a TLS listener cannot be configured, the
+/// admin socket cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
+    let static_roots = config.static_roots()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
             .with_acme_dns_zones(config.acme_dns_zones.iter().map(AsRef::as_ref))
             .with_upstream_policy(upstream_policy.clone())
-            .with_tls_floor(config.tls_min_version),
+            .with_tls_floor(config.tls_min_version)
+            .with_static_roots(static_roots),
     )
     .with_metrics(observe::metrics::Registry::new(
         config.metrics_series_per_tenant,
@@ -167,6 +169,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_wake(wake.clone())
         .with_outcomes(outcomes.clone())
         .with_upstream_policy(upstream_policy.clone())
+        .with_static_reads(service::StaticReads::bounded(
+            config.static_max_concurrent_reads.get(),
+        ))
         .with_access_log(access_log.clone())
         .with_tracer(tracer.clone())
         .with_events(events.clone())

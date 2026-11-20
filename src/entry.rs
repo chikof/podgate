@@ -25,6 +25,7 @@ use pingora::proxy::Session;
 use thiserror::Error;
 
 use crate::router::path::{self, Refused};
+use crate::service::StaticRoots;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
 
@@ -231,6 +232,7 @@ pub struct CompileContext {
     acme_dns_zones: Vec<Box<str>>,
     upstream_policy: UpstreamPolicy,
     tls_floor: TlsVersion,
+    static_roots: StaticRoots,
 }
 
 impl Default for CompileContext {
@@ -253,6 +255,7 @@ impl CompileContext {
             acme_dns_zones: Vec::new(),
             upstream_policy: UpstreamPolicy::allow_all(),
             tls_floor: TlsVersion::V1_2,
+            static_roots: StaticRoots::default(),
         }
     }
 
@@ -309,6 +312,20 @@ impl CompileContext {
     #[must_use]
     pub fn tls_floor(&self) -> TlsVersion {
         self.tls_floor
+    }
+
+    /// The directories the operator declared for static services, per tenant. Only the operator
+    /// calls this (`STATIC_ROOTS_FILE`); a snapshot names a root by label and never supplies a path.
+    #[must_use]
+    pub fn with_static_roots(mut self, roots: StaticRoots) -> Self {
+        self.static_roots = roots;
+        self
+    }
+
+    /// The static roots the compiler resolves `static` services against.
+    #[must_use]
+    pub fn static_roots(&self) -> &StaticRoots {
+        &self.static_roots
     }
 
     /// The policy the compiler checks literal server addresses against.

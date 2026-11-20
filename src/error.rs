@@ -91,6 +91,15 @@ pub enum AppError {
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
     Saturated,
+    /// No read slot for a static file came free in time, or the process is out of file
+    /// descriptors: `503`, and the client should retry in a second. The pool is shared by every
+    /// tenant, so this says the proxy is busy.
+    #[error("static file reads are busy")]
+    StaticBusy,
+    /// The tenant's buffer budget cannot take the read buffers of a static file response: `503`,
+    /// and the client should retry in a second.
+    #[error("static file buffers are over the tenant's budget")]
+    StaticOverBudget,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -111,6 +120,8 @@ impl AppError {
             | Self::NoHealthyUpstream
             | Self::Overloaded
             | Self::Saturated
+            | Self::StaticBusy
+            | Self::StaticOverBudget
             | Self::WakeTimeout
             | Self::FilterBusy
             | Self::FilterOverBudget
@@ -131,6 +142,8 @@ impl AppError {
         match self {
             Self::Overloaded
             | Self::Saturated
+            | Self::StaticBusy
+            | Self::StaticOverBudget
             | Self::FilterBusy
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
@@ -153,6 +166,8 @@ impl AppError {
             self,
             Self::Overloaded
                 | Self::Saturated
+                | Self::StaticBusy
+                | Self::StaticOverBudget
                 | Self::WakeTimeout
                 | Self::FilterBusy
                 | Self::BufferingOverBudget
@@ -170,7 +185,11 @@ impl AppError {
             Self::TlsPolicy => "tls_policy",
             Self::ClientCertRequired => "client_cert_required",
             Self::NotFound => "no_route",
-            Self::Overloaded | Self::FilterOverBudget | Self::BufferingOverBudget => "over_budget",
+            Self::Overloaded
+            | Self::FilterOverBudget
+            | Self::BufferingOverBudget
+            | Self::StaticOverBudget => "over_budget",
+            Self::StaticBusy => "static_busy",
             Self::PayloadTooLarge => "payload_too_large",
             Self::ExpectationFailed => "expectation_failed",
             Self::RequestTimeout => "request_timeout",

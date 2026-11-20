@@ -1,6 +1,7 @@
 //! Services: where a routed request goes. A router names a service; the service picks a server.
 //!
-//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer` is built;
+//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer` and `static`
+//! are built (a `static` service has no server: it answers from an operator-declared directory);
 //! `weighted`, `mirroring` and `failover` are planned and refused with `service_not_built`; any
 //! other type is `invalid_service`. A router's service is looked up in the revision the request
 //! picked, then in the app's own services. Each kind lives in its own file:
@@ -8,6 +9,7 @@
 //! | Type | File |
 //! |---|---|
 //! | `loadbalancer` | `loadbalancer.rs`, with its algorithms in `lb/` |
+//! | `static` | `static_files.rs`, with its helpers in `static_files/` |
 //! | `weighted` | `weighted.rs` |
 //! | `mirroring` | `mirroring.rs` |
 //! | `failover` | `failover.rs` |
@@ -31,12 +33,14 @@ mod mirroring;
 pub mod outlier;
 mod resolve;
 pub mod state;
+mod static_files;
 pub mod sticky;
 mod transport;
 pub mod upstream_policy;
 mod weighted;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::compile::Invalid;
 use podgate_model::{Declared, SkewSecret};
@@ -45,6 +49,11 @@ pub use lb::PickCx;
 pub use loadbalancer::{LoadBalancer, Server};
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
+pub(crate) use static_files::serve as serve_static;
+pub use static_files::{
+    LoadError as StaticRootsError, NO_SERVER, Reads as StaticReads, Root as StaticRoot,
+    StaticRoots, StaticSite, TenantRoots,
+};
 pub use sticky::Sticky;
 pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transport, Upstream};
 
@@ -56,6 +65,8 @@ const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
 pub enum Service {
     /// `loadbalancer`: a set of servers and an algorithm.
     LoadBalancer(LoadBalancer),
+    /// `static`: files from an operator-declared directory. Has no server.
+    Static(Arc<StaticSite>),
 }
 
 /// A service and the name it was declared under.
@@ -68,16 +79,24 @@ pub struct Named {
 }
 
 impl Service {
-    /// Compiles one declared service.
+    /// Compiles one declared service. `static_roots` are the roots the operator declared for the
+    /// tenant that owns it.
     ///
     /// # Errors
     ///
     /// `service_not_built` for a planned type nobody has built, `invalid_service` for an unknown
     /// type or a configuration the type refuses, `dns_upstream_not_built` for a server named by
-    /// host name.
-    pub fn compile(declared: &Declared, transports: &[NamedTransport]) -> Result<Self, Invalid> {
+    /// host name, `unknown_static_root` for a `static` service naming a root the tenant lacks.
+    pub fn compile(
+        declared: &Declared,
+        transports: &[NamedTransport],
+        static_roots: Option<&TenantRoots>,
+    ) -> Result<Self, Invalid> {
         match &*declared.kind {
             "loadbalancer" => LoadBalancer::compile(declared, transports).map(Self::LoadBalancer),
+            "static" => {
+                StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
+            }
             other if UNBUILT.contains(&other) => Err(Invalid::new(
                 "service_not_built",
                 format!("service type {other} is planned and not built yet"),
@@ -94,6 +113,7 @@ impl Service {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::LoadBalancer(_) => "loadbalancer",
+            Self::Static(_) => "static",
         }
     }
 
@@ -126,6 +146,7 @@ impl Service {
     pub fn servers(&self) -> &[Server] {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
+            Self::Static(_) => &[],
         }
     }
 
@@ -134,6 +155,7 @@ impl Service {
     pub fn sticky(&self) -> Option<&Sticky> {
         match self {
             Self::LoadBalancer(balancer) => balancer.sticky(),
+            Self::Static(_) => None,
         }
     }
 
@@ -150,6 +172,7 @@ impl Service {
     ) -> Result<(), Invalid> {
         match self {
             Self::LoadBalancer(balancer) => balancer.bind_sticky(secret, app, service),
+            Self::Static(_) => Ok(()),
         }
     }
 
@@ -159,12 +182,29 @@ impl Service {
         !self.servers().is_empty()
     }
 
+    /// Whether the service can answer a request: a load balancer with a server, or a static
+    /// service, which answers from its directory and never sleeps.
+    #[must_use]
+    pub fn is_backed(&self) -> bool {
+        matches!(self, Self::Static(_)) || self.has_servers()
+    }
+
+    /// The compiled `static` service, or `None` for any other type.
+    #[must_use]
+    pub fn as_static(&self) -> Option<&Arc<StaticSite>> {
+        match self {
+            Self::Static(site) => Some(site),
+            Self::LoadBalancer(_) => None,
+        }
+    }
+
     /// The server at `addr` and the transport that reaches it, or `None` when the service has no
     /// such server.
     #[must_use]
     pub fn upstream(&self, addr: SocketAddr) -> Option<Upstream<'_>> {
         match self {
             Self::LoadBalancer(balancer) => balancer.upstream(addr),
+            Self::Static(_) => None,
         }
     }
 
@@ -174,6 +214,7 @@ impl Service {
     pub fn skips_tls_verification(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.skips_tls_verification(),
+            Self::Static(_) => false,
         }
     }
 
@@ -183,6 +224,7 @@ impl Service {
     pub fn pick(&self, cx: PickCx<'_>) -> Option<(SocketAddr, Lease)> {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
+            Self::Static(site) => Some((NO_SERVER, site.lease())),
         }
     }
 }

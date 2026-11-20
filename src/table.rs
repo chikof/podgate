@@ -121,7 +121,7 @@ pub struct CompiledRevision {
     services: Box<[service::Named]>,
     /// For each router of the app, in order: the service it uses in this revision.
     routes: Box<[Option<ServiceRef>]>,
-    /// Whether some router's service here has a server.
+    /// Whether some router's service here can answer: it has a server, or is a static service.
     backed: bool,
 }
 
@@ -485,6 +485,13 @@ impl CompiledApp {
             ServiceRef::App(index) => self.services.get(index),
         }
         .map(|named| &named.service)
+    }
+
+    /// The `static` service router `router` uses in revision `revision`, or `None` when it uses
+    /// another type: the proxy answers such a request from the file system and never dials.
+    #[must_use]
+    pub fn static_site(&self, revision: usize, router: usize) -> Option<&Arc<service::StaticSite>> {
+        self.service(revision, router)?.as_static()
     }
 
     /// Every server address the app can send to, in any revision.

@@ -12,6 +12,7 @@ use crate::entry::{self, EntryPoint};
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
 use crate::service::health;
+use crate::service::StaticRoots;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
 
@@ -81,6 +82,8 @@ const _: () =
 /// | `OTEL_EXPORTER_OTLP_CERTIFICATE` | unset | PEM file with the roots to trust for an `https` collector instead of the platform's. |
 /// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
+/// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
+/// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -132,6 +135,11 @@ pub struct Config {
     /// Where traces go and how many a node allows; see [`ExportConfig`]. No endpoint: nothing is
     /// exported.
     pub otel: ExportConfig,
+    /// File with the directories of static services, per tenant. Absent: none. Read once at
+    /// startup by [`Config::static_roots`].
+    pub static_roots_file: Option<PathBuf>,
+    /// File-system operations static services run at once, across all tenants.
+    pub static_max_concurrent_reads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -156,6 +164,8 @@ impl Default for Config {
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
             tls_min_version: TlsVersion::V1_2,
             otel: ExportConfig::default(),
+            static_roots_file: None,
+            static_max_concurrent_reads: default_static_reads(),
         }
     }
 }
@@ -167,6 +177,14 @@ fn default_workers() -> NonZeroUsize {
         .unwrap_or(NonZeroUsize::MIN)
 }
 
+/// Four read slots per core: file reads wait on the disk, not on the CPU.
+fn default_static_reads() -> NonZeroUsize {
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| NonZeroUsize::new(cores.get().saturating_mul(4).min(WASM_WORKERS_MAX)))
+        .unwrap_or(NonZeroUsize::MIN)
+}
+
 fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.trim().parse().map_err(|err| ConfigError {
         var,
@@ -175,6 +193,24 @@ fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
 }
 
 impl Config {
+    /// Loads the static roots: the directories named by `STATIC_ROOTS_FILE`, each opened as a
+    /// directory handle, or none when it is unset.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `STATIC_ROOTS_FILE` when the file cannot be read or is malformed, or an
+    /// entry is empty, relative or not a directory; the reason names the file, the tenant and the
+    /// root.
+    pub fn static_roots(&self) -> Result<StaticRoots, ConfigError> {
+        match &self.static_roots_file {
+            None => Ok(StaticRoots::default()),
+            Some(path) => StaticRoots::load(path).map_err(|err| ConfigError {
+                var: "STATIC_ROOTS_FILE",
+                reason: err.to_string().into(),
+            }),
+        }
+    }
+
     /// Loads the upstream address policy: the file named by `UPSTREAM_POLICY_FILE`, else the
     /// built-in default.
     ///
@@ -354,6 +390,20 @@ impl Config {
             }
             config.health_max_concurrent = probes;
         }
+        if let Some(raw) = lookup("STATIC_MAX_CONCURRENT_READS") {
+            let reads: NonZeroUsize = raw.trim().parse().map_err(|err| ConfigError {
+                var: "STATIC_MAX_CONCURRENT_READS",
+                reason: format!("{raw:?} is not a whole number in 1..={WASM_WORKERS_MAX} ({err})")
+                    .into(),
+            })?;
+            if reads.get() > WASM_WORKERS_MAX {
+                return Err(ConfigError {
+                    var: "STATIC_MAX_CONCURRENT_READS",
+                    reason: format!("{reads} is outside 1..={WASM_WORKERS_MAX}").into(),
+                });
+            }
+            config.static_max_concurrent_reads = reads;
+        }
         let non_empty = |var: &'static str| match lookup(var) {
             Some(raw) if raw.trim().is_empty() => Err(ConfigError {
                 var,
@@ -396,6 +446,7 @@ impl Config {
             };
         }
         config.otel = ExportConfig::from_lookup(&lookup)?;
+        config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -437,6 +488,8 @@ mod test {
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
             ("BASIC_AUTH_MAX_CONCURRENT", "3"),
             ("HEALTH_MAX_CONCURRENT", "8"),
+            ("STATIC_MAX_CONCURRENT_READS", "5"),
+            ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
@@ -461,6 +514,8 @@ mod test {
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
                 basic_auth_max_concurrent: NonZeroUsize::new(3).expect("3 is not zero"),
                 health_max_concurrent: NonZeroUsize::new(8).expect("8 is not zero"),
+                static_max_concurrent_reads: NonZeroUsize::new(5).expect("5 is not zero"),
+                static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
@@ -497,6 +552,9 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "0"),
             ("HEALTH_MAX_CONCURRENT", "4097"),
             ("HEALTH_MAX_CONCURRENT", "lots"),
+            ("STATIC_MAX_CONCURRENT_READS", "0"),
+            ("STATIC_MAX_CONCURRENT_READS", "257"),
+            ("STATIC_ROOTS_FILE", " "),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
             ("ACME_DNS_ZONES", " "),

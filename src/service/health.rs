@@ -990,7 +990,9 @@ impl HealthService {
                         .map(move |named| (Some(revision.id()), named))
                 });
             for (revision, named) in shared.chain(own) {
-                let Service::LoadBalancer(balancer) = &named.service;
+                let Service::LoadBalancer(balancer) = &named.service else {
+                    continue;
+                };
                 let Some(check) = balancer.health_check() else {
                     continue;
                 };

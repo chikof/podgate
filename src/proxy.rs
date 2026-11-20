@@ -30,6 +30,11 @@
 //! outcome, then tells the chain's middlewares the request is over (`Kind::finished`), and then releases the
 //! tenant slot, so the recorder sees the final status the client got. The backend slot is
 //! released when the upstream response ends, before the client has read it all.
+//!
+//! A router whose service is `static` has no server: after the tenant admission `request_filter`
+//! takes no backend slot, answers from the operator's directory (`crate::service`'s
+//! `static_files`), passing the response through `response_filter` and `response_body_filter`
+//! itself, and returns `Ok(true)`.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -66,7 +71,7 @@ use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{Lease, outlier, sticky};
+use crate::service::{Lease, StaticReads, outlier, serve_static, sticky};
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
@@ -145,6 +150,7 @@ pub struct Gateway {
     upstream_timeout: Duration,
     budgets: Budgets,
     backends: Backends,
+    static_reads: StaticReads,
     failures: Failures,
     wake: Wake,
     outcomes: Outcomes,
@@ -177,6 +183,7 @@ impl Gateway {
             upstream_policy: UpstreamPolicy::builtin(),
             events: EventFeed::new(),
             backends: Backends::new(),
+            static_reads: StaticReads::default(),
             entry_point: Arc::from(entry::WEB),
             access_log: None,
             entry: Arc::default(),
@@ -240,6 +247,14 @@ impl Gateway {
     #[must_use]
     pub fn with_basic_auth(mut self, pool: middleware::basic_auth::Pool) -> Self {
         self.basic_auth = pool;
+        self
+    }
+
+    /// Reads static files through `reads`, the pool that bounds the blocking file-system work
+    /// of every tenant.
+    #[must_use]
+    pub fn with_static_reads(mut self, reads: StaticReads) -> Self {
+        self.static_reads = reads;
         self
     }
 
@@ -468,6 +483,10 @@ impl ProxyHttp for Gateway {
                     return Ok(true);
                 }
             };
+            let serves_files = ctx.table.app(selected.app).is_some_and(|app| {
+                app.static_site(selected.revision, selected.router)
+                    .is_some()
+            });
             if let Some(guard) = self.inflight.admit(&ctx.table, &selected) {
                 match self
                     .wake
@@ -481,18 +500,25 @@ impl ProxyHttp for Gateway {
                         return Ok(true);
                     }
                 }
-                match self.backends.admit(&ctx.table, &selected).await {
-                    Ok(slot) => ctx.backend = slot,
-                    Err(err) => {
-                        ctx.capacity_refusal = err.is_capacity_refusal();
-                        ctx.access.refused(&err);
-                        respond::write_error(session, &err).await?;
-                        return Ok(true);
+                if !serves_files {
+                    match self.backends.admit(&ctx.table, &selected).await {
+                        Ok(slot) => ctx.backend = slot,
+                        Err(err) => {
+                            ctx.capacity_refusal = err.is_capacity_refusal();
+                            ctx.access.refused(&err);
+                            respond::write_error(session, &err).await?;
+                            return Ok(true);
+                        }
                     }
                 }
                 ctx.route = Some(selected);
                 ctx.lease = Some(lease);
                 ctx.inflight = Some(guard);
+                if serves_files {
+                    // No server to dial, no backend slot to take: answer from the directory.
+                    serve_static(self, &self.static_reads, &self.budgets, session, ctx).await?;
+                    return Ok(true);
+                }
                 return Ok(false);
             }
             // The revision drained after this request loaded its table: select again with the
