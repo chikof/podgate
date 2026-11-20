@@ -16,7 +16,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/conflict.rs` | `Conflict`: one typed variant per conflict code (`host_conflict`, `tls_policy_conflict`, `cross_tenant_wildcard`) and the pass that finds all of them in a snapshot. |
 | `src/route.rs` | Core host routing: `resolve(table, request) -> Selected`. Pure; no Pingora session. |
 | `src/events.rs` | `EventFeed` (bounded ring of 4096, `emit`, long-poll `poll`, per-process `boot_id`), `Event`, `EventKind`. Features emit into it. |
-| `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), `InflightGuard`, and the `revision_drained` event. |
+| `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), lock-free atomics on the request path (one registry swap per `sync`), `InflightGuard`, and the `revision_drained` event. |
 | `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`), the per-request `Ctx`, and `middleware_chain`: the ordered request-path stages, which `GET /v1/explain` reports. A new stage adds one line there. |
 | `src/explain.rs` | `Target::parse` (the `url` and `method` of an explain query) and `explain(table, target)`: why a request goes where it goes, read from the live `RoutingTable` (`lookup`, `nearest_wildcard`, `effective_weight`). |
 | `src/respond.rs` | `write_error`: answers a proxied request with an `AppError`. |
