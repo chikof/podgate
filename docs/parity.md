@@ -126,11 +126,11 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
 | Internal CA (`tls internal`) | none | yes | 0103 (key material in the provider and offline root, name-constrained intermediate, short-lived leaves) |
 | OCSP stapling | none | automatic | 0092 (verified staples, fetched through the upstream policy; must-staple by default) |
-| Mutual TLS (client auth) | `clientAuth` | `client_auth` | 0021 (enforcement), 0057 (modes) |
-| Min and max version, cipher suites, curves, ALPN | `tls.options` | `protocols`, `ciphers`, `curves`, `alpn` | 0057 (rustls-supported values only) |
-| Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | 0057 |
+| Mutual TLS (client auth) | `clientAuth` | `client_auth` | built (0021 enforcement, 0057 modes) |
+| Min and max version, cipher suites, curves, ALPN | `tls.options` | `protocols`, `ciphers`, `curves`, `alpn` | built (`max_version` and `curves` are rejected, not ignored) |
+| Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | built (strict SNI is per app) |
 | SNI against Host check | none (domain fronting possible, GHSA-fh26-gfpp-7xxx) | `strict_sni_host` | built, on by default |
-| Session ticket control | `disableSessionTickets` | `session_tickets` | 0057 (rustls rotating ticketer; `session_tickets: false`) |
+| Session ticket control | `disableSessionTickets` | `session_tickets` | built as a refusal: tickets are listener wide and stay on; `session_tickets` is rejected with `unsupported_setting` |
 | TLS passthrough | `tls.passthrough` on TCP routers | `layer4` | 0059 (own port), 0060 (shared port, measured) |
 
 ## TCP and UDP
