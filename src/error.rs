@@ -39,6 +39,9 @@ pub enum AppError {
     /// A sleeping app did not wake within its `wake_timeout_secs`: `503`, retry in a few seconds.
     #[error("app did not wake in time")]
     WakeTimeout,
+    /// The tenant's WASM filters have no budget or worker to run on: `503`, retry in a second.
+    #[error("wasm filters are over capacity")]
+    FilterBusy,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -54,7 +57,7 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Unavailable(_) | Self::Overloaded | Self::WakeTimeout => {
+            Self::Unavailable(_) | Self::Overloaded | Self::WakeTimeout | Self::FilterBusy => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -65,7 +68,7 @@ impl AppError {
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<u32> {
         match self {
-            Self::Overloaded => Some(1),
+            Self::Overloaded | Self::FilterBusy => Some(1),
             Self::WakeTimeout => Some(5),
             _ => None,
         }

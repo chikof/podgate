@@ -118,6 +118,7 @@ pub struct Gateway {
     failures: Failures,
     wake: Wake,
     outcomes: Outcomes,
+    wasm: wasm::Executor,
 }
 
 impl Gateway {
@@ -134,6 +135,7 @@ impl Gateway {
             failures: Failures::new(),
             wake: Wake::default(),
             outcomes: Outcomes::new(),
+            wasm: wasm::Executor::default(),
         }
     }
 
@@ -162,6 +164,13 @@ impl Gateway {
     #[must_use]
     pub fn with_outcomes(mut self, outcomes: Outcomes) -> Self {
         self.outcomes = outcomes;
+        self
+    }
+
+    /// Runs WASM filters through `wasm`, the executor that bounds their workers and memory.
+    #[must_use]
+    pub fn with_wasm(mut self, wasm: wasm::Executor) -> Self {
+        self.wasm = wasm;
         self
     }
 }
@@ -232,7 +241,9 @@ impl ProxyHttp for Gateway {
                 ctx.failures.begin(keep_bodies);
                 // After routing and every admission: a filter-answered request releases its
                 // guards with the context.
-                return wasm::run_filters(session, &ctx.table, selected.app).await;
+                let tenant = ctx.tenant_slot.as_ref().map(TenantSlot::tenant);
+                return wasm::run_filters(session, &ctx.table, selected.app, tenant, &self.wasm)
+                    .await;
             }
             // The revision drained after this request loaded its table: route again with the
             // live one. Repeated refusals mean snapshots are landing right now; give up.

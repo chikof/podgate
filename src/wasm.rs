@@ -23,8 +23,16 @@
 //!   unaffected.
 //! - Where it runs: on tokio's blocking pool (`spawn_blocking`), not on the proxy's reactor
 //!   threads. Fuel bounds a run, but a large budget can still take milliseconds to seconds, and
-//!   the proxy must keep serving other connections meanwhile. The blocking pool is the only
-//!   bound on concurrent runs.
+//!   the proxy must keep serving other connections meanwhile.
+//! - What bounds it: an [`Executor`] (see the `executor` submodule). A run needs one of
+//!   `WASM_MAX_CONCURRENT` worker permits, waiting at most `WASM_QUEUE_TIMEOUT_MS`, so filters
+//!   never take more than that many threads of the blocking pool that snapshot compiles share.
+//!   It also reserves the filter's `max_memory_bytes` from the tenant's `max_buffer_bytes`
+//!   (the budget response compression also draws on, 640 KiB per compressed response) before
+//!   the store is created, and holds the charge until the run ends. A request that gets no
+//!   permit in time, or whose tenant cannot afford the memory, answers
+//!   `503 {"error": "wasm filters are over capacity"}` with `retry-after: 1`; the filter does
+//!   not run, not even partly.
 //!
 //! # The host ABI (proxy-wasm 0.2.x subset)
 //!
@@ -63,7 +71,10 @@
 //! there) or the request continues with the header changes it made. A filter that returns
 //! `Pause` without a local response therefore does not stall the request.
 
+mod executor;
 mod wasi;
+
+pub use executor::{Executor, RunSlot};
 
 use std::fmt;
 use std::sync::Arc;
@@ -82,6 +93,7 @@ use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder, ValType, WasmParams, WasmResults,
 };
 
+use crate::budget::TenantBudget;
 use crate::error::AppError;
 use crate::respond;
 use crate::snapshot::{App, Filter};
@@ -316,6 +328,11 @@ impl fmt::Debug for CompiledFilter {
 }
 
 impl CompiledFilter {
+    /// Linear memory this filter may use, in bytes: what a run charges to its tenant.
+    pub(crate) fn max_memory(&self) -> u64 {
+        u64::try_from(self.max_memory).unwrap_or(u64::MAX)
+    }
+
     /// Runs the filter on `headers` in a fresh store. Blocking: call it off the reactor.
     fn run(
         &self,
@@ -987,9 +1004,11 @@ async fn write_local(session: &mut Session, local: LocalResponse) -> pingora::Re
 /// Header changes a filter makes are applied to the request before the next filter runs. A
 /// filter that sends a local response ends the chain: the response is written and the request
 /// is not forwarded. A filter that traps, runs out of fuel or exceeds its memory limit answers
-/// `500`. Returns `true` when the request was answered here, so the caller returns `Ok(true)`
-/// from `request_filter`; `false` means forward it. An app without filters costs one slice
-/// length check.
+/// `500`. Before each run `executor` takes a worker and charges the filter's `max_memory_bytes`
+/// to `tenant` (the request's tenant, `None` for no charge); when either is unavailable the
+/// request answers `503` with `retry-after` and the filter does not run. Returns `true` when
+/// the request was answered here, so the caller returns `Ok(true)` from `request_filter`;
+/// `false` means forward it. An app without filters costs one slice length check.
 ///
 /// # Errors
 ///
@@ -998,13 +1017,34 @@ pub async fn run_filters(
     session: &mut Session,
     table: &Arc<RoutingTable>,
     app: usize,
+    tenant: Option<&Arc<TenantBudget>>,
+    executor: &Executor,
 ) -> pingora::Result<bool> {
     let count = table.app(app).map_or(0, |app| app.filters().len());
     for index in 0..count {
         let headers = capture(session);
         let end_of_stream = session.is_body_empty();
         let run_table = Arc::clone(table);
+        let memory = table
+            .app(app)
+            .and_then(|app| app.filters().get(index))
+            .map_or(0, CompiledFilter::max_memory);
+        let slot = match executor.admit(tenant, memory).await {
+            Ok(slot) => slot,
+            Err(err) => {
+                let app_id = table.app(app).map_or("?", |app| app.id());
+                tracing::warn!(
+                    app = app_id,
+                    filter = index,
+                    "wasm filter refused: no worker or memory budget"
+                );
+                respond::write_error(session, &err).await?;
+                return Ok(true);
+            }
+        };
         let outcome = tokio::task::spawn_blocking(move || {
+            // Held until the run ends, even when the request is gone.
+            let _slot = slot;
             let filter = run_table
                 .app(app)
                 .and_then(|app| app.filters().get(index))

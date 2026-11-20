@@ -33,6 +33,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/skew.rs` | Skew protection: `SkewSecret`, the signed `__podgate_rev` cookie, `pinned` (called by `route::resolve`) and `set_cookie` (called by `response_filter`). |
 | `src/wake.rs` | Scale to zero: `Wake` holds requests for an app with no upstream (`hold`, woken by `TableHandle::subscribe`), emits `wake_requested` once per wake cycle, hands the held tenant slot on in `admit`, and `sweep` emits `app_idle`; `WakeService` runs the sweep as a background service; `State` is the per-request field of `Ctx`. |
 | `src/wasm.rs` | WASM request filters: compile and validate the `App.filters` modules at snapshot compile, `run_filters` runs them per request with fuel and a memory limit, the proxy-wasm host functions. |
+| `src/wasm/executor.rs` | `Executor`: the bounded filter pool (`WASM_MAX_CONCURRENT` permits, `WASM_QUEUE_TIMEOUT_MS` wait) and the per-run memory charge; `Gateway::with_wasm`. |
 | `src/admin.rs` | The admin router (`router`), `AppState`, the unix socket (`bind`, mode `0600`) and `AdminService`, a Pingora background service. |
 | `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `metrics.rs`, `snapshot.rs`, `events.rs`, `explain.rs`, `failures.rs`. |
 | `src/failures.rs` | `Failures`: per-app rings of failed requests (header redaction, opt-in bodies via `Capture`), and `replay`. `Gateway::with_failures` and `AppState::with_failures` share one recorder; hooks in `request_filter`, `request_body_filter`, `response_filter`, `response_body_filter` and `logging`; see `### Failed requests` for the order against compression. |
@@ -48,6 +49,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/wasm.rs` | Filters written in WAT through the real binary: headers edited, fuel exhaustion and memory limit end in `500` while other requests are served, forbidden imports are `422`, local responses. |
 | `tests/plan.rs` | `POST /v1/snapshot/plan`: the host diff, posture changes, and that nothing is applied. |
 | `tests/revert.rs` | Auto-revert through the real binary: a `5xx` spike reverts and emits `config_reverted`; an unrelated app's outage does not. |
+| `tests/wasm_budget.rs` | Filter memory charged to the tenant (`503` over budget, peak and refusal metrics) and the bounded filter pool (queued filter runs refused, snapshot pushes and other tenants unaffected). |
 | `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
 
 ### Adding a feature
@@ -161,7 +163,7 @@ A filter built for `wasm32-wasip1` may also import these functions from `wasi_sn
 
 Only map type `0` (request headers) exists. The pseudo headers `:method`, `:path`, `:authority` and `:scheme` can be read, not written. Required exports: `memory`, `proxy_abi_version_0_2_1` (or `_0_2_0`), `proxy_on_memory_allocate` and `proxy_on_request_headers(context_id, num_headers, end_of_stream)`, which is the ABI name of the SDKs' `on_http_request_headers`. Optional exports called when present, in order: `_initialize`, `proxy_on_context_create(1, 0)`, `proxy_on_vm_start(1, 0)`, `proxy_on_configure(1, 0)`, `proxy_on_context_create(2, 1)`. The returned action is ignored: the request continues unless a local response was sent.
 
-**Limits.** The engine uses wasmtime with Cranelift; there is no async and no component model. Snapshot compile (and so the admin `PUT`) pays for compiling the modules, on the blocking pool. The number of concurrent filter runs is bounded only by tokio's blocking pool.
+**Limits.** The engine uses wasmtime with Cranelift; there is no async and no component model. Snapshot compile (and so the admin `PUT`) pays for compiling the modules, on the blocking pool. Filter runs are bounded separately by `wasm::Executor`: at most `WASM_MAX_CONCURRENT` run at once, a run waits up to `WASM_QUEUE_TIMEOUT_MS` for a worker, and each run reserves its `max_memory_bytes` from the tenant's `max_buffer_bytes` first (see `## Memory budgets`). Over either limit the request gets `503` with `retry-after: 1` and the filter does not run, so filters can neither fill the blocking pool snapshot compiles need nor hold more memory than the tenant's budget.
 
 ### Not built yet
 
@@ -191,6 +193,8 @@ All settings are environment variables, read once at startup by `Config::from_en
 | `REQUEST_TIMEOUT_SECS` | `30` | Whole seconds in 1..=3600. Admin requests longer than this get `408`. Connecting to, reading from and writing to an upstream each give up after it. It is also the shutdown grace period. |
 | `LOG_FORMAT` | `pretty` | `pretty` or `json`. Use `json` in production. |
 | `RUST_LOG` | `info` | Log filter, `tracing-subscriber` env-filter syntax (`info,podgate=debug`). Pingora's own `log` records are filtered by the same variable. |
+| `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs that may execute at once across all tenants, 1..=256. Filters run through `spawn_blocking`, and this bounds how many threads of tokio's 512-thread blocking pool (which snapshot compiles also use) they can hold. |
+| `WASM_QUEUE_TIMEOUT_MS` | `1000` | Milliseconds a filter run waits for a free worker, 1..=60000. After that the request gets `503` with `retry-after: 1`. |
 
 Add a setting: field on `Config`, a branch in `Config::from_lookup` that returns `ConfigError { var, .. }`, a row here and in `.env.example`, a case in the `test` module.
 
@@ -247,8 +251,9 @@ Outcomes (`src/outcomes.rs`): `Gateway::logging` calls `record_request` once per
 
 - `max_inflight`: `request_filter` takes a slot after routing and after the revision is counted (`budget::admit`) and keeps the `TenantSlot` in `ctx.tenant_slot` until `logging`. A tenant at the cap gets `503 {"error":"tenant is over its in-flight limit"}` with `retry-after: 1`.
 - `max_buffer_bytes`: the only buffer the proxy allocates per response is the gzip encoder (`src/compress.rs`). `response_filter` charges `compress::RESERVATION_BYTES` (640 KiB) to the tenant before it allocates the encoder. A charge that does not fit means the response goes out as the upstream sent it: compression degrades to identity encoding, nothing is refused. The charge ends when the stream ends or the request is logged.
+- WASM filter runs draw on the same `max_buffer_bytes`: before each filter run `wasm::Executor::admit` reserves that filter's `max_memory_bytes` (`TenantBudget::reserve_filter`) and holds it until the run ends. A run that does not fit is not run: the request gets `503 {"error":"wasm filters are over capacity"}` with `retry-after: 1`, counted in `podgate_tenant_wasm_refused_total`. Compression and filters share the budget: a filter with a 64 MiB limit needs 64 MiB of `max_buffer_bytes`, and each compressed response in flight needs another 640 KiB. Give a tenant that uses filters a `max_buffer_bytes` of at least its largest filter limit plus 640 KiB per concurrent compressed response.
 - Compression applies to `200` responses to `GET` and `POST` over HTTP/1.1 and HTTP/2 whose content type is text-like, that carry no `content-encoding` or `cache-control: no-transform`, and whose `content-length`, when known, is at least 256. Only gzip is offered.
-- `GET /metrics` reports every tenant: `podgate_tenant_buffer_bytes` (charged now), `podgate_tenant_buffer_bytes_peak` (highest since start; never above the limit), `podgate_tenant_inflight`, `podgate_tenant_inflight_rejected_total` and `podgate_tenant_compression_skipped_total`.
+- `GET /metrics` reports every tenant: `podgate_tenant_buffer_bytes` (charged now), `podgate_tenant_buffer_bytes_peak` (highest since start; never above the limit), `podgate_tenant_inflight`, `podgate_tenant_inflight_rejected_total`, `podgate_tenant_compression_skipped_total` and `podgate_tenant_wasm_refused_total` (filter runs refused for lack of buffer budget).
 
 ## Middleware
 

@@ -1,11 +1,15 @@
 //! Settings read from environment variables, once at startup.
 
 use std::net::SocketAddr;
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use thiserror::Error;
+
+/// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
+/// snapshot compiles always find threads.
+const WASM_WORKERS_MAX: usize = 256;
 
 /// How log lines are rendered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +52,8 @@ const _: () =
 /// | `REQUEST_TIMEOUT_SECS` | `30` | Admin request and upstream I/O limit, 1..=3600. |
 /// | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
 /// | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
+/// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
+/// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Address of the plain HTTP proxy listener.
@@ -61,6 +67,12 @@ pub struct Config {
     pub request_timeout_secs: NonZeroU16,
     /// Log rendering.
     pub log_format: LogFormat,
+    /// WASM filter runs that may execute at once, across all tenants. Filters get their own
+    /// permits, so they cannot take over the blocking thread pool snapshot compiles also use.
+    pub wasm_max_concurrent: NonZeroUsize,
+    /// A filter run waits at most this many milliseconds for a free worker; then the request
+    /// answers `503` with `retry-after`.
+    pub wasm_queue_timeout_ms: NonZeroU16,
 }
 
 impl Default for Config {
@@ -71,6 +83,11 @@ impl Default for Config {
             admin_socket: PathBuf::from("/run/podgate/admin.sock"),
             request_timeout_secs: NonZeroU16::MIN.saturating_add(29),
             log_format: LogFormat::Pretty,
+            wasm_max_concurrent: std::thread::available_parallelism()
+                .ok()
+                .and_then(|cores| NonZeroUsize::new(cores.get().min(WASM_WORKERS_MAX)))
+                .unwrap_or(NonZeroUsize::MIN),
+            wasm_queue_timeout_ms: NonZeroU16::MIN.saturating_add(999),
         }
     }
 }
@@ -83,6 +100,12 @@ fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
 }
 
 impl Config {
+    /// How long a WASM filter run waits for a free worker.
+    #[must_use]
+    pub fn wasm_queue_timeout(&self) -> Duration {
+        Duration::from_millis(NonZeroU64::from(self.wasm_queue_timeout_ms).get())
+    }
+
     /// The request limit as a [`Duration`].
     #[must_use]
     pub fn request_timeout(&self) -> Duration {
@@ -147,6 +170,36 @@ impl Config {
                 }
             };
         }
+        if let Some(raw) = lookup("WASM_MAX_CONCURRENT") {
+            let workers: NonZeroUsize = raw.trim().parse().map_err(|err| ConfigError {
+                var: "WASM_MAX_CONCURRENT",
+                reason: format!("{raw:?} is not a whole number in 1..={WASM_WORKERS_MAX} ({err})")
+                    .into(),
+            })?;
+            if workers.get() > WASM_WORKERS_MAX {
+                return Err(ConfigError {
+                    var: "WASM_MAX_CONCURRENT",
+                    reason: format!("{workers} is outside 1..={WASM_WORKERS_MAX}").into(),
+                });
+            }
+            config.wasm_max_concurrent = workers;
+        }
+        if let Some(raw) = lookup("WASM_QUEUE_TIMEOUT_MS") {
+            let millis: NonZeroU16 = raw.trim().parse().map_err(|err| ConfigError {
+                var: "WASM_QUEUE_TIMEOUT_MS",
+                reason: format!(
+                    "{raw:?} is not a whole number of milliseconds in 1..=60000 ({err})"
+                )
+                .into(),
+            })?;
+            if millis.get() > 60_000 {
+                return Err(ConfigError {
+                    var: "WASM_QUEUE_TIMEOUT_MS",
+                    reason: format!("{millis} is outside 1..=60000").into(),
+                });
+            }
+            config.wasm_queue_timeout_ms = millis;
+        }
         Ok(config)
     }
 }
@@ -176,6 +229,8 @@ mod test {
             ("ADMIN_SOCKET", "/tmp/admin.sock"),
             ("REQUEST_TIMEOUT_SECS", "5"),
             ("LOG_FORMAT", "JSON"),
+            ("WASM_MAX_CONCURRENT", "2"),
+            ("WASM_QUEUE_TIMEOUT_MS", "250"),
         ]);
         assert_eq!(
             parsed,
@@ -185,6 +240,8 @@ mod test {
                 admin_socket: PathBuf::from("/tmp/admin.sock"),
                 request_timeout_secs: NonZeroU16::new(5).expect("5 is not zero"),
                 log_format: LogFormat::Json,
+                wasm_max_concurrent: NonZeroUsize::new(2).expect("2 is not zero"),
+                wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
             })
         );
     }
@@ -198,6 +255,11 @@ mod test {
             ("REQUEST_TIMEOUT_SECS", "0"),
             ("REQUEST_TIMEOUT_SECS", "abc"),
             ("LOG_FORMAT", "xml"),
+            ("WASM_MAX_CONCURRENT", "0"),
+            ("WASM_MAX_CONCURRENT", "257"),
+            ("WASM_MAX_CONCURRENT", "many"),
+            ("WASM_QUEUE_TIMEOUT_MS", "0"),
+            ("WASM_QUEUE_TIMEOUT_MS", "60001"),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);

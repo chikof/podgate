@@ -107,7 +107,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_budgets(budgets.clone())
             .with_failures(failures.clone())
             .with_wake(wake.clone())
-            .with_outcomes(outcomes.clone()),
+            .with_outcomes(outcomes.clone())
+            .with_wasm(wasm::Executor::new(
+                config.wasm_max_concurrent.get(),
+                config.wasm_queue_timeout(),
+            )),
     );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {

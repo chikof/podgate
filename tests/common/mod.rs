@@ -127,6 +127,12 @@ impl Podgate {
     /// Spawns the binary with free ports and a temporary admin socket, and returns once
     /// `/readyz` answers 200 and the proxy port accepts connections.
     pub async fn start() -> Self {
+        Self::start_with_env(&[]).await
+    }
+
+    /// [`Self::start`] with extra environment variables, for settings the default does not
+    /// cover.
+    pub async fn start_with_env(extra_env: &[(&str, &str)]) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "podgate-test-{}-{}",
@@ -143,6 +149,7 @@ impl Podgate {
             .env("ADMIN_SOCKET", &admin_socket)
             .env("REQUEST_TIMEOUT_SECS", "5")
             .env("RUST_LOG", "warn")
+            .envs(extra_env.iter().copied())
             .stdin(Stdio::null())
             .spawn()
             .expect("spawn podgate");

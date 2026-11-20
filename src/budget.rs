@@ -33,6 +33,7 @@ pub struct TenantBudget {
     peak_buffered: AtomicU64,
     rejected: AtomicU64,
     degraded: AtomicU64,
+    filter_refused: AtomicU64,
 }
 
 impl TenantBudget {
@@ -45,6 +46,7 @@ impl TenantBudget {
             peak_buffered: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
             degraded: AtomicU64::new(0),
+            filter_refused: AtomicU64::new(0),
         }
     }
 
@@ -78,26 +80,38 @@ impl TenantBudget {
     /// `max_buffer_bytes`. Call it before allocating; the charge ends when the guard drops.
     #[must_use]
     pub fn reserve(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
+        let guard = self.charge(bytes);
+        if guard.is_none() {
+            self.degraded.fetch_add(1, Ordering::Relaxed);
+        }
+        guard
+    }
+
+    /// [`Self::reserve`] for a WASM filter run (see [`crate::wasm`]): the same charge, but a
+    /// refusal counts as a refused filter run, not as skipped compression.
+    #[must_use]
+    pub fn reserve_filter(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
+        let guard = self.charge(bytes);
+        if guard.is_none() {
+            self.filter_refused.fetch_add(1, Ordering::Relaxed);
+        }
+        guard
+    }
+
+    fn charge(self: &Arc<Self>, bytes: u64) -> Option<BufferGuard> {
         let limit = self.max_buffer_bytes.load(Ordering::Relaxed);
         let charged = self
             .buffered
             .try_update(Ordering::AcqRel, Ordering::Acquire, |now| {
                 now.checked_add(bytes).filter(|total| *total <= limit)
             });
-        match charged {
-            Ok(before) => {
-                self.peak_buffered
-                    .fetch_max(before + bytes, Ordering::Relaxed);
-                Some(BufferGuard {
-                    tenant: Arc::clone(self),
-                    bytes,
-                })
-            }
-            Err(_) => {
-                self.degraded.fetch_add(1, Ordering::Relaxed);
-                None
-            }
-        }
+        let before = charged.ok()?;
+        self.peak_buffered
+            .fetch_max(before + bytes, Ordering::Relaxed);
+        Some(BufferGuard {
+            tenant: Arc::clone(self),
+            bytes,
+        })
     }
 
     /// Requests in flight now.
@@ -230,6 +244,12 @@ impl Budgets {
                 kind: "counter",
                 help: "Responses served uncompressed because the buffer budget was full.",
                 value: |tenant| tenant.degraded.load(Ordering::Relaxed),
+            },
+            Family {
+                name: "podgate_tenant_wasm_refused_total",
+                kind: "counter",
+                help: "WASM filter runs refused with 503 because the buffer budget could not take the filter's memory.",
+                value: |tenant| tenant.filter_refused.load(Ordering::Relaxed),
             },
         ];
         for Family {

@@ -443,8 +443,8 @@ async fn wasm_wasip1_filter_loads() {
       (then (drop (call $add (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 16) (i32.const 4)))))
     (i32.const 0)"#,
     );
-    let pushed = push(
-        &podgate,
+    // The filter's 17 pages are charged to the tenant, more than the default 1 MiB.
+    let mut snapshot = snapshot(
         1,
         &[filtered(
             "a",
@@ -452,8 +452,9 @@ async fn wasm_wasip1_filter_loads() {
             upstream,
             &[wat_filter(&wasip1, 10_000_000, 17 * 65_536)],
         )],
-    )
-    .await;
+    );
+    snapshot["tenants"][0]["budget"]["max_buffer_bytes"] = json!(2 * 1_048_576);
+    let pushed = podgate.push_snapshot(&snapshot).await;
     assert_eq!(pushed.status, 200, "{}", pushed.body);
     let (status, body) = get_with(&podgate, "a.test", &[]).await;
     assert_eq!((status, body.as_str()), (200, "wasm|-|-|-"));
