@@ -8,7 +8,7 @@
 //!
 //! - the deflate state of [`miniz_oxide`] (dictionary, hash chains, code buffer): 319,326 bytes,
 //!   measured with a counting allocator at level 4,
-//! - a fixed scratch buffer the encoder writes into ([`SCRATCH_BYTES`]),
+//! - a fixed scratch buffer the encoder writes into (16 KiB),
 //! - the compressed output of one body chunk. Pingora reads an upstream body in chunks of at
 //!   most 64 KiB, and the encoder holds back at most one more block, so the output of one call
 //!   stays under 128 KiB; `Vec` growth can double that.
