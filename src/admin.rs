@@ -6,6 +6,7 @@
 //! adds one `.merge(<module>::routes())` line to [`router`]. Handlers return
 //! `Result<_, AppError>` so every error is `{"error": "..."}`.
 
+mod events;
 mod health;
 mod snapshot;
 
@@ -28,6 +29,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
+use crate::events::EventFeed;
+use crate::inflight::Inflight;
 use crate::table::TableHandle;
 
 /// Shared handler state. Cheap to clone.
@@ -35,15 +38,19 @@ use crate::table::TableHandle;
 pub struct AppState {
     ready: Arc<AtomicBool>,
     table: TableHandle,
+    events: EventFeed,
+    inflight: Inflight,
 }
 
 impl AppState {
     /// Creates a state that is not ready yet; [`AdminService`] flips it once serving.
     #[must_use]
-    pub fn new(table: TableHandle) -> Self {
+    pub fn new(table: TableHandle, events: EventFeed, inflight: Inflight) -> Self {
         Self {
             ready: Arc::new(AtomicBool::new(false)),
             table,
+            events,
+            inflight,
         }
     }
 
@@ -63,6 +70,18 @@ impl AppState {
     pub fn table(&self) -> &TableHandle {
         &self.table
     }
+
+    /// The event feed `GET /v1/events` serves.
+    #[must_use]
+    pub fn events(&self) -> &EventFeed {
+        &self.events
+    }
+
+    /// The in-flight counters, synced after every snapshot apply.
+    #[must_use]
+    pub fn inflight(&self) -> &Inflight {
+        &self.inflight
+    }
 }
 
 async fn not_found() -> AppError {
@@ -71,7 +90,8 @@ async fn not_found() -> AppError {
 
 /// Builds the router with all routes and middleware.
 ///
-/// Routes: `GET /healthz`, `GET /readyz`, `PUT /v1/snapshot`; anything else is a JSON 404.
+/// Routes: `GET /healthz`, `GET /readyz`, `PUT /v1/snapshot`, `GET /v1/events`; anything else is a
+/// JSON 404.
 ///
 /// Middleware, outermost first:
 ///
@@ -85,6 +105,8 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
     Router::new()
         .merge(health::routes())
         .merge(snapshot::routes())
+        .merge(events::routes())
+        .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(

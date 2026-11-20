@@ -25,5 +25,6 @@ async fn put_snapshot(State(state): State<AppState>, body: Bytes) -> Result<Json
     let snapshot: Snapshot = serde_json::from_slice(&body)
         .map_err(|err| AppError::BadRequest(format!("invalid snapshot: {err}").into()))?;
     state.table().apply(&snapshot)?;
+    state.inflight().sync(&state.table().load());
     Ok(Json(json!({ "version": snapshot.version })))
 }

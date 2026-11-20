@@ -21,10 +21,14 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
 use crate::error::AppError;
+use crate::inflight::{Inflight, InflightGuard};
 use crate::respond;
-use crate::route::{self, Selected};
+use crate::route::{self, RouteError, Selected};
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
+
+/// Routing attempts before a request gives up; see `Gateway::request_filter`.
+const MAX_ROUTE_ATTEMPTS: u8 = 3;
 
 /// State of one proxied request, created by [`Gateway::new_ctx`] and passed to every callback.
 ///
@@ -37,22 +41,28 @@ pub struct Ctx {
     pub table: Arc<RoutingTable>,
     /// The routing decision, set by `request_filter` when the host has a route.
     pub route: Option<Selected>,
+    /// Keeps this request counted on its revision (see [`crate::inflight`]); set by
+    /// `request_filter` with `route`, released when the request ends and the `Ctx` drops.
+    pub inflight: Option<InflightGuard>,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
 #[derive(Debug)]
 pub struct Gateway {
     table: TableHandle,
+    inflight: Inflight,
     upstream_timeout: Duration,
 }
 
 impl Gateway {
-    /// Creates a gateway that routes with the live table behind `table`. Connecting to, writing
-    /// to and reading from an upstream each give up after `upstream_timeout`.
+    /// Creates a gateway that routes with the live table behind `table` and counts requests in
+    /// `inflight`. Connecting to, writing to and reading from an upstream each give up after
+    /// `upstream_timeout`.
     #[must_use]
-    pub fn new(table: TableHandle, upstream_timeout: Duration) -> Self {
+    pub fn new(table: TableHandle, inflight: Inflight, upstream_timeout: Duration) -> Self {
         Self {
             table,
+            inflight,
             upstream_timeout,
         }
     }
@@ -66,6 +76,7 @@ impl ProxyHttp for Gateway {
         Ctx {
             table: self.table.load(),
             route: None,
+            inflight: None,
         }
     }
 
@@ -75,15 +86,28 @@ impl ProxyHttp for Gateway {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
-        match route::resolve(&ctx.table, session.req_header()) {
-            Ok(selected) => {
+        let mut attempts = 0;
+        loop {
+            let selected = match route::resolve(&ctx.table, session.req_header()) {
+                Ok(selected) => selected,
+                Err(err) => {
+                    respond::write_error(session, &AppError::from(err)).await?;
+                    return Ok(true);
+                }
+            };
+            if let Some(guard) = self.inflight.admit(&ctx.table, &selected) {
                 ctx.route = Some(selected);
-                Ok(false)
+                ctx.inflight = Some(guard);
+                return Ok(false);
             }
-            Err(err) => {
-                respond::write_error(session, &AppError::from(err)).await?;
-                Ok(true)
+            // The revision drained after this request loaded its table: route again with the
+            // live one. Repeated refusals mean snapshots are landing right now; give up.
+            attempts += 1;
+            if attempts == MAX_ROUTE_ATTEMPTS {
+                respond::write_error(session, &AppError::from(RouteError::NoUpstream)).await?;
+                return Ok(true);
             }
+            ctx.table = self.table.load();
         }
     }
 

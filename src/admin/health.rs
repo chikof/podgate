@@ -34,11 +34,13 @@ async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::events::EventFeed;
+    use crate::inflight::Inflight;
     use crate::table::TableHandle;
 
     #[tokio::test]
     async fn readyz_follows_state() {
-        let state = AppState::new(TableHandle::new());
+        let state = AppState::new(TableHandle::new(), EventFeed::new(), Inflight::new(EventFeed::new()));
         let (status, Json(body)) = readyz(State(state.clone())).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["status"], "not ready");

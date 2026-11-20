@@ -9,6 +9,8 @@
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
+//! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
+//!   report drained revisions into it.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
@@ -17,7 +19,9 @@ pub mod admin;
 pub mod config;
 pub mod conflict;
 pub mod error;
+pub mod events;
 pub mod host;
+pub mod inflight;
 pub mod proxy;
 pub mod respond;
 pub mod route;
@@ -37,6 +41,8 @@ pub use admin::{AdminService, AppState};
 pub use config::{Config, ConfigError, LogFormat};
 pub use conflict::Conflict;
 pub use error::AppError;
+pub use events::{Event, EventFeed, EventKind};
+pub use inflight::{Inflight, InflightGuard};
 pub use proxy::{Ctx, Gateway};
 pub use snapshot::Snapshot;
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
@@ -54,6 +60,8 @@ pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
 /// Fails when the admin socket cannot be bound or the TLS listener cannot be configured.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let table = TableHandle::new();
+    let events = EventFeed::new();
+    let inflight = Inflight::new(events.clone());
     let timeout = config.request_timeout();
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
@@ -66,7 +74,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let mut server = Server::new_with_opt_and_conf(None::<Opt>, server_conf);
     server.bootstrap();
 
-    let mut proxy = http_proxy_service(&server.configuration, Gateway::new(table.clone(), timeout));
+    let mut proxy = http_proxy_service(
+        &server.configuration,
+        Gateway::new(table.clone(), inflight.clone(), timeout),
+    );
     proxy.add_tcp(&config.proxy_addr.to_string());
     if let Some(tls_addr) = config.proxy_tls_addr {
         let settings = tls::listener_settings(table.clone())
@@ -76,7 +87,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.add_service(proxy);
     server.add_service(background_service(
         "admin API",
-        AdminService::new(admin_listener, AppState::new(table), timeout),
+        AdminService::new(admin_listener, AppState::new(table, events, inflight), timeout),
     ));
 
     tracing::info!(

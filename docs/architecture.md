@@ -15,12 +15,14 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/table.rs` | `RoutingTable` (compiled snapshot, weighted pick over `serving` revisions), `TableHandle` (atomic swap, `apply`), `CompileError`, `ApplyError`. |
 | `src/conflict.rs` | `Conflict`: one typed variant per conflict code (`host_conflict`, `tls_policy_conflict`, `cross_tenant_wildcard`) and the pass that finds all of them in a snapshot. |
 | `src/route.rs` | Core host routing: `resolve(table, request) -> Selected`. Pure; no Pingora session. |
+| `src/events.rs` | `EventFeed` (bounded ring of 4096, `emit`, long-poll `poll`, per-process `boot_id`), `Event`, `EventKind`. Features emit into it. |
+| `src/inflight.rs` | `Inflight`: per-revision in-flight counters keyed by (app id, revision id), `InflightGuard`, and the `revision_drained` event. |
 | `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`) and the per-request `Ctx`. |
 | `src/respond.rs` | `write_error`: answers a proxied request with an `AppError`. |
 | `src/tls.rs` | `CertStore` (certificates of a snapshot) and the TLS listener settings that choose the certificate by SNI per handshake. |
 | `src/sni.rs` | The TLS check that a request's `Host` and `:authority` equal the connection's SNI: `CaptureServerName` (handshake hook that records the SNI on the connection) and `check`, called first in `request_filter`. |
 | `src/admin.rs` | The admin router (`router`), `AppState`, the unix socket (`bind`, mode `0600`) and `AdminService`, a Pingora background service. |
-| `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `snapshot.rs`. |
+| `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `snapshot.rs`, `events.rs`. |
 | `tests/common/mod.rs` | Test harness: `Podgate::start()` spawns the built binary on free ports with a temp admin socket; `push_snapshot`, `get`, `https_get`; `Upstream::start(body)`; `TestCert`; snapshot builders. Include with `mod common;`. |
 | `tests/proxy.rs` | End-to-end tests through the real binary. New features add their own `tests/<feature>.rs`. |
 | `tests/sni.rs` | SNI against Host: 421 on mismatch over HTTP/1.1 and HTTP/2 (including `:scheme http`), the `allow_domain_fronting` opt-in, matching hosts served. |
@@ -89,7 +91,7 @@ Example: `{"code":"host_conflict","message":"host dup.test is claimed by app one
 
 ### Not built yet
 
-Change 0001 built the planes (without ACME and the event feed), the snapshot model, compile and swap, revision states for new requests, and the error shape; `Snapshot.certificates` is an addition that lets HTTPS work before ACME. The rest of this section is the target; each part is described below.
+Change 0001 built the planes (without ACME and the event feed); change 0004 built the feed with `revision_drained`, the other event kinds arrive with their specs, the snapshot model, compile and swap, revision states for new requests, and the error shape; `Snapshot.certificates` is an addition that lets HTTPS work before ACME. The rest of this section is the target; each part is described below.
 
 ## Run
 
@@ -137,6 +139,8 @@ Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects)
 | `GET /healthz` | Liveness. `200 {"status":"ok"}` whenever the process answers. Checks no dependency. |
 | `GET /readyz` | Readiness. `200 {"status":"ready"}` while the admin API serves; `503 {"status":"not ready"}` before startup completes and while draining. It does not probe the proxy listeners: Pingora binds them on its own schedule and retries while a port is busy. |
 | `PUT /v1/snapshot` | Replaces the routing table. `200 {"version":N}` when applied; `400` for malformed JSON; `409` when `version` is not greater than the live one (the table is unchanged); `422 {"error":"snapshot rejected","conflicts":[...]}` when it does not compile: conflicting declarations (see `### Snapshot conflicts`), an unknown tenant, a bad host, an unusable certificate. Every entry of `conflicts` is an object with a `code` and a `message`. Bodies up to 16 MiB. The live version starts at `0`, so the first snapshot needs `version >= 1`. |
+| `PUT /v1/snapshot` | Replaces the routing table. `200 {"version":N}` when applied; `400` for malformed JSON; `409` when `version` is not greater than the live one (the table is unchanged); `422 {"error":"snapshot rejected","conflicts":[...]}` when it does not compile (unknown tenant, bad host, a host claimed twice, an unusable certificate). Bodies up to 16 MiB. The live version starts at `0`, so the first snapshot needs `version >= 1`. |
+| `GET /v1/events?after=<seq>&timeout_secs=<n>` | Long poll of the event feed. `200 {"boot_id":"...","events":[{"seq":N,"kind":"revision_drained","app":"...","revision":"..."}]}`: events with `seq` greater than `after` (default `0`), oldest first; an empty list when none arrive within `timeout_secs` (default `0`: answer at once; capped at `REQUEST_TIMEOUT_SECS - 1` so the poll ends before the `408`). `410 {"error":"...","boot_id":"...","oldest":N}` when `after` is older than the 4096-event ring: resync. `400` for a malformed query. Sequence numbers start at `1` and restart with the process; compare `boot_id` to detect a restart. |
 | anything else | `404 {"error":"not found"}`. |
 
 Errors: handlers return `Result<_, AppError>`. `AppError` renders `{"error": "<message>"}` with the matching status. `Internal` logs the cause and sends only `internal error`. No `unwrap()` outside tests.
@@ -144,6 +148,8 @@ Errors: handlers return `Result<_, AppError>`. `AppError` renders `{"error": "<m
 ## Requests in flight and the table
 
 `Gateway::new_ctx` calls `TableHandle::load()` once and stores the `Arc<RoutingTable>` in the request's `Ctx`. Every callback of that request reads `ctx.table`, never the handle, so a snapshot swap mid-request cannot change its routing. `request_filter` resolves the route (`route::resolve`) into `ctx.route`; `upstream_peer` connects to `ctx.route.upstream`. `TableHandle::apply` takes a lock, checks the version, compiles, then swaps with `ArcSwap::store`; a failed compile or a stale version leaves the live table in place.
+
+Counting and draining: once `request_filter` has a route it takes an `InflightGuard` for (app id, revision id) from `Inflight` and keeps it in `ctx.inflight`; it is released when the request ends and its `Ctx` drops. Counters live outside the table, so they survive swaps. After every successful apply, `PUT /v1/snapshot` calls `Inflight::sync` with the live table. A `draining` revision gets exactly one `revision_drained {app, revision}` per draining period: at once when `sync` finds it idle, otherwise when its last guard drops. A period ends when a later snapshot makes the revision non-draining, so draining it again emits again. A request that routed with a table older than the one that drained its revision is refused a guard and routes again with the live table (three attempts, then `503`).
 
 ## Middleware
 
