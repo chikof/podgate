@@ -84,7 +84,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| Add and strip prefix, replace path (and regexp) | `addPrefix`, `stripPrefix*`, `replacePath*` | `uri`, `rewrite`, `handle_path` | 0043 |
+| Add and strip prefix, replace path (and regexp) | `addPrefix`, `stripPrefix*`, `replacePath*` | `uri`, `rewrite`, `handle_path` | built: `src/middleware/{add_prefix,strip_prefix,strip_prefix_regex,replace_path,replace_path_regex}.rs`; `strip_prefix` strips whole segments, every result is re-normalized (no `//` authority, no dot segments, an encoded slash is a `500`), regexes are linear time with groups checked at compile |
 | Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | built: `301`/`302` as the pinned Traefik sends; the Location is refused on control characters (also escaped), other schemes and userinfo; a `redirect_scheme` removal is a plan posture change |
 | Custom headers, security headers | `headers` | `header`, `request_header` | built: `src/middleware/headers.rs`; framing headers cannot be set; HSTS only over TLS |
 | CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |

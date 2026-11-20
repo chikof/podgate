@@ -31,11 +31,17 @@ use crate::table::CompiledApp;
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
+pub mod add_prefix;
 pub mod content_type;
 pub mod headers;
 pub mod redirect;
 pub mod redirect_regex;
 pub mod redirect_scheme;
+mod path_rewrite;
+pub mod replace_path;
+pub mod replace_path_regex;
+pub mod strip_prefix;
+pub mod strip_prefix_regex;
 pub mod wasm;
 
 /// What a request hook decided.
@@ -323,15 +329,15 @@ macro_rules! kinds {
 kinds! {
     "wasm" => Wasm(wasm::Wasm),
 
-    "add_prefix" => unbuilt,
+    "add_prefix" => AddPrefix(add_prefix::AddPrefix),
 
-    "strip_prefix" => unbuilt,
+    "strip_prefix" => StripPrefix(strip_prefix::StripPrefix),
 
-    "strip_prefix_regex" => unbuilt,
+    "strip_prefix_regex" => StripPrefixRegex(strip_prefix_regex::StripPrefixRegex),
 
-    "replace_path" => unbuilt,
+    "replace_path" => ReplacePath(replace_path::ReplacePath),
 
-    "replace_path_regex" => unbuilt,
+    "replace_path_regex" => ReplacePathRegex(replace_path_regex::ReplacePathRegex),
 
     "redirect_scheme" => RedirectScheme(redirect_scheme::RedirectScheme),
 

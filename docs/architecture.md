@@ -17,7 +17,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/route.rs` | Core routing: `matching(table, request, entry_point, tls) -> Option<Matched>` and `select(table, matched, request) -> Selected` (revision, skew pin, server). Pure; no Pingora session. |
 | `src/router.rs`, `src/router/*.rs` | Routers: `CompiledRouter`, the host `Index`, the order `Key` (priority, host rank, specificity, names), tenant isolation of fallback routers, path normalization (`path.rs`), the matcher tree (`matcher.rs`, one file per leaf in `matcher/`). |
 | `src/compile.rs` | The compile passes (`build`) and what they refuse with: `Invalid` (a kind's code and message) and `Rejected` (placed in the snapshot, listed in the `422`). |
-| `src/middleware.rs`, `src/middleware/*.rs` | The per-route middleware chain: the `Kind` trait, the `kinds!` registry that generates `Stage` and its dispatch, `run_request` and the response hooks; one file per kind (`wasm.rs`, `headers.rs`, `content_type.rs`, `redirect_scheme.rs`, `redirect_regex.rs` today). `redirect.rs` is what the two redirects share: the request's `Origin` URL, `status(permanent)` and `finish`, the only place a request-derived string becomes a `Location`; see `docs/ref/mw-redirect.md`. |
+| `src/middleware.rs`, `src/middleware/*.rs` | The per-route middleware chain: the `Kind` trait, the `kinds!` registry that generates `Stage` and its dispatch, `run_request` and the response hooks; one file per kind (`wasm.rs`, `headers.rs`, `content_type.rs`, `redirect_scheme.rs`, `redirect_regex.rs`, `add_prefix.rs`, `strip_prefix.rs`, `strip_prefix_regex.rs`, `replace_path.rs`, `replace_path_regex.rs` today). `redirect.rs` is what the two redirects share: the request's `Origin` URL, `status(permanent)` and `finish`, the only place a request-derived string becomes a `Location`; see `docs/ref/mw-redirect.md`. `path_rewrite.rs` is the private helper of the five path rewrite kinds: re-normalization of a result, the write into the request, the forwarded headers, the `500` refusal. |
 | `src/service.rs`, `src/service/*.rs` | Services: `loadbalancer` with its algorithms in `lb/` (`round_robin`, `weighted_round_robin`, `least_conn`, `p2c_ewma`, `random`; reference in `docs/ref/lb-algorithms.md`); `state.rs`: `ServerState`, `ServiceState`, `Lease` and the `Registry` that keeps them across swaps; empty modules for health, outlier ejection, sticky, transports and DNS. |
 | `src/service/upstream_policy.rs` | The upstream address policy: `UpstreamPolicy` (operator CIDR allow and deny lists per tenant, from `UPSTREAM_POLICY_FILE`), `evaluate` and `check`, `Refused`, `Cidr`, and the `podgate_upstream_refused_total` rendering. Checked by the compiler for literal addresses and by `Gateway::check_upstream` before every dial. Reference for other specs: `docs/ref/upstream-policy.md`. |
 | `src/client_ip.rs` | Client IP resolution: `ForwardedView` (peer, resolved client, scheme, host, port and chain, built in stage 2 of `request_filter`; forged forwarding headers of untrusted peers are removed there), `Trust` (`forwarded_headers` policy and its posture), `ClientIp::resolve(view, strategy)` with `IpStrategy {depth, excluded}`, `Cidr`, `normalize` (IPv4-mapped to IPv4). |
@@ -63,6 +63,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/wasm.rs` | Filters written in WAT through the real binary: headers edited, fuel exhaustion and memory limit end in `500` while other requests are served, forbidden imports are `422`, local responses. |
 | `tests/mw_headers.rs` | The `headers` and `content_type` middlewares through the real binary: request and response edits, security headers, HSTS over TLS only, CORS preflight and origin matching, the refused headers and values, and the posture a plan lists. |
 | `tests/mw_redirect.rs` | `redirect_scheme` and `redirect_regex` through the real binary: HTTP to HTTPS and ports, no loop over TLS, captures, status pair, control characters never reaching `Location`, forged `X-Forwarded-Proto`, no upstream connection for a redirect (a counting backend), invalid configurations, explain and the plan's `https_redirect_removed`. |
+| `tests/mw_rewrite.rs` | The five path rewrite middlewares through the real binary, against an upstream that echoes the request head: each kind, `X-Forwarded-Prefix` and `X-Replaced-Path` and the removal of the client's copies, no authority-form or dot-segment result, an invalid result is a `500` that never reaches the upstream, chain order, routing unaffected, bad regexes and missing groups refused, explain, plan. |
 | `tests/plan.rs` | `POST /v1/snapshot/plan`: the host diff, posture changes, and that nothing is applied. |
 | `tests/client_ip.rs` | Client IP end to end: forged headers from an untrusted peer are removed, a trusted peer's chain is walked from the right, `client_ip` routing, malformed entries, posture entries in a plan, explain with `client_ip`. |
 | `tests/revert.rs` | Auto-revert through the real binary: a `5xx` spike reverts and emits `config_reverted`; an unrelated app's outage does not. |
@@ -357,9 +358,9 @@ The effective chain of a router is the app's `default_chain`, then the router's 
 |Type|Fields (summary)|Module (`src/middleware/`)|Hooks|
 |---|---|---|---|
 |`chain`|`middlewares: [names]`|`chain.rs`|none, expands|
-|`add_prefix`|`prefix`|`add_prefix.rs`|request|
-|`strip_prefix`, `strip_prefix_regex`|`prefixes`, `regexes`|`strip_prefix.rs`, `strip_prefix_regex.rs`|request|
-|`replace_path`, `replace_path_regex`|`path`, or `regex` and `replacement`|`replace_path.rs`, `replace_path_regex.rs`|request|
+|`add_prefix`|`prefix`; reference: `docs/ref/mw-rewrite.md`|`add_prefix.rs`|upstream request (the path is re-normalized; the route was chosen on the original)|
+|`strip_prefix`, `strip_prefix_regex`|`prefixes` (whole segments), `regexes`; set `X-Forwarded-Prefix`; reference: `docs/ref/mw-rewrite.md`|`strip_prefix.rs`, `strip_prefix_regex.rs`|request (drops the client's `X-Forwarded-Prefix`), upstream request|
+|`replace_path`, `replace_path_regex`|`path`, or `regex` and `replacement` (groups checked at compile); set `X-Replaced-Path`; reference: `docs/ref/mw-rewrite.md`|`replace_path.rs`, `replace_path_regex.rs`|request (drops the client's `X-Replaced-Path`), upstream request|
 |`redirect_scheme`|`scheme`, `port?`, `permanent?`|`redirect_scheme.rs`|request, answers|
 |`redirect_regex`|`regex`, `replacement`, `permanent?`|`redirect_regex.rs`|request, answers|
 |`headers`|`request {set, remove}`, `response {set, remove, security {hsts, csp, csp_report_only, frame_options, content_type_nosniff, referrer_policy, permissions_policy, cross_origin_opener_policy, cross_origin_resource_policy}}`, `cors {allow_origins, allow_origin_regexes, allow_methods, allow_headers, expose_headers, allow_credentials, max_age_secs, add_vary}`; reference: `docs/ref/mw-headers.md`|`headers.rs`|request (edits the request, answers an allowed CORS preflight with `204`), response|
@@ -470,7 +471,7 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
 kinds! {
     "wasm" => Wasm(wasm::Wasm),
 
-    "add_prefix" => unbuilt,
+    "add_prefix" => AddPrefix(add_prefix::AddPrefix),
 
     "basic_auth" => unbuilt,
 }

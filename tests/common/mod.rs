@@ -627,6 +627,17 @@ pub fn app(id: &str, hosts: &[&str], revisions: &[Value]) -> Value {
     })
 }
 
+/// `app` with `middlewares` declared and all of them in the app's `default_chain`, in order.
+pub fn with_chain(mut app: Value, middlewares: &[Value]) -> Value {
+    let names: Vec<Value> = middlewares
+        .iter()
+        .map(|declared| declared["name"].clone())
+        .collect();
+    app["middlewares"] = Value::Array(middlewares.to_vec());
+    app["default_chain"] = Value::Array(names);
+    app
+}
+
 /// `app` with WASM filters: each of `filters` (`{wasm_base64, fuel, max_memory_bytes}`) becomes a
 /// `wasm` middleware, and all of them go in the app's `default_chain`, in order.
 pub fn with_filters(mut app: Value, filters: &[Value]) -> Value {
