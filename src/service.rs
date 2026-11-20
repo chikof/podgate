@@ -46,6 +46,7 @@ use crate::compile::Invalid;
 use podgate_model::{Declared, SkewSecret};
 
 pub use lb::PickCx;
+pub(crate) use lb::RingBudget;
 pub use loadbalancer::{LoadBalancer, Server};
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
@@ -151,6 +152,16 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
             Self::Static(_) => &[],
+        }
+    }
+
+    /// The points of the service's hash ring, `0` when it has none: what the compile pass
+    /// charges to a `RingBudget`.
+    #[must_use]
+    pub fn ring_points(&self) -> u64 {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.ring_points(),
+            Self::Static(_) => 0,
         }
     }
 

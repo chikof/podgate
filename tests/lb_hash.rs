@@ -279,3 +279,124 @@ async fn sticky_cookie_wins_over_the_hash_and_no_cookie_falls_to_it() {
     let without = podgate.get("a.test", &paths[other]).await;
     assert_eq!(without.body, answers[other]);
 }
+
+/// A snapshot of one app per `(tenant, services)` entry: the app has that many `ip_hash`
+/// services (the first is `web`, which the router uses), each over the first two backends with
+/// the weights `weights`.
+fn rings(
+    version: u64,
+    tenants: &[(&str, usize)],
+    weights: [u32; 2],
+    backends: &[Upstream],
+) -> Value {
+    let servers: Vec<Value> = backends
+        .iter()
+        .zip(weights)
+        .map(|(backend, weight)| json!({ "url": format!("http://{}", backend.addr), "weight": weight }))
+        .collect();
+    let apps: Vec<Value> = tenants
+        .iter()
+        .map(|(tenant, services)| {
+            let services: Vec<Value> = (0..*services)
+                .map(|n| {
+                    let name = if n == 0 { "web".to_owned() } else { format!("s{n}") };
+                    json!({ "name": name, "type": "loadbalancer", "algorithm": "ip_hash", "servers": servers })
+                })
+                .collect();
+            let revision = json!({ "id": "r1", "state": "serving", "weight": 100, "services": services });
+            let mut app = app(&format!("app-{tenant}"), &[&format!("{tenant}.test")], &[revision]);
+            app["tenant"] = json!(tenant);
+            app
+        })
+        .collect();
+    let mut snapshot = snapshot(version, &apps);
+    snapshot["tenants"] = tenants
+        .iter()
+        .map(|(tenant, _)| json!({ "id": tenant, "weight": 1, "budget": { "max_inflight": 100, "max_buffer_bytes": 1_048_576 } }))
+        .collect();
+    snapshot
+}
+
+/// The code and message of the first conflict of a rejected push.
+fn refusal(response: &common::Response) -> (String, String) {
+    assert_eq!(response.status, 422, "{}", response.body);
+    let first = &response.json()["conflicts"][0];
+    (
+        first["code"].as_str().unwrap_or_default().to_owned(),
+        first["message"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn hash_ring_weight_cap_rejected() {
+    let podgate = Podgate::start().await;
+    let backends = backends().await;
+    // 1023 and 1 share no divisor: a ring of 1024 weight units is 164 thousand points.
+    let (code, message) = refusal(
+        &podgate
+            .push_snapshot(&rings(1, &[("t1", 1)], [1023, 1], &backends))
+            .await,
+    );
+    assert_eq!(code, "invalid_service");
+    assert!(message.contains("256"), "{message}");
+    // 256 weight units is the most a ring may hold, and 257 is one too many.
+    let at_cap = podgate
+        .push_snapshot(&rings(2, &[("t1", 1)], [255, 1], &backends))
+        .await;
+    assert_eq!(at_cap.status, 200, "{}", at_cap.body);
+    let (code, _) = refusal(
+        &podgate
+            .push_snapshot(&rings(3, &[("t1", 1)], [256, 1], &backends))
+            .await,
+    );
+    assert_eq!(code, "invalid_service");
+}
+
+#[tokio::test]
+async fn hash_ring_points_per_tenant_capped() {
+    let podgate = Podgate::start().await;
+    let backends = backends().await;
+    // Each service holds 256 weight units, 40 960 points: 25 of them are 1 024 000 points, under
+    // the tenant's 1 048 576, and 26 are over.
+    let fits = podgate
+        .push_snapshot(&rings(1, &[("t1", 25)], [255, 1], &backends))
+        .await;
+    assert_eq!(fits.status, 200, "{}", fits.body);
+    let (code, message) = refusal(
+        &podgate
+            .push_snapshot(&rings(2, &[("t1", 26)], [255, 1], &backends))
+            .await,
+    );
+    assert_eq!(code, "invalid_service");
+    assert!(
+        message.contains("tenant t1") && message.contains("1064960") && message.contains("1048576"),
+        "{message}"
+    );
+    // The same number of services spread over two tenants is under each tenant's cap.
+    let spread = podgate
+        .push_snapshot(&rings(3, &[("t1", 13), ("t2", 13)], [255, 1], &backends))
+        .await;
+    assert_eq!(spread.status, 200, "{}", spread.body);
+    // Four tenants at their cap fit the snapshot's 4 194 304 points; a fifth does not.
+    let four = podgate
+        .push_snapshot(&rings(
+            4,
+            &[("t1", 25), ("t2", 25), ("t3", 25), ("t4", 25)],
+            [255, 1],
+            &backends,
+        ))
+        .await;
+    assert_eq!(four.status, 200, "{}", four.body);
+    let (code, message) = refusal(
+        &podgate
+            .push_snapshot(&rings(
+                5,
+                &[("t1", 25), ("t2", 25), ("t3", 25), ("t4", 25), ("t5", 25)],
+                [255, 1],
+                &backends,
+            ))
+            .await,
+    );
+    assert_eq!(code, "invalid_service");
+    assert!(message.contains("4194304"), "{message}");
+}

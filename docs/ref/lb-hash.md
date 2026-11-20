@@ -34,13 +34,17 @@ Caddy's `query` and `cookie` policies are not provided; sticky cookies are `stic
 
 ## Weights
 
-Weights shape the ring: a server of weight 3 gets three times the points. A server of weight `0` receives nothing (as in `weighted_round_robin`); every server at `0` is `invalid_service`. The weights are divided by their greatest common divisor first and must add up to at most 1024 afterwards (a ring of that size holds about 164 thousand points, 1.3 MB), or the service is `invalid_service`. Two servers with the same address are one server with their weights added.
+Weights shape the ring: a server of weight 3 gets three times the points. A server of weight `0` receives nothing (as in `weighted_round_robin`); every server at `0` is `invalid_service`. The weights are divided by their greatest common divisor first and must add up to at most 256 afterwards (a ring of that size holds 40 960 points, 320 KiB), or the service is `invalid_service`. Weights of 1023 and 1 are refused: a gcd of 1 does not shrink them. Two servers with the same address are one server with their weights added.
 
 ## The hash is keyed
 
 The ring's own hash (CRC-32) is not secret, so with it a client could choose paths or header values that all land on one server of an app. Every key is therefore hashed first with SipHash under a secret that lives in the service's state (`ServiceState::keyed_hash`): random per service and process, kept across snapshot pushes that leave the service alone (and across a change of its `servers`), replaced when the service's declaration changes.
 
 The consequence is a deliberate choice: the same key maps to the same server on one podgate process for as long as the service is unchanged, and **not** across a restart and **not** between nodes. A fleet that wants one key on one server across nodes needs a shared secret, which this version does not offer (it would mean a secret in the snapshot).
+
+## Memory
+
+A ring point is 8 bytes. A ring is built per compiled service and per revision that declares it, so the compile pass charges every hash service as it builds it: at most 256 weight units per service (40 960 points, 320 KiB, and about twice that while it is built), 1 048 576 points (8 MiB) per tenant over all its apps and revisions, and 4 194 304 points (32 MiB) per snapshot. The first service over a cap is `invalid_service` naming the tenant, the points asked and the cap, and the rest of the snapshot is not built, so a push cannot make the proxy build rings without end. The caps are compile-time only; they are not charged to `max_buffer_bytes`, which counts per-request buffers and not the routing table.
 
 ## What a pick costs and when it fails
 
@@ -50,4 +54,4 @@ A pick reads atomics only. A ring pick walks to the first allowed point; the fir
 
 | Code | When |
 |---|---|
-| `invalid_service` | `algorithm` is neither a name nor an object with a `type`; an unknown field; `header_hash` without `header` or with something that is no header name; `header` on another algorithm or `include_query` on another one; every weight `0`; weights that add up to more than 1024 after dividing by their common divisor |
+| `invalid_service` | `algorithm` is neither a name nor an object with a `type`; an unknown field; `header_hash` without `header` or with something that is no header name; `header` on another algorithm or `include_query` on another one; every weight `0`; weights that add up to more than 256 after dividing by their common divisor; the hash services of a tenant (all its apps and revisions) together hold more than 1 048 576 ring points, or those of the whole snapshot more than 4 194 304 (the message names the tenant, the points asked and the cap) |

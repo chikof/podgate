@@ -30,7 +30,7 @@ use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{self, NamedTransport, Service, TenantRoots, Transport};
+use crate::service::{self, NamedTransport, RingBudget, Service, TenantRoots, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::{CertStore, Options};
 use crate::wasm as engine;
@@ -232,6 +232,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut engine = engine::Compiler::default();
     let mut rejected = Vec::new();
     let mut parts = Vec::with_capacity(snapshot.apps.len());
+    let mut rings = RingBudget::default();
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let stages = stages_of(app, app_routers, &mut engine, &mut rejected);
         let transports = transports_of(app, &mut rejected);
@@ -241,13 +242,16 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             context.upstream_policy(),
             &transports,
             snapshot.skew_secret.as_ref(),
-            StaticCx {
-                roots: context.static_roots().of(&app.tenant),
-                max_buffer_bytes: snapshot
-                    .tenants
-                    .iter()
-                    .find(|tenant| tenant.id == app.tenant)
-                    .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
+            Limits {
+                statics: StaticCx {
+                    roots: context.static_roots().of(&app.tenant),
+                    max_buffer_bytes: snapshot
+                        .tenants
+                        .iter()
+                        .find(|tenant| tenant.id == app.tenant)
+                        .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
+                },
+                rings: &mut rings,
             },
             &mut rejected,
         );
@@ -738,6 +742,14 @@ struct StaticCx<'a> {
     max_buffer_bytes: u64,
 }
 
+/// What the services of one app are checked against while they are built.
+struct Limits<'a> {
+    /// What `static` services need to know about their tenant.
+    statics: StaticCx<'a>,
+    /// The hash ring points the snapshot has used so far.
+    rings: &'a mut RingBudget,
+}
+
 /// Compiles the services of `app` and of each of its revisions, and finds every router's
 /// service in every revision. The literal server addresses of every service must pass `policy`.
 fn services_of(
@@ -746,44 +758,56 @@ fn services_of(
     policy: &UpstreamPolicy,
     transports: &[NamedTransport],
     skew_secret: Option<&SkewSecret>,
-    statics: StaticCx<'_>,
+    limits: Limits<'_>,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
+    let Limits { statics, rings } = limits;
+    // Once a cap on hash rings is exceeded the snapshot is rejected: the remaining services are
+    // not built, so one push cannot make the proxy build rings without end.
     let compile =
-        |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
-            declared,
-            transports,
-            statics.roots,
-        )
-        .and_then(|mut service| {
-            service.bind_sticky(skew_secret, &app.id, &declared.name)?;
-            Ok(service)
-        }) {
-            Ok(service) => {
-                if let Some(site) = service.as_static()
-                    && let Err(invalid) = site.check_budget(&app.tenant, statics.max_buffer_bytes)
-                {
-                    rejected.push(Rejected::new(app, at.as_str(), invalid));
-                }
-                for invalid in
-                    policy.forbidden_servers(&app.tenant, &declared.name, service.servers())
-                {
-                    rejected.push(Rejected::new(app, at.as_str(), invalid));
-                }
-                Some(service::Named {
-                    name: declared.name.clone(),
-                    service,
-                })
+        |declared: &Declared, at: String, rings: &mut RingBudget, rejected: &mut Vec<Rejected>| {
+            if rings.refused() {
+                return None;
             }
-            Err(invalid) => {
-                rejected.push(Rejected::new(app, at, invalid));
-                None
+            match Service::compile(declared, transports, statics.roots).and_then(|mut service| {
+                service.bind_sticky(skew_secret, &app.id, &declared.name)?;
+                rings.charge(&app.tenant, service.ring_points())?;
+                Ok(service)
+            }) {
+                Ok(service) => {
+                    if let Some(site) = service.as_static()
+                        && let Err(invalid) =
+                            site.check_budget(&app.tenant, statics.max_buffer_bytes)
+                    {
+                        rejected.push(Rejected::new(app, at.as_str(), invalid));
+                    }
+                    for invalid in
+                        policy.forbidden_servers(&app.tenant, &declared.name, service.servers())
+                    {
+                        rejected.push(Rejected::new(app, at.as_str(), invalid));
+                    }
+                    Some(service::Named {
+                        name: declared.name.clone(),
+                        service,
+                    })
+                }
+                Err(invalid) => {
+                    rejected.push(Rejected::new(app, at, invalid));
+                    None
+                }
             }
         };
     let shared: Vec<service::Named> = app
         .services
         .iter()
-        .filter_map(|declared| compile(declared, format!("service {}", declared.name), rejected))
+        .filter_map(|declared| {
+            compile(
+                declared,
+                format!("service {}", declared.name),
+                rings,
+                rejected,
+            )
+        })
         .collect();
     let shared_at: HashMap<&str, usize> = shared
         .iter()
@@ -799,6 +823,7 @@ fn services_of(
                 compile(
                     declared,
                     format!("revision {} service {}", revision.id, declared.name),
+                    rings,
                     rejected,
                 )
             })
@@ -818,7 +843,7 @@ fn services_of(
                         .get(router.service())
                         .map(|index| ServiceRef::App(*index))
                 });
-            if found.is_none() && revision.state != RevisionState::Draining {
+            if found.is_none() && revision.state != RevisionState::Draining && !rings.refused() {
                 rejected.push(Rejected::new(
                     app,
                     format!("router {} revision {}", router.name(), revision.id),

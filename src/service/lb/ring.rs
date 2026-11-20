@@ -11,6 +11,7 @@
 //! secret-keyed because ketama's own hash (CRC-32) is not: with it a client could pick paths or
 //! header values that all land on one server of the app.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -20,10 +21,76 @@ use super::{PickCx, below, weighted_round_robin::gcd};
 use crate::compile::Invalid;
 use crate::service::{Server, ServiceState};
 
-/// The most weight a ring may hold, after dividing the weights by their greatest common divisor.
-/// 256 servers of weight 1 (the most a service declares) and 1024 weight units give 164 thousand
-/// points, about 1.3 MB.
-const MAX_WEIGHT: u64 = 1024;
+/// The most weight a ring may hold, after dividing the weights by their greatest common divisor:
+/// 256 servers of weight 1 (the most a service declares) fill it. A ring of 256 weight units has
+/// 40 960 points, 320 KiB, and building it costs about twice that for a moment.
+const MAX_WEIGHT: u64 = 256;
+
+/// The most ring points one tenant's hash services may hold together, over every app and every
+/// revision it declares (a service declared in three revisions is compiled, and counted, three
+/// times). 1 048 576 points are 8 MiB (8 bytes a point): about 25 services of the most weight
+/// a service may have, or 2 000 services of three servers.
+const MAX_TENANT_POINTS: u64 = 1_048_576;
+
+/// The most ring points one snapshot may hold in all: 32 MiB, the memory a push can make the
+/// proxy build however many tenants it names.
+const MAX_SNAPSHOT_POINTS: u64 = 4_194_304;
+
+/// The ring points the services compiled so far for one snapshot hold, per tenant and in all.
+/// The compile pass charges every hash service as it is built, so a snapshot that asks for more
+/// than the caps is refused after at most one service over them, never after building them all.
+#[derive(Debug, Default)]
+pub(crate) struct RingBudget {
+    total: u64,
+    tenants: HashMap<Box<str>, u64>,
+    refused: bool,
+}
+
+impl RingBudget {
+    /// Whether a charge was refused: the snapshot is rejected and building more rings is waste.
+    pub(crate) fn refused(&self) -> bool {
+        self.refused
+    }
+
+    /// Charges a service of `tenant` that holds `points` ring points.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_service`, naming the tenant, the points asked and the cap, when the tenant's
+    /// hash services or the snapshot's together would hold more than the caps.
+    pub(crate) fn charge(&mut self, tenant: &str, points: u64) -> Result<(), Invalid> {
+        if points == 0 {
+            return Ok(());
+        }
+        let asked = self
+            .tenants
+            .get(tenant)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(points);
+        let total = self.total.saturating_add(points);
+        let refusal = if asked > MAX_TENANT_POINTS {
+            Some(format!(
+                "tenant {tenant}: its hash services ask for {asked} ring points, at most \
+                 {MAX_TENANT_POINTS} are allowed; lower the weights or the servers of hash services"
+            ))
+        } else if total > MAX_SNAPSHOT_POINTS {
+            Some(format!(
+                "tenant {tenant}: the snapshot's hash services ask for {total} ring points, at \
+                 most {MAX_SNAPSHOT_POINTS} are allowed in all"
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            self.refused = true;
+            return Err(Invalid::new("invalid_service", why));
+        }
+        self.total = total;
+        self.tenants.insert(tenant.into(), asked);
+        Ok(())
+    }
+}
 
 /// The ring of one compiled service.
 pub(super) struct Ring {
@@ -115,6 +182,11 @@ impl Ring {
             continuum: Continuum::new(&buckets),
             points: usize::try_from(total * u64::from(DEFAULT_POINT_MULTIPLE)).unwrap_or(0),
         })
+    }
+
+    /// The points on the ring, what [`RingBudget`] charges.
+    pub(super) fn points(&self) -> u64 {
+        u64::try_from(self.points).unwrap_or(u64::MAX)
     }
 
     /// The index in `servers` of the first server at or after the point `digest` hashes to that
@@ -342,7 +414,7 @@ mod test {
             assert_eq!(err.code, "invalid_service", "{name}");
         }
         // Weights are divided by their common divisor first, so 1000 and 3000 are fine and
-        // 1 and 2000 are not (a ring of that size would hold 320 thousand points).
+        // 1 and 2000 are not.
         assert!(Ring::compile("ip_hash", &weighted(&[1000, 3000])).is_ok());
         let err = Ring::compile("ip_hash", &weighted(&[1, 2000])).expect_err("too much");
         assert_eq!(err.code, "invalid_service");
@@ -423,5 +495,36 @@ mod test {
             differ > same,
             "the query is hashed: {differ} differ, {same} same"
         );
+    }
+
+    #[test]
+    fn ring_points_follow_the_weights_and_the_budget_refuses_past_its_caps() {
+        let ring = Ring::compile("ip_hash", &weighted(&[255, 1])).expect("at the cap");
+        assert_eq!(ring.points(), 256 * 160);
+        assert!(Ring::compile("ip_hash", &weighted(&[256, 1])).is_err());
+        assert_eq!(Ring::compile("ip_hash", &[]).expect("empty").points(), 0);
+
+        let mut budget = RingBudget::default();
+        let service = 256 * 160;
+        for _ in 0..25 {
+            assert!(budget.charge("t1", service).is_ok());
+        }
+        let err = budget.charge("t1", service).expect_err("26th service");
+        assert!(
+            err.message.contains("tenant t1") && err.message.contains("1064960"),
+            "{}",
+            err.message
+        );
+        assert!(budget.refused());
+        let mut spread = RingBudget::default();
+        for tenant in ["a", "b", "c", "d"] {
+            for _ in 0..25 {
+                assert!(spread.charge(tenant, service).is_ok());
+            }
+        }
+        assert!(spread.charge("e", service).is_ok());
+        assert!(spread.charge("e", service).is_ok());
+        assert!(spread.charge("e", service).is_err(), "the snapshot's cap");
+        assert!(RingBudget::default().charge("t", 0).is_ok());
     }
 }

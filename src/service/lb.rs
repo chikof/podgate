@@ -46,6 +46,8 @@ use round_robin::RoundRobin;
 use uri_hash::UriHash;
 use weighted_round_robin::WeightedRoundRobin;
 
+pub(crate) use ring::RingBudget;
+
 /// What a balancer may look at to pick a server.
 #[derive(Debug, Clone, Copy)]
 pub struct PickCx<'a> {
@@ -256,6 +258,18 @@ impl Balancer {
             Self::UriHash(algorithm) => algorithm.pick(cx, servers, shared),
             Self::HeaderHash(algorithm) => algorithm.pick(cx, servers, shared),
             Self::Hrw(algorithm) => algorithm.pick(cx, servers, shared),
+        }
+    }
+
+    /// The points of the algorithm's ring, `0` for an algorithm without one; what the compile
+    /// pass charges to `RingBudget`.
+    #[must_use]
+    pub fn ring_points(&self) -> u64 {
+        match self {
+            Self::IpHash(algorithm) => algorithm.points(),
+            Self::UriHash(algorithm) => algorithm.points(),
+            Self::HeaderHash(algorithm) => algorithm.points(),
+            _ => 0,
         }
     }
 

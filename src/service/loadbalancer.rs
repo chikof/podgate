@@ -236,6 +236,12 @@ impl LoadBalancer {
         self.passive.as_ref()
     }
 
+    /// The points of the hash ring of the service, `0` without one.
+    #[must_use]
+    pub fn ring_points(&self) -> u64 {
+        self.balancer.ring_points()
+    }
+
     /// The name of the algorithm.
     #[must_use]
     pub fn algorithm(&self) -> &'static str {

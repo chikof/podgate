@@ -35,6 +35,10 @@ impl HeaderHash {
         Ring::compile("header_hash", servers).map(|ring| Self { ring, header })
     }
 
+    pub(super) fn points(&self) -> u64 {
+        self.ring.points()
+    }
+
     pub(super) fn pick(
         &self,
         cx: PickCx<'_>,
