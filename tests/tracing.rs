@@ -527,10 +527,13 @@ async fn trace_attributes_documented() {
 #[tokio::test]
 async fn failed_upstream_marks_the_spans_as_errors() {
     let collector = Collector::start().await;
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.local_addr().expect("address")
-    };
+    // Bound but not listening: connects are refused, and no other test can take the port while
+    // `reserved` lives (a dropped listener's port can be handed to another test's upstream).
+    let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+    reserved
+        .bind("127.0.0.1:0".parse().expect("address"))
+        .expect("bind");
+    let closed = reserved.local_addr().expect("address");
     let podgate =
         Podgate::start_with_env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", &collector.url())]).await;
     let mut pushed = snapshot(1, &[app("a.test", &["a.test"], &[serving("r1", closed)])]);
