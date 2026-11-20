@@ -65,7 +65,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Request shadow and replay of failures | none | none | built |
 | DNS names as servers | yes (dialer) | yes, plus dynamic upstreams | 0042 (A and AAAA, TTL, policy on every answer) |
 | SRV upstreams | none | `srv` dynamic upstreams | 0096 (with a port deny list, because DNS then chooses the port); `multi` and other sources declined |
-| Upstream address policy (SSRF) | none | none | 0041 |
+| Upstream address policy (SSRF) | none | none | built: operator allow and deny CIDRs per tenant; loopback, link-local, metadata, unspecified and multicast denied by default; checked at compile and before every dial |
 | Response flush interval | `responseForwarding.flushInterval` | `flush_interval` | declined: Pingora streams chunks as they arrive |
 | Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport; default never closes a tunnel) |
 

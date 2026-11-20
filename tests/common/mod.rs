@@ -116,6 +116,12 @@ const START_ATTEMPTS: u32 = 5;
 /// Longest one start attempt waits for the process to listen.
 const START_WAIT: Duration = Duration::from_secs(10);
 
+/// The upstream address policy the harness gives every `podgate`: the built-in deny list minus
+/// loopback (and the other ranges tests have no use for), so local upstreams work. A test that
+/// needs another policy passes its own `UPSTREAM_POLICY_FILE` through `start_with_env`.
+const LOOPBACK_POLICY: &str =
+    r#"{"deny": ["0.0.0.0/8", "169.254.0.0/16", "fe80::/10", "224.0.0.0/4", "ff00::/8"]}"#;
+
 /// Whether process `pid` has a TCP socket listening on loopback `port`.
 fn listens(pid: u32, port: u16) -> bool {
     let wanted = format!(":{port:04X}");
@@ -202,10 +208,14 @@ impl Podgate {
         let proxy_addr = SocketAddr::from(([127, 0, 0, 1], ports.0));
         let tls_addr = SocketAddr::from(([127, 0, 0, 1], ports.1));
         let admin_socket = dir.join("admin.sock");
+        // The tests' upstreams listen on loopback, which the built-in policy denies.
+        let policy_file = dir.join("upstream-policy.json");
+        std::fs::write(&policy_file, LOOPBACK_POLICY).expect("write the upstream policy file");
         let child = Command::new(env!("CARGO_BIN_EXE_podgate"))
             .env("PROXY_ADDR", proxy_addr.to_string())
             .env("PROXY_TLS_ADDR", tls_addr.to_string())
             .env("ADMIN_SOCKET", &admin_socket)
+            .env("UPSTREAM_POLICY_FILE", &policy_file)
             .env("REQUEST_TIMEOUT_SECS", "5")
             .env("RUST_LOG", "warn")
             .envs(extra_env.iter().copied())

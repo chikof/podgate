@@ -26,6 +26,8 @@
 //!   and [`revert`] undoes a snapshot that makes the apps it changed fail.
 //! - [`Backends`]: the adaptive concurrency limit per upstream and the weighted fair queues of the
 //!   tenants waiting for it.
+//! - [`service::upstream_policy`]: the operator's rule for which addresses a tenant's servers may
+//!   have, checked by the compiler and before every connection.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -101,11 +103,14 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when the admin socket cannot be bound or the TLS listener cannot be configured.
+/// Fails when `UPSTREAM_POLICY_FILE` is invalid, the admin socket cannot be bound or the TLS
+/// listener cannot be configured.
 pub fn run(config: &Config) -> anyhow::Result<()> {
+    let upstream_policy = config.upstream_policy()?;
     let table = TableHandle::with_context(
         entry::CompileContext::default()
-            .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref)),
+            .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
+            .with_upstream_policy(upstream_policy.clone()),
     );
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
@@ -140,6 +145,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_failures(failures.clone())
             .with_wake(wake.clone())
             .with_outcomes(outcomes.clone())
+            .with_upstream_policy(upstream_policy.clone())
             .with_wasm(wasm::Executor::new(
                 config.wasm_max_concurrent.get(),
                 config.wasm_queue_timeout(),
@@ -172,6 +178,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 .with_budgets(budgets)
                 .with_backends(backends)
                 .with_failures(failures)
+                .with_upstream_policy(upstream_policy)
                 .with_outcomes(outcomes),
             timeout,
         ),

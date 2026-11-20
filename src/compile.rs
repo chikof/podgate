@@ -27,6 +27,7 @@ use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
+use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{self, Service};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::CertStore;
@@ -216,7 +217,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut parts = Vec::with_capacity(snapshot.apps.len());
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let stages = stages_of(app, app_routers, &mut engine, &mut rejected);
-        let services = services_of(app, app_routers, &mut rejected);
+        let services = services_of(app, app_routers, context.upstream_policy(), &mut rejected);
         parts.push((stages, services));
     }
     if !rejected.is_empty() {
@@ -638,20 +639,28 @@ fn expand_name<'a>(
 }
 
 /// Compiles the services of `app` and of each of its revisions, and finds every router's
-/// service in every revision.
+/// service in every revision. The literal server addresses of every service must pass `policy`.
 fn services_of(
     app: &App,
     routers: &[CompiledRouter],
+    policy: &UpstreamPolicy,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
         |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
             declared,
         ) {
-            Ok(service) => Some(service::Named {
-                name: declared.name.clone(),
-                service,
-            }),
+            Ok(service) => {
+                for invalid in
+                    policy.forbidden_servers(&app.tenant, &declared.name, service.servers())
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
+                }
+                Some(service::Named {
+                    name: declared.name.clone(),
+                    service,
+                })
+            }
             Err(invalid) => {
                 rejected.push(Rejected::new(app, at, invalid));
                 None

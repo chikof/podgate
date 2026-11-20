@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::service::upstream_policy::UpstreamPolicy;
+
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
 /// snapshot compiles always find threads.
 const WASM_WORKERS_MAX: usize = 256;
@@ -57,6 +59,7 @@ const _: () =
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
+/// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Address of the plain HTTP proxy listener.
@@ -83,6 +86,9 @@ pub struct Config {
     /// Tenants the operator lets declare catch-all routers (a `host_regexp` or host-free router)
     /// on a shared entry point, so they can receive hosts nobody claims. Empty: none can.
     pub catch_all_tenants: Vec<Box<str>>,
+    /// File with the upstream address policy. Absent: the built-in deny list. Read once at
+    /// startup by [`Config::upstream_policy`].
+    pub upstream_policy_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -101,6 +107,7 @@ impl Default for Config {
             node_name: None,
             acme_ca_file: None,
             catch_all_tenants: Vec::new(),
+            upstream_policy_file: None,
         }
     }
 }
@@ -113,6 +120,23 @@ fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
 }
 
 impl Config {
+    /// Loads the upstream address policy: the file named by `UPSTREAM_POLICY_FILE`, else the
+    /// built-in default.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `UPSTREAM_POLICY_FILE` when the file cannot be read or is invalid; the
+    /// reason names the file and the entry that is wrong.
+    pub fn upstream_policy(&self) -> Result<UpstreamPolicy, ConfigError> {
+        match &self.upstream_policy_file {
+            None => Ok(UpstreamPolicy::builtin()),
+            Some(path) => UpstreamPolicy::load(path).map_err(|err| ConfigError {
+                var: "UPSTREAM_POLICY_FILE",
+                reason: format!("{}: {err}", path.display()).into(),
+            }),
+        }
+    }
+
     /// How long a WASM filter run waits for a free worker.
     #[must_use]
     pub fn wasm_queue_timeout(&self) -> Duration {
@@ -223,6 +247,7 @@ impl Config {
         };
         config.node_name = non_empty("NODE_NAME")?.map(String::into_boxed_str);
         config.acme_ca_file = non_empty("ACME_CA_FILE")?.map(PathBuf::from);
+        config.upstream_policy_file = non_empty("UPSTREAM_POLICY_FILE")?.map(PathBuf::from);
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -264,6 +289,7 @@ mod test {
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
+            ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
         ]);
         assert_eq!(
@@ -278,6 +304,7 @@ mod test {
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
+                upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
             })
         );
@@ -299,6 +326,7 @@ mod test {
             ("WASM_QUEUE_TIMEOUT_MS", "60001"),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
+            ("UPSTREAM_POLICY_FILE", " "),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);

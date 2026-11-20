@@ -40,6 +40,7 @@ use crate::fairq::Backends;
 use crate::inflight::Inflight;
 use crate::outcomes::Outcomes;
 use crate::revert::Reverter;
+use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::TableHandle;
 
 /// Shared handler state. Cheap to clone.
@@ -52,6 +53,7 @@ pub struct AppState {
     budgets: Budgets,
     backends: Backends,
     failures: Failures,
+    upstream_policy: UpstreamPolicy,
     reverter: Reverter,
 }
 
@@ -73,6 +75,7 @@ impl AppState {
             budgets: Budgets::new(),
             backends: Backends::new(),
             failures: Failures::new(),
+            upstream_policy: UpstreamPolicy::builtin(),
             reverter,
         }
     }
@@ -143,6 +146,19 @@ impl AppState {
     #[must_use]
     pub fn failures(&self) -> &Failures {
         &self.failures
+    }
+
+    /// Reports `policy`, the upstream address policy the proxy enforces, on `GET /metrics`.
+    #[must_use]
+    pub fn with_upstream_policy(mut self, policy: UpstreamPolicy) -> Self {
+        self.upstream_policy = policy;
+        self
+    }
+
+    /// The upstream address policy whose refusal counter `GET /metrics` reports.
+    #[must_use]
+    pub fn upstream_policy(&self) -> &UpstreamPolicy {
+        &self.upstream_policy
     }
 
     /// Reads `outcomes`, the counters the proxy records into, for auto-revert.

@@ -14,7 +14,9 @@
 //!
 //! Shared by the load balancer's helpers, and empty until their specs land: active health checks
 //! (`health.rs`), passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`), upstream
-//! transports (`transport.rs`) and DNS upstreams (`resolve.rs`).
+//! transports (`transport.rs`) and DNS upstreams (`resolve.rs`). [`upstream_policy`] is built:
+//! the operator's rule for which addresses a tenant's servers may have, checked by the compiler
+//! and before every connection.
 //!
 //! Adding a service type: a file here with `compile` and `pick`, one variant in [`Service`] and
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
@@ -28,6 +30,7 @@ mod outlier;
 mod resolve;
 mod sticky;
 mod transport;
+pub mod upstream_policy;
 mod weighted;
 
 use std::net::SocketAddr;

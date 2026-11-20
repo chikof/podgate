@@ -35,7 +35,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::Error;
-use pingora::ErrorType::InternalError;
+use pingora::ErrorType::{HTTPStatus, InternalError};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::Digest;
 use pingora::proxy::{ProxyHttp, Session};
@@ -56,6 +56,7 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
+use crate::service::upstream_policy::UpstreamPolicy;
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
@@ -119,6 +120,7 @@ pub struct Gateway {
     wake: Wake,
     outcomes: Outcomes,
     wasm: wasm::Executor,
+    upstream_policy: UpstreamPolicy,
 }
 
 impl Gateway {
@@ -136,6 +138,7 @@ impl Gateway {
             wake: Wake::default(),
             outcomes: Outcomes::new(),
             wasm: wasm::Executor::default(),
+            upstream_policy: UpstreamPolicy::builtin(),
             backends: Backends::new(),
         }
     }
@@ -181,6 +184,38 @@ impl Gateway {
     pub fn with_backends(mut self, backends: Backends) -> Self {
         self.backends = backends;
         self
+    }
+
+    /// Checks every upstream address a request dials against `policy`. Without this
+    /// a gateway runs the built-in policy: loopback, link-local, metadata, unspecified and
+    /// multicast addresses are refused.
+    #[must_use]
+    pub fn with_upstream_policy(mut self, policy: UpstreamPolicy) -> Self {
+        self.upstream_policy = policy;
+        self
+    }
+
+    /// Refuses the connection to `selected.upstream` unless the upstream address policy lets the
+    /// app's tenant dial it. `upstream_peer` calls this before anything is dialled, so it also
+    /// covers addresses the compiler never saw.
+    ///
+    /// # Errors
+    ///
+    /// A `502` error (and one count in `podgate_upstream_refused_total{tenant}`) when the policy
+    /// refuses the address; an internal error when the route points outside `table`.
+    pub fn check_upstream(&self, table: &RoutingTable, selected: &Selected) -> pingora::Result<()> {
+        let app = table
+            .app(selected.app)
+            .ok_or_else(|| Error::explain(InternalError, "route points outside the table"))?;
+        self.upstream_policy
+            .check(app.tenant(), selected.upstream.ip())
+            .map_err(|refused| {
+                Error::because(
+                    HTTPStatus(502),
+                    "upstream address refused by policy",
+                    refused,
+                )
+            })
     }
 
     /// Runs the router's middleware chain on the request. `true` when a middleware answered it.
@@ -425,6 +460,8 @@ impl ProxyHttp for Gateway {
         let selected = ctx
             .route
             .ok_or_else(|| Error::explain(InternalError, "upstream_peer without a route"))?;
+        // The one place a proxied request dials: every address, whatever produced it, is checked.
+        self.check_upstream(&ctx.table, &selected)?;
         let mut peer = HttpPeer::new(selected.upstream, false, String::new());
         peer.options.connection_timeout = Some(self.upstream_timeout);
         peer.options.read_timeout = Some(self.upstream_timeout);

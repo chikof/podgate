@@ -16,6 +16,7 @@ use pingora::http::RequestHeader;
 use pingora::proxy::Session;
 
 use crate::router::path::{self, Refused};
+use crate::service::upstream_policy::UpstreamPolicy;
 
 /// The built-in plain HTTP entry point.
 pub const WEB: &str = "web";
@@ -27,6 +28,7 @@ pub const WEBSECURE: &str = "websecure";
 pub struct CompileContext {
     entry_points: Vec<Box<str>>,
     catch_all_tenants: Vec<Box<str>>,
+    upstream_policy: UpstreamPolicy,
 }
 
 impl Default for CompileContext {
@@ -43,6 +45,7 @@ impl CompileContext {
         Self {
             entry_points: names.into_iter().map(Box::from).collect(),
             catch_all_tenants: Vec::new(),
+            upstream_policy: UpstreamPolicy::allow_all(),
         }
     }
 
@@ -56,6 +59,21 @@ impl CompileContext {
     ) -> Self {
         self.catch_all_tenants = tenants.into_iter().map(Box::from).collect();
         self
+    }
+
+    /// Checks the literal server addresses of every service against `policy` (`upstream_forbidden`).
+    /// `run` always installs the operator's policy; a context without one refuses nothing, which
+    /// is for tests and tools that compile snapshots outside a running process.
+    #[must_use]
+    pub fn with_upstream_policy(mut self, policy: UpstreamPolicy) -> Self {
+        self.upstream_policy = policy;
+        self
+    }
+
+    /// The policy the compiler checks literal server addresses against.
+    #[must_use]
+    pub fn upstream_policy(&self) -> &UpstreamPolicy {
+        &self.upstream_policy
     }
 
     /// Whether the operator allows `tenant` catch-all routers on shared entry points.

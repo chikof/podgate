@@ -283,7 +283,7 @@ struct Family {
 }
 
 /// A label value with `\`, `"` and newline escaped, as the exposition format requires.
-struct Escaped<'a>(&'a str);
+pub(crate) struct Escaped<'a>(pub(crate) &'a str);
 
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
