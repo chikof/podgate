@@ -19,7 +19,8 @@
 //! `request_filter` runs, in this order (`GET /v1/explain` reports it, see [`crate::pipeline`]):
 //! the ACME challenge answer, path normalization and the forwarded-header view, the route match, the SNI check, the failure
 //! capture start, the router's middleware chain, then the backend selection (where a request for
-//! a sleeping app waits), in-flight admission, tenant admission and backend admission (where a
+//! a sleeping app waits), the chain's `routed` hooks (the response cache answers a hit here,
+//! before any slot is taken), in-flight admission, tenant admission and backend admission (where a
 //! request waits when its upstream is at its limit). The chain runs before any slot is taken or
 //! app woken, so unauthenticated or rate-limited traffic costs the tenant nothing. A request
 //! refused by admission is never recorded as a failure. `response_filter` and
@@ -57,6 +58,7 @@ use pingora::upstreams::peer::HttpPeer;
 
 use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
+use crate::cache::{self, Cache};
 use crate::client_ip::ForwardedView;
 use crate::clientauth;
 use crate::compress::{self, Encoder};
@@ -67,7 +69,7 @@ use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::forwarded;
 use crate::inflight::{Inflight, InflightGuard};
-use crate::middleware::{self, Flow, RequestCx, errors};
+use crate::middleware::{self, Flow, RequestCx, RoutedCx, errors};
 use crate::observe::access_log::{self, AccessLog};
 use crate::observe::metrics;
 use crate::observe::tracing as trace;
@@ -173,6 +175,7 @@ pub struct Gateway {
     tracer: trace::Tracer,
     page_fetcher: errors::fetch::Fetcher,
     node: Option<HeaderValue>,
+    cache: Cache,
 }
 
 impl Gateway {
@@ -201,6 +204,7 @@ impl Gateway {
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
             node: None,
+            cache: Cache::new(),
         }
     }
 
@@ -311,6 +315,13 @@ impl Gateway {
         self
     }
 
+    /// Stores responses in `cache`, the registry the admin API's purge and metrics share.
+    #[must_use]
+    pub fn with_cache(mut self, cache: Cache) -> Self {
+        self.cache = cache;
+        self
+    }
+
     /// Refuses the connection to `selected.upstream` unless the upstream address policy lets the
     /// app's tenant dial it. `upstream_peer` calls this before anything is dialled, so it also
     /// covers addresses the compiler never saw.
@@ -365,6 +376,47 @@ impl Gateway {
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
         ctx.chain_answered = flow == Flow::Respond;
         Ok(ctx.chain_answered)
+    }
+
+    /// Runs the chain's routed hooks, once a revision and server are chosen and before any
+    /// admission. `true` when one answered the request.
+    async fn run_routed(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        matched: Matched,
+        selected: &Selected,
+        tls: bool,
+    ) -> pingora::Result<bool> {
+        let table = Arc::clone(&ctx.table);
+        let Some((app, router)) = table.router(matched) else {
+            return Ok(false);
+        };
+        if !middleware::has_routed(app.stages(), router.chain()) {
+            return Ok(false);
+        }
+        let tenant = table
+            .tenant_budget(app.tenant())
+            .map(|limits| self.budgets.tenant(app.tenant(), limits));
+        let entry_point = Arc::clone(&ctx.entry_point);
+        let mut cx = RoutedCx {
+            session,
+            table: &table,
+            app,
+            selected,
+            forwarded: &ctx.forwarded,
+            tls,
+            entry_point: &entry_point,
+            tenant: tenant.as_ref(),
+            cache: &self.cache,
+            original: None,
+        };
+        let flow =
+            middleware::run_routed(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
+        if flow == Flow::Respond {
+            ctx.chain_answered = true;
+        }
+        Ok(flow == Flow::Respond)
     }
 
     /// Tells the router's middleware chain the request is over.
@@ -480,13 +532,23 @@ impl ProxyHttp for Gateway {
         }
     }
 
+    /// The response cache revalidates through a subrequest (`cache::refresh`).
+    fn allow_spawning_subrequest(&self, _session: &Session, _ctx: &Ctx) -> bool {
+        true
+    }
+
     async fn request_filter(&self, session: &mut Session, ctx: &mut Ctx) -> pingora::Result<bool> {
+        // A cache refresh subrequest has no connection of its own: it carries what the request
+        // that spawned it knew, and skips the checks that read the client's connection.
+        let inherited = cache::refresh::inherited(session);
         // Before routing: a validation request names a host that may have no route yet.
-        if acme::serve_challenge(session, &ctx.table).await? {
+        if inherited.is_none() && acme::serve_challenge(session, &ctx.table).await? {
             return Ok(true);
         }
         // Before matching: the path that is matched is the path that is served.
-        let tls = entry::is_tls(session);
+        let tls = inherited
+            .as_ref()
+            .map_or_else(|| entry::is_tls(session), |inherited| inherited.tls);
         if let Err(refused) = entry::normalize_request(session.req_header_mut()) {
             let err = AppError::BadRequest(refused.to_string().into());
             respond::write_error(session, &err).await?;
@@ -494,8 +556,13 @@ impl ProxyHttp for Gateway {
         }
         // Whatever the route: no client-supplied certificate header ever reaches an upstream.
         middleware::pass_tls_client_cert::strip(session.req_header_mut());
-        ctx.forwarded =
-            ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point));
+        ctx.forwarded = match &inherited {
+            Some(inherited) => {
+                ctx.entry_point = Arc::clone(&inherited.entry_point);
+                inherited.forwarded.clone()
+            }
+            None => ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point)),
+        };
         let found = route::matching(
             &ctx.table,
             session.req_header(),
@@ -505,7 +572,9 @@ impl ProxyHttp for Gateway {
         );
         // Right after matching and before anything answers: a misdirected request gets `421`
         // whether or not a router matched, and the matched app decides fronting.
-        if let Err(err) = sni::check(session, &ctx.table, found) {
+        if inherited.is_none()
+            && let Err(err) = sni::check(session, &ctx.table, found)
+        {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
@@ -517,7 +586,9 @@ impl ProxyHttp for Gateway {
         }
         // Right after the match: the app the router really belongs to decides whether a client
         // certificate is required, however the router matched (exact host, regexp, no host).
-        if let Err(err) = clientauth::admit(session, &ctx.table, found) {
+        if inherited.is_none()
+            && let Err(err) = clientauth::admit(session, &ctx.table, found)
+        {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }
@@ -595,6 +666,14 @@ impl ProxyHttp for Gateway {
                 app.static_site(selected.revision, selected.router)
                     .is_some()
             });
+            // The revision and server are chosen: a middleware may answer from its own store
+            // before any slot is taken. The lease drops with the answer.
+            if self
+                .run_routed(session, ctx, matched, &selected, tls)
+                .await?
+            {
+                return Ok(true);
+            }
             if let Some(guard) = self.inflight.admit(&ctx.table, &selected) {
                 match self
                     .wake

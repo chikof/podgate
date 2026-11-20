@@ -84,6 +84,7 @@ const _: () =
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
+/// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -140,6 +141,9 @@ pub struct Config {
     pub static_roots_file: Option<PathBuf>,
     /// File-system operations static services run at once, across all tenants.
     pub static_max_concurrent_reads: NonZeroUsize,
+    /// Percent of a tenant's `max_buffer_bytes` its response cache may hold at most
+    /// (`CACHE_TENANT_MAX_PERCENT`), 1..=100.
+    pub cache_tenant_max_percent: u8,
 }
 
 impl Default for Config {
@@ -166,6 +170,7 @@ impl Default for Config {
             otel: ExportConfig::default(),
             static_roots_file: None,
             static_max_concurrent_reads: default_static_reads(),
+            cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
         }
     }
 }
@@ -404,6 +409,17 @@ impl Config {
             }
             config.static_max_concurrent_reads = reads;
         }
+        if let Some(raw) = lookup("CACHE_TENANT_MAX_PERCENT") {
+            config.cache_tenant_max_percent = raw
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|percent| (1..=100).contains(percent))
+                .ok_or_else(|| ConfigError {
+                    var: "CACHE_TENANT_MAX_PERCENT",
+                    reason: format!("{raw:?} is not a whole number in 1..=100").into(),
+                })?;
+        }
         let non_empty = |var: &'static str| match lookup(var) {
             Some(raw) if raw.trim().is_empty() => Err(ConfigError {
                 var,
@@ -499,6 +515,7 @@ mod test {
             ("METRICS_SERIES_PER_TENANT", "50"),
             ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
+            ("CACHE_TENANT_MAX_PERCENT", "40"),
         ]);
         assert_eq!(
             parsed,
@@ -526,6 +543,7 @@ mod test {
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
+                cache_tenant_max_percent: 40,
             })
         );
     }
@@ -555,6 +573,9 @@ mod test {
             ("STATIC_MAX_CONCURRENT_READS", "0"),
             ("STATIC_MAX_CONCURRENT_READS", "257"),
             ("STATIC_ROOTS_FILE", " "),
+            ("CACHE_TENANT_MAX_PERCENT", "0"),
+            ("CACHE_TENANT_MAX_PERCENT", "101"),
+            ("CACHE_TENANT_MAX_PERCENT", "half"),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
             ("ACME_DNS_ZONES", " "),

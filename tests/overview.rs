@@ -514,6 +514,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"users": [format!("alice:podgate:{ha1}")], "realm": "podgate"}),
         ),
         (
+            "cache",
+            json!({"default_ttl_secs": 30, "tag_header": "Cache-Tag"}),
+        ),
+        (
             "circuit_breaker",
             json!({"trip_when": {"network_error_ratio": 0.3}}),
         ),
@@ -665,6 +669,7 @@ async fn overview_redacts_secrets() {
     let document: Value = serde_json::from_str(&bodies[0]).expect("JSON");
     let a = app_of(&document, "a");
     assert_eq!(a["tls"]["client_auth"], true);
+
     assert_eq!(
         a["routers"][0]["match"]["all"][1],
         json!({"header": {"name": "x-0", "value": "[value]"}})

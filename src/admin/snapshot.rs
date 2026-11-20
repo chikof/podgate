@@ -56,6 +56,7 @@ async fn put_snapshot(
     .map_err(|err| AppError::Internal(err.into()))??;
     state.inflight().sync(&state.table().load());
     state.failures().retain_apps(&state.table().load());
+    state.cache().retain(&state.table().load());
     state
         .reverter()
         .applied(&replaced, snapshot.revert_window_secs);

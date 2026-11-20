@@ -19,6 +19,7 @@ use tower_http::timeout::TimeoutLayer;
 
 use super::{CONTENT_TYPE as TEXT_FORMAT, render};
 use crate::budget::Budgets;
+use crate::cache::Cache;
 use crate::error::AppError;
 use crate::fairq::Backends;
 use crate::observe::access_log::AccessLog;
@@ -53,6 +54,8 @@ pub struct Sources {
     pub access_log: AccessLog,
     /// The trace queue and rate cap counters.
     pub tracer: Tracer,
+    /// The response cache's series.
+    pub cache: Cache,
 }
 
 /// Serves `GET /metrics` on a bound TCP listener. Run it as a Pingora background service.
@@ -100,6 +103,7 @@ async fn scrape(State(sources): State<Arc<Sources>>) -> impl IntoResponse {
             &sources.upstream_policy,
             &sources.access_log,
             &sources.tracer,
+            &sources.cache,
         ),
     )
 }

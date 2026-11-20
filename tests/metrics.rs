@@ -514,6 +514,7 @@ fn render(table: &TableHandle) -> String {
         &UpstreamPolicy::builtin(),
         &AccessLog::new(),
         &Tracer::default(),
+        &podgate::Cache::new(),
     )
 }
 

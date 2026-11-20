@@ -234,7 +234,15 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut parts = Vec::with_capacity(snapshot.apps.len());
     let mut rings = RingBudget::default();
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
-        let stages = stages_of(app, app_routers, &mut engine, &mut rejected);
+        let limits = crate::cache::Limits {
+            tenant_budget: snapshot
+                .tenants
+                .iter()
+                .find(|tenant| tenant.id == app.tenant)
+                .map_or(0, |tenant| tenant.budget.max_buffer_bytes),
+            max_percent: context.cache_tenant_max_percent(),
+        };
+        let stages = stages_of(app, app_routers, &mut engine, limits, &mut rejected);
         let max_buffer_bytes = snapshot
             .tenants
             .iter()
@@ -611,6 +619,7 @@ fn stages_of(
     app: &App,
     routers: &mut [CompiledRouter],
     engine: &mut engine::Compiler,
+    limits: crate::cache::Limits,
     rejected: &mut Vec<Rejected>,
 ) -> Vec<middleware::Named> {
     let mut stages: Vec<middleware::Named> = Vec::new();
@@ -633,7 +642,15 @@ fn stages_of(
             }
             continue;
         }
-        match Stage::compile(declared, &mut CompileCx { app, engine }) {
+        let compiled =
+            Stage::compile(declared, &mut CompileCx { app, engine }).and_then(|mut stage| {
+                // The one kind whose limits depend on the tenant's budget and the operator.
+                if let middleware::Stage::Cache(cache) = &mut stage {
+                    cache.bind(limits)?;
+                }
+                Ok(stage)
+            });
+        match compiled {
             Ok(stage) => {
                 index.insert(&declared.name, stages.len());
                 texts.push(Value::Object(declared.config.clone()).to_string() + &declared.kind);

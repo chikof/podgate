@@ -6,6 +6,7 @@
 //! adds one `.merge(<module>::routes())` line to [`router`]. Handlers return
 //! `Result<_, AppError>` so every error is `{"error": "..."}`.
 
+mod cache;
 mod events;
 mod explain;
 mod failures;
@@ -39,6 +40,7 @@ use tower_http::trace::TraceLayer;
 
 use self::writer::Writer;
 use crate::budget::Budgets;
+use crate::cache::Cache;
 use crate::entry::EntryPoint;
 use crate::error::AppError;
 use crate::events::EventFeed;
@@ -61,6 +63,7 @@ pub struct AppState {
     inflight: Inflight,
     budgets: Budgets,
     backends: Backends,
+    cache: Cache,
     failures: Failures,
     upstream_policy: UpstreamPolicy,
     access_log: AccessLog,
@@ -93,6 +96,7 @@ impl AppState {
             budgets: Budgets::new(),
             backends: Backends::new(),
             failures: Failures::new(),
+            cache: Cache::new(),
             upstream_policy: UpstreamPolicy::builtin(),
             access_log: AccessLog::new(),
             tracer: Tracer::default(),
@@ -140,6 +144,19 @@ impl AppState {
     pub fn with_budgets(mut self, budgets: Budgets) -> Self {
         self.budgets = budgets;
         self
+    }
+
+    /// Purges and reports `cache`, the response cache the proxy fills.
+    #[must_use]
+    pub fn with_cache(mut self, cache: Cache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// The response cache `POST /v1/cache/purge` clears and `GET /metrics` reports.
+    #[must_use]
+    pub fn cache(&self) -> &Cache {
+        &self.cache
     }
 
     /// The per-tenant budget registry `GET /metrics` reports.
@@ -290,7 +307,7 @@ async fn not_found() -> AppError {
 /// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`,
 /// `POST /v1/snapshot/validate`, `GET /v1/snapshot/version`, `GET /v1/schema`,
 /// `GET /v1/events`, `GET /v1/explain`, `GET /v1/overview`, `GET /v1/apps/{app}/failures`,
-/// `POST /v1/apps/{app}/failures/{id}/replay`;
+/// `POST /v1/apps/{app}/failures/{id}/replay`, `POST /v1/cache/purge`;
 /// anything else is a JSON 404.
 ///
 /// Middleware, outermost first:
@@ -314,6 +331,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(schema::routes())
         .merge(validate::routes())
         .merge(writer::routes())
+        .merge(cache::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)

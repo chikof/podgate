@@ -43,6 +43,7 @@
 pub mod acme;
 pub mod admin;
 pub mod budget;
+pub mod cache;
 pub mod canary;
 pub mod client_ip;
 pub mod clientauth;
@@ -92,6 +93,7 @@ use tracing_subscriber::EnvFilter;
 pub use acme::Acme;
 pub use admin::{AdminService, AppState};
 pub use budget::Budgets;
+pub use cache::Cache;
 pub use canary::CanaryService;
 pub use config::{Config, ConfigError, LogFormat};
 pub use conflict::Conflict;
@@ -127,6 +129,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
             .with_acme_dns_zones(config.acme_dns_zones.iter().map(AsRef::as_ref))
+            .with_cache_tenant_max_percent(config.cache_tenant_max_percent)
             .with_upstream_policy(upstream_policy.clone())
             .with_tls_floor(config.tls_min_version)
             .with_static_roots(static_roots),
@@ -137,6 +140,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
     let budgets = Budgets::new();
+    let cache = Cache::new();
     let wake = Wake::new(events.clone());
     let outcomes = Outcomes::new();
     let acme = Acme::new(
@@ -165,6 +169,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let failures = Failures::new();
     let gateway = Gateway::new(table.clone(), inflight.clone(), timeout)
         .with_budgets(budgets.clone())
+        .with_cache(cache.clone())
         .with_backends(backends.clone())
         .with_failures(failures.clone())
         .with_wake(wake.clone())
@@ -235,6 +240,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     upstream_policy: upstream_policy.clone(),
                     access_log: access_log.clone(),
                     tracer: tracer.clone(),
+                    cache: cache.clone(),
                 },
                 timeout,
             ),
@@ -270,6 +276,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             admin_listener,
             AppState::new(table, events, inflight)
                 .with_budgets(budgets)
+                .with_cache(cache)
                 .with_backends(backends)
                 .with_failures(failures)
                 .with_access_log(access_log)

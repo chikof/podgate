@@ -230,6 +230,7 @@ pub struct CompileContext {
     bound: Vec<(Box<str>, Protocol)>,
     catch_all_tenants: Vec<Box<str>>,
     acme_dns_zones: Vec<Box<str>>,
+    cache_tenant_max_percent: u8,
     upstream_policy: UpstreamPolicy,
     tls_floor: TlsVersion,
     static_roots: StaticRoots,
@@ -253,6 +254,7 @@ impl CompileContext {
                 .collect(),
             catch_all_tenants: Vec::new(),
             acme_dns_zones: Vec::new(),
+            cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
             upstream_policy: UpstreamPolicy::allow_all(),
             tls_floor: TlsVersion::V1_2,
             static_roots: StaticRoots::default(),
@@ -289,6 +291,21 @@ impl CompileContext {
     #[must_use]
     pub fn acme_dns_zones(&self) -> &[Box<str>] {
         &self.acme_dns_zones
+    }
+
+    /// The most a tenant's response cache may hold, in percent of its `max_buffer_bytes`: the
+    /// upper limit for any `cache` middleware's `max_bytes`.
+    #[must_use]
+    pub fn cache_tenant_max_percent(&self) -> u8 {
+        self.cache_tenant_max_percent
+    }
+
+    /// Limits every `cache` middleware to `percent` of its tenant's `max_buffer_bytes`. Only the
+    /// operator calls this (`CACHE_TENANT_MAX_PERCENT`); a snapshot never can.
+    #[must_use]
+    pub fn with_cache_tenant_max_percent(mut self, percent: u8) -> Self {
+        self.cache_tenant_max_percent = percent;
+        self
     }
 
     /// Checks the literal server addresses of every service against `policy` (`upstream_forbidden`).

@@ -26,7 +26,9 @@
 //!    wake a sleeping app.
 //! 8. `select`: revision (skew cookie, canary, weights), service and server; `wake_hold` when a
 //!    `scale_to_zero` app has none.
-//! 9. `inflight_admit`, `tenant_admit`, `backend_admit`.
+//! 9. `routed`: the chain's middlewares that answer once the revision is chosen (the `cache`
+//!    answers a hit here), before any slot is taken.
+//! 10. `inflight_admit`, `tenant_admit`, `backend_admit`.
 
 use serde_json::{Value, json};
 
@@ -78,6 +80,16 @@ pub fn describe(app: &CompiledApp, router: &CompiledRouter, tls: bool) -> Vec<Va
     stages.push(stage("select"));
     if app.scale_to_zero().is_some() {
         stages.push(stage("wake_hold"));
+    }
+    for index in router.chain() {
+        let Some(named) = app.stages().get(*index) else {
+            continue;
+        };
+        if crate::middleware::has_routed(app.stages(), &[*index]) {
+            stages.push(json!({
+                "stage": "routed", "middleware": named.name, "type": named.stage.kind(),
+            }));
+        }
     }
     stages.push(stage("inflight_admit"));
     stages.push(stage("tenant_admit"));

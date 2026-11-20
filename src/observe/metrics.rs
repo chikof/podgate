@@ -22,6 +22,7 @@ mod table;
 mod text;
 
 use crate::budget::Budgets;
+use crate::cache::Cache;
 use crate::fairq::Backends;
 use crate::observe::access_log::AccessLog;
 use crate::observe::tracing::Tracer;
@@ -51,6 +52,7 @@ pub fn render(
     upstream_policy: &UpstreamPolicy,
     access_log: &AccessLog,
     tracer: &Tracer,
+    cache: &Cache,
 ) -> String {
     let live = table.load();
     let mut out = budgets.render(&live);
@@ -58,6 +60,7 @@ pub fn render(
     out.push_str(&upstream_policy.render());
     out.push_str(&access_log.render());
     out.push_str(&tracer.render());
+    out.push_str(&cache.render());
     out.push_str(&crate::service::outlier::render(&live));
     crate::middleware::pass_tls_client_cert::render(&mut out);
     crate::forwarded::render(&mut out);

@@ -29,18 +29,21 @@ use pingora::proxy::Session;
 use serde_json::Value;
 
 use crate::budget::TenantBudget;
+use crate::cache::Cache;
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
 use crate::error::AppError;
 use crate::events::EventFeed;
+use crate::route::Selected;
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::table::CompiledApp;
+use crate::table::{CompiledApp, RoutingTable};
 use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
 pub mod basic_auth;
 pub mod buffering;
+pub mod cache;
 pub mod circuit_breaker;
 pub mod compress;
 pub mod content_type;
@@ -101,6 +104,32 @@ pub struct RequestCx<'a> {
     pub events: &'a EventFeed,
     /// The bounded pool for password verifications (`basic_auth`).
     pub hashing: &'a basic_auth::Pool,
+}
+
+/// What a routed hook sees: the request after the middleware chain's request hooks, with its
+/// revision and server chosen and no admission taken yet.
+pub struct RoutedCx<'a> {
+    /// The downstream session: request head, body and the response writer.
+    pub session: &'a mut Session,
+    /// The table the request is served from.
+    pub table: &'a RoutingTable,
+    /// The app the request was matched to.
+    pub app: &'a CompiledApp,
+    /// The router, revision and server chosen for the request.
+    pub selected: &'a Selected,
+    /// What the request's peer is trusted to say: scheme, host, port and client address.
+    pub forwarded: &'a ForwardedView,
+    /// Whether the connection the request arrived on is TLS.
+    pub tls: bool,
+    /// The entry point the request arrived on.
+    pub entry_point: &'a Arc<str>,
+    /// The tenant's budget, to charge memory before allocating.
+    pub tenant: Option<&'a Arc<TenantBudget>>,
+    /// The response cache registry (see [`crate::cache`]).
+    pub cache: &'a Cache,
+    /// The request head as it arrived, before any middleware changed it. Set only when the chain
+    /// has a stage that needs it (`cache`, to replay the request as a subrequest).
+    pub original: Option<RequestHeader>,
 }
 
 /// What a finished request looks like to [`Kind::finished`].
@@ -169,6 +198,22 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     fn request(
         &self,
         _cx: &mut RequestCx<'_>,
+        _state: &mut Self::State,
+    ) -> impl Future<Output = pingora::Result<Flow>> + Send {
+        std::future::ready(Ok(Flow::Continue))
+    }
+
+    /// Runs once the request's revision and server are chosen and before any in-flight slot or
+    /// backend admission is taken, in chain order. May answer the request ([`Flow::Respond`]):
+    /// the choice is dropped and nothing is charged. A request the proxy routes again (its
+    /// revision drained) runs this hook again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the response cannot be written.
+    fn routed(
+        &self,
+        _cx: &mut RoutedCx<'_>,
         _state: &mut Self::State,
     ) -> impl Future<Output = pingora::Result<Flow>> + Send {
         std::future::ready(Ok(Flow::Continue))
@@ -385,6 +430,21 @@ macro_rules! kinds {
                 }
             }
 
+            async fn routed(
+                &self,
+                cx: &mut $crate::middleware::RoutedCx<'_>,
+                state: &mut StageState,
+            ) -> pingora::Result<$crate::middleware::Flow> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::routed(kind, cx, state).await
+                        }
+                    )*
+                    _ => Ok($crate::middleware::Flow::Continue),
+                }
+            }
+
             fn upstream_request(
                 &self,
                 request: &mut pingora::http::RequestHeader,
@@ -534,6 +594,8 @@ kinds! {
 
     "buffering" => Buffering(buffering::Buffering),
 
+    "cache" => Cache(cache::Cache),
+
     "compress" => Compress(compress::Compress),
 
     "errors" => Errors(errors::Errors),
@@ -615,6 +677,7 @@ pub struct Named {
 #[derive(Debug, Default)]
 pub struct State {
     stages: Vec<StageState>,
+    original: Option<RequestHeader>,
 }
 
 /// Runs the request hooks of `chain` (indices into `stages`), in order, until one answers.
@@ -638,6 +701,7 @@ pub async fn run_request(
             .filter_map(|index| stages.get(*index))
             .map(|named| named.stage.new_state()),
     );
+    state.original = has_routed(stages, chain).then(|| cx.session.req_header().clone());
     for (position, index) in chain.iter().enumerate() {
         let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) else {
             continue;
@@ -647,6 +711,47 @@ pub async fn run_request(
         }
     }
     Ok(Flow::Continue)
+}
+
+/// Whether any stage of `chain` has a routed hook: only those kinds are listed here, so a
+/// request through a chain without one pays nothing for the hook.
+#[must_use]
+pub fn has_routed(stages: &[Named], chain: &[usize]) -> bool {
+    chain.iter().any(|index| {
+        matches!(
+            stages.get(*index),
+            Some(Named {
+                stage: Stage::Cache(_),
+                ..
+            })
+        )
+    })
+}
+
+/// Runs the routed hooks of `chain` in order, until one answers.
+///
+/// # Errors
+///
+/// The first error a hook returns.
+pub async fn run_routed(
+    stages: &[Named],
+    chain: &[usize],
+    cx: &mut RoutedCx<'_>,
+    state: &mut State,
+) -> pingora::Result<Flow> {
+    cx.original = state.original.take();
+    let mut flow = Flow::Continue;
+    for (position, index) in chain.iter().enumerate() {
+        let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) else {
+            continue;
+        };
+        if named.stage.routed(cx, slot).await? == Flow::Respond {
+            flow = Flow::Respond;
+            break;
+        }
+    }
+    state.original = cx.original.take();
+    Ok(flow)
 }
 
 /// Runs the upstream-request hooks of `chain` on the request head going to the upstream.
