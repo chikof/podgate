@@ -1,5 +1,13 @@
 [advisories]
 yanked = "deny"
+# Unmaintained (not vulnerable) crates that only pingora 0.9 pulls in; no podgate code uses them and no
+# upgrade exists. Drop each line when pingora replaces the crate. Change 0001 Decisions.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono via pingora-core" },
+  { id = "RUSTSEC-2024-0388", reason = "derivative via pingora-core, pingora-load-balancing" },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile via pingora-rustls" },
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml via pingora-core" },
+]
 
 [licenses]
 # The allow list covers common permissive licenses before the deps use them; don't warn on unused entries.

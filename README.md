@@ -43,4 +43,4 @@ scripts/release.sh            # bump version, regenerate CHANGELOG.md with git-c
 
 ## License
 
-No license is included. Add a `LICENSE` file and set `license` in `Cargo.toml`.
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
