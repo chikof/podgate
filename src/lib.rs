@@ -7,6 +7,7 @@
 //! - [`Config`]: settings read from environment variables.
 //! - [`Snapshot`]: the JSON model of a pushed snapshot.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
+//! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
@@ -19,6 +20,7 @@ pub mod host;
 pub mod proxy;
 pub mod respond;
 pub mod route;
+pub mod sni;
 pub mod snapshot;
 pub mod table;
 pub mod tls;

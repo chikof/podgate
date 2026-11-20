@@ -127,6 +127,7 @@ pub struct CompiledApp {
     id: Box<str>,
     tenant: Box<str>,
     declared_by: Box<str>,
+    allow_domain_fronting: bool,
     revisions: Box<[CompiledRevision]>,
     next_revision: AtomicU64,
 }
@@ -146,9 +147,16 @@ impl CompiledApp {
             id: app.id.clone(),
             tenant: app.tenant.clone(),
             declared_by: app.declared_by.clone(),
+            allow_domain_fronting: app.allow_domain_fronting,
             revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
             next_revision: AtomicU64::new(0),
         }
+    }
+
+    /// Whether a TLS request may name a host other than its SNI.
+    #[must_use]
+    pub fn allow_domain_fronting(&self) -> bool {
+        self.allow_domain_fronting
     }
 
     /// The app id.
@@ -363,6 +371,7 @@ mod test {
                 client_ca_pem: None,
             },
             revisions,
+            allow_domain_fronting: false,
         }
     }
 

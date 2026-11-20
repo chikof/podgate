@@ -13,6 +13,7 @@ use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
 use crate::host::{self, HostMap, HostPattern};
+use crate::sni;
 use crate::snapshot::Certificate;
 use crate::table::TableHandle;
 
@@ -109,7 +110,7 @@ impl ResolvesServerCert for SniResolver {
 /// Fails when Pingora rejects the settings.
 pub fn listener_settings(table: TableHandle) -> pingora::Result<TlsSettings> {
     // Pingora ignores the file paths once a resolver is set.
-    let mut settings = TlsSettings::intermediate("", "")?;
+    let mut settings = TlsSettings::with_callbacks(Box::new(sni::CaptureServerName))?;
     settings.set_cert_resolver(Arc::new(SniResolver { table }));
     settings.enable_h2();
     Ok(settings)

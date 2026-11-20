@@ -23,6 +23,7 @@ use pingora::upstreams::peer::HttpPeer;
 use crate::error::AppError;
 use crate::respond;
 use crate::route::{self, Selected};
+use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
 
 /// State of one proxied request, created by [`Gateway::new_ctx`] and passed to every callback.
@@ -69,6 +70,11 @@ impl ProxyHttp for Gateway {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Ctx) -> pingora::Result<bool> {
+        // Before routing: a misdirected request learns nothing about the route it named.
+        if let Err(err) = sni::check(session, &ctx.table) {
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
         match route::resolve(&ctx.table, session.req_header()) {
             Ok(selected) => {
                 ctx.route = Some(selected);

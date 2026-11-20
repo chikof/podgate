@@ -16,6 +16,9 @@ pub enum AppError {
     /// The request is malformed: `400 Bad Request`.
     #[error("{0}")]
     BadRequest(Box<str>),
+    /// A TLS request names a host other than its SNI: `421 Misdirected Request`.
+    #[error("misdirected request")]
+    Misdirected,
     /// No such route or resource: `404 Not Found`.
     #[error("not found")]
     NotFound,
@@ -39,6 +42,7 @@ impl AppError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Misdirected => StatusCode::MISDIRECTED_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,

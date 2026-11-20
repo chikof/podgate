@@ -58,6 +58,10 @@ pub struct App {
     pub tls: TlsPolicy,
     /// Deployed revisions, split by weight and state.
     pub revisions: Vec<Revision>,
+    /// Serve TLS requests whose `Host` differs from the SNI. Absent: refuse them
+    /// with `421`.
+    #[serde(default)]
+    pub allow_domain_fronting: bool,
 }
 
 /// How an app gets certificates, plus optional client authentication.

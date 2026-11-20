@@ -1680,6 +1680,8 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "h2",
+ "http",
  "pingora",
  "rcgen",
  "rustls",

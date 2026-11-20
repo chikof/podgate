@@ -17,10 +17,12 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/proxy.rs` | `Gateway` (the Pingora `ProxyHttp`) and the per-request `Ctx`. |
 | `src/respond.rs` | `write_error`: answers a proxied request with an `AppError`. |
 | `src/tls.rs` | `CertStore` (certificates of a snapshot) and the TLS listener settings that choose the certificate by SNI per handshake. |
+| `src/sni.rs` | The TLS check that a request's `Host` and `:authority` equal the connection's SNI: `CaptureServerName` (handshake hook that records the SNI on the connection) and `check`, called first in `request_filter`. |
 | `src/admin.rs` | The admin router (`router`), `AppState`, the unix socket (`bind`, mode `0600`) and `AdminService`, a Pingora background service. |
 | `src/admin/*.rs` | One module per endpoint group, each with `fn routes() -> Router<AppState>`: `health.rs`, `snapshot.rs`. |
 | `tests/common/mod.rs` | Test harness: `Podgate::start()` spawns the built binary on free ports with a temp admin socket; `push_snapshot`, `get`, `https_get`; `Upstream::start(body)`; `TestCert`; snapshot builders. Include with `mod common;`. |
 | `tests/proxy.rs` | End-to-end tests through the real binary. New features add their own `tests/<feature>.rs`. |
+| `tests/sni.rs` | SNI against Host: 421 on mismatch over HTTP/1.1 and HTTP/2 (including `:scheme http`), the `allow_domain_fronting` opt-in, matching hosts served. |
 | `Dockerfile`, `.dockerignore` | Multi-stage image on distroless. |
 
 ### Adding a feature
@@ -50,6 +52,8 @@ The control plane sends `PUT /v1/snapshot` with a JSON snapshot. Entities:
 |`Revision`|`id`, `upstreams` (socket addresses), `weight` (u16), `state` (`serving`, `retiring` or `draining`)|
 
 `Snapshot` also takes an optional `certificates` list (`hosts`, `cert_pem`, `key_pem`), served on the TLS listener by SNI; change 0014 fills it from ACME. Later specs add optional fields to these entities. An absent optional field means the feature is off.
+
+`App` also takes an optional `allow_domain_fronting` (bool, default `false`). By default a TLS request whose `Host` or `:authority` differs from the SNI of its connection is refused with `421 {"error":"misdirected request"}` before routing; the app the request names decides, so `true` on the target app lets it through. The SNI is read from the connection's TLS state, never from the request scheme, so an HTTP/2 request with `:scheme http` is checked too. A TLS connection with no SNI is treated as a mismatch. Plain HTTP is not checked.
 
 ### Compile and swap
 
@@ -107,6 +111,7 @@ Proxy listeners (`PROXY_ADDR`, `PROXY_TLS_ADDR`): a request is routed by its `Ho
 | the upstream's response | the host has a route |
 | `404 {"error":"not found"}` | no app claims the host, or the request has no host; also before the first snapshot |
 | `503 {"error":"no upstream available"}` | the app has no `serving` revision with a positive weight and a backend |
+| `421 {"error":"misdirected request"}` | a TLS request names a host other than its SNI and the app it names does not set `allow_domain_fronting` |
 | Pingora's `502`/`504` | the upstream refuses, resets or times out |
 
 Admin API (unix socket `ADMIN_SOCKET`; only the PaaS agent on the node connects):
