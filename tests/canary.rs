@@ -163,6 +163,19 @@ async fn events_of(podgate: &Podgate, kind: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The `canary_regressed` events once at least one is out (or after 5 s): `judge` sets the
+/// verdict explain shows a moment before it emits the event.
+async fn regressed_events(podgate: &Podgate) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = events_of(podgate, "canary_regressed").await;
+        if !events.is_empty() || Instant::now() > deadline {
+            return events;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Polls `explain` until `done` accepts it; panics after `secs`.
 async fn wait_until(podgate: &Podgate, secs: u64, done: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -398,7 +411,7 @@ async fn canary_reset_on_snapshot() {
     })
     .await;
     load.stop().await;
-    assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
+    assert_eq!(regressed_events(&podgate).await.len(), 1);
 
     // A newer snapshot that changes the canary policy starts over from one step, with a healthy
     // canary.
@@ -496,7 +509,7 @@ async fn canary_survives_unrelated_push() {
     })
     .await;
     load.stop().await;
-    assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
+    assert_eq!(regressed_events(&podgate).await.len(), 1);
 
     // The canary recovers on its own, which must not matter: the verdict stands. Pushes that
     // only change another app leave it at 0.
@@ -598,7 +611,7 @@ async fn canary_survives_upstream_scale_out() {
     })
     .await;
     load.stop().await;
-    assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
+    assert_eq!(regressed_events(&podgate).await.len(), 1);
 
     // The baseline scales out, twice: only its upstream list changes.
     canary.set(200);
