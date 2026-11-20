@@ -10,10 +10,12 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Podgate, Response, app, router, service, serving, snapshot, with_middleware};
+use common::{
+    Podgate, Response, app, refused, router, service, serving, snapshot, with_middleware,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 /// What a test server answers with.
@@ -154,17 +156,6 @@ async fn pages() -> Server {
     .await
 }
 
-/// An address that refuses connections: a bound socket that never listens. The socket must
-/// outlive the test, or the port could be handed to someone else.
-fn refusing() -> (TcpSocket, SocketAddr) {
-    let socket = TcpSocket::new_v4().expect("socket");
-    socket
-        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("bind");
-    let addr = socket.local_addr().expect("addr");
-    (socket, addr)
-}
-
 /// An app answering `host`, proxying to `upstream`, with a service `pages` at `pages` and an
 /// `errors` middleware `e` configured by `errors`.
 fn site(id: &str, host: &str, upstream: SocketAddr, pages: SocketAddr, errors: Value) -> Value {
@@ -246,7 +237,8 @@ async fn errors_leaves_other_statuses() {
 #[tokio::test]
 async fn errors_covers_gateway_errors() {
     let podgate = Podgate::start().await;
-    let (dead, dead_addr) = refusing();
+    let dead = refused();
+    let dead_addr = dead.addr;
     let pages = pages().await;
     let config = json!({"status": ["502"], "service": "pages"});
     let covered = site("a", "a.test", dead_addr, pages.addr, config);
@@ -374,7 +366,8 @@ async fn errors_failure_keeps_original() {
     let failing = Server::start(|_| http(500, &[], "page broke")).await;
     let slow =
         Server::start(|_| Reply::Delay(Duration::from_secs(6), raw(200, &[], "too late"))).await;
-    let (dead, dead_addr) = refusing();
+    let dead = refused();
+    let dead_addr = dead.addr;
     let config = |secs: u64| json!({"status": ["503"], "service": "pages", "timeout_secs": secs});
     let apps = [
         site("a", "a.test", up.addr, failing.addr, config(3)),
@@ -805,4 +798,148 @@ async fn respond_invalid_rejected() {
     let limit =
         json!({"status": 200, "headers": {"x-ok": "a b\tc;q=1"}, "body": "x".repeat(64 * 1024)});
     push(&podgate, &snapshot(99, &[closing(up.addr, limit)])).await;
+}
+
+/// A certificate authority and what it issues, for a page server that speaks TLS.
+struct Pki {
+    issuer: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
+}
+
+impl Pki {
+    fn new() -> Self {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let issuer = rcgen::CertifiedIssuer::self_signed(
+            params,
+            rcgen::KeyPair::generate().expect("CA key"),
+        )
+        .expect("CA");
+        Self { issuer }
+    }
+
+    /// A certificate for `names` signed by this CA: its PEM and its key's PEM.
+    fn issue(&self, names: &[&str]) -> (String, String) {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let params = rcgen::CertificateParams::new(
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .expect("params");
+        let cert = params.signed_by(&key, &self.issuer).expect("sign");
+        (cert.pem(), key.serialize_pem())
+    }
+}
+
+/// A TLS page server that insists on a client certificate from `pki` and says in its page which
+/// server name and client certificate it saw.
+async fn tls_pages(pki: &Pki, server: (String, String)) -> SocketAddr {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(pki.issuer.pem().as_bytes()).expect("CA DER"))
+        .expect("trust the CA");
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::clone(&provider),
+    )
+    .build()
+    .expect("client verifier");
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(server.0.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("chain");
+    let key = PrivateKeyDer::from_pem_slice(server.1.as_bytes()).expect("key");
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(chain, key)
+        .expect("server config");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let (_, connection) = stream.get_ref();
+                let page = format!(
+                    "tls page sni={} client={}",
+                    connection.server_name().unwrap_or("none"),
+                    connection
+                        .peer_certificates()
+                        .is_some_and(|chain| !chain.is_empty())
+                );
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                drop(stream.write_all(&raw(200, &[], &page)).await);
+                drop(stream.shutdown().await);
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn errors_page_over_tls_uses_the_transport() {
+    let podgate = Podgate::start().await;
+    let up = upstream().await;
+    let pki = Pki::new();
+    let addr = tls_pages(&pki, pki.issue(&["127.0.0.1", "pages.internal"])).await;
+    let client = pki.issue(&[]);
+    let services = json!([{
+        "name": "pages", "type": "loadbalancer", "servers": [{"url": format!("https://{addr}")}],
+        "transport": "t",
+    }, {
+        "name": "plain", "type": "loadbalancer", "servers": [{"url": format!("https://{addr}")}],
+    }]);
+    let transports = json!([{
+        "name": "t", "type": "servers_transport", "server_name": "pages.internal",
+        "ca_pem": pki.issuer.pem(),
+        "client_cert": {"cert_pem": client.0, "key_pem": client.1},
+    }]);
+    let with = |id: &str, host: &str, service: &str| {
+        let mut app = app(id, &[host], &[serving("r1", up.addr)]);
+        app["services"] = services.clone();
+        app["transports"] = transports.clone();
+        with_middleware(
+            app,
+            "e",
+            "errors",
+            json!({"status": ["503"], "service": service}),
+        )
+    };
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[with("a", "a.test", "pages"), with("b", "b.test", "plain")],
+        ),
+    )
+    .await;
+
+    // The private CA, the server name and the client certificate of the service's transport.
+    let page = podgate.get("a.test", "/boom").await;
+    assert_eq!(page.status, 503);
+    assert_eq!(page.body, "tls page sni=pages.internal client=true");
+    // A service with no transport trusts only the platform roots: the handshake fails and the
+    // original response stays.
+    let kept = podgate.get("b.test", "/boom").await;
+    assert_eq!((kept.status, kept.body.as_str()), (503, "upstream down"));
 }
