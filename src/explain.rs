@@ -18,6 +18,7 @@ use crate::host;
 use crate::pipeline;
 use crate::router::{Candidate, View, path};
 use crate::service::TransportSummary;
+use crate::service::outlier;
 use crate::table::RoutingTable;
 
 /// What a caller asks about: a request as the proxy would see it.
@@ -165,6 +166,9 @@ struct ServerView<'a> {
     url: &'a str,
     weight: u32,
     available: bool,
+    /// Milliseconds until passive outlier ejection ends; absent when the server is not ejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ejected_for_ms: Option<u64>,
     /// How an `https://` server is reached; the client certificate shows as `[redacted]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<TransportSummary<'a>>,
@@ -312,6 +316,9 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
                                 url: &server.url,
                                 weight: server.weight,
                                 available: server.available(),
+                                ejected_for_ms: outlier::ejected_for(server).map(|left| {
+                                    u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
+                                }),
                                 transport: service
                                     .upstream(server.addr)
                                     .and_then(|upstream| upstream.summary()),

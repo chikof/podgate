@@ -64,6 +64,7 @@ use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
 use crate::service::Lease;
+use crate::service::outlier;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::skew;
 use crate::sni;
@@ -574,6 +575,7 @@ impl ProxyHttp for Gateway {
 
     async fn logging(&self, session: &mut Session, error: Option<&Error>, ctx: &mut Ctx) {
         self.failures.log(session, ctx);
+        outlier::observe(session, error, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
         self.finish_chain(session, error, ctx);
         access_log::log(self.access_log.as_ref(), session, ctx);

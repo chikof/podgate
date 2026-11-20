@@ -14,8 +14,9 @@
 //!
 //! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
 //! (`state.rs`, see [`state`]), upstream transports (`transport.rs`: the TLS settings of the
-//! connection to a server), active health checks (`health.rs`, see [`health`]) and, empty until
-//! their specs land, passive outlier ejection (`outlier.rs`), sticky cookies (`sticky.rs`) and DNS
+//! connection to a server), active health checks (`health.rs`, see [`health`]), passive outlier
+//! ejection (`outlier.rs`, see [`outlier`]) and, empty until their specs land, sticky cookies
+//! (`sticky.rs`) and DNS
 //! upstreams (`resolve.rs`). [`upstream_policy`] is built: the operator's rule for which
 //! addresses a tenant's servers may have, checked by the compiler and before every connection.
 //!

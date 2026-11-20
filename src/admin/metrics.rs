@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 
 use super::AppState;
+use crate::service::outlier;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new().route("/metrics", get(metrics))
@@ -23,7 +24,8 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
             + &state.backends().render()
             + &state.upstream_policy().render()
             + &state.access_log().render()
-            + &crate::service::health::render(&table),
+            + &crate::service::health::render(&table)
+            + &outlier::render(&table),
     )
 }
 

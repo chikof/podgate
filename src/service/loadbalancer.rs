@@ -11,11 +11,10 @@
 //! [`super::lb`]); only `weighted_round_robin` takes server weights, and a weight of `0` there
 //! means the server receives nothing. An `https://` server is reached through the service's
 //! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
-//! `health_check` probes the servers ([`super::health`]), and a service declares at most 256
-//! servers. Planned fields (`passive`, `sticky`, a `false` `pass_host_header`), planned
-//! algorithms and `h2c://` servers are refused with `service_not_built`; a server named by host
-//! name is
-//! `dns_upstream_not_built`.
+//! `health_check` probes the servers ([`super::health`]), `passive` ejects servers that fail real
+//! requests ([`super::outlier`]), and a service declares at most 256 servers. Planned fields
+//! (`sticky`, a `false` `pass_host_header`), planned algorithms and `h2c://` servers are refused
+//! with `service_not_built`; a server named by host name is `dns_upstream_not_built`.
 //!
 //! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
 //! the service (its turn counter) is in [`super::state`], outside the table, so a push that
@@ -30,6 +29,7 @@ use serde_json::Value;
 
 use super::health::{self, Check};
 use super::lb::{Balancer, PickCx};
+use super::outlier::Passive;
 use super::state::{self, Lease, ServerState, ServiceState};
 use super::transport::{self, Transport, Upstream};
 use crate::compile::Invalid;
@@ -97,6 +97,7 @@ pub struct LoadBalancer {
     fingerprint: u64,
     transport: Arc<Transport>,
     health: Option<Arc<Check>>,
+    passive: Option<Passive>,
 }
 
 fn not_built(what: &str) -> Invalid {
@@ -170,9 +171,7 @@ impl LoadBalancer {
                 ),
             ));
         }
-        if config.passive.is_some() {
-            return Err(not_built("passive"));
-        }
+        let passive = config.passive.as_ref().map(Passive::compile).transpose()?;
         if config.sticky.is_some() {
             return Err(not_built("sticky"));
         }
@@ -217,6 +216,7 @@ impl LoadBalancer {
             fingerprint: state::fingerprint(declared),
             transport,
             health,
+            passive,
         })
     }
 
@@ -224,6 +224,12 @@ impl LoadBalancer {
     #[must_use]
     pub fn servers(&self) -> &[Server] {
         &self.servers
+    }
+
+    /// The `passive` outlier detection setting, if the service has one.
+    #[must_use]
+    pub fn passive(&self) -> Option<&Passive> {
+        self.passive.as_ref()
     }
 
     /// The name of the algorithm.
