@@ -559,18 +559,12 @@ async fn errors_body_charged_to_tenant() {
     let mut pushed = snapshot(
         1,
         &[
-            with("a", "default.test", None),
             with("b", "small.test", Some(8192)),
             with("c", "slow.test", Some(40_000)),
         ],
     );
     pushed["tenants"][0]["budget"]["max_buffer_bytes"] = json!(100 * 1024);
     push(&podgate, &pushed).await;
-
-    // The default cap (256 KiB) cannot be charged: the original response stays, nothing is fetched.
-    let kept = podgate.get("default.test", "/boom").await;
-    assert_eq!((kept.status, kept.body.as_str()), (503, "upstream down"));
-    assert_eq!(slow_pages.requests(), 0, "no fetch without a charge");
 
     // 8 KiB plus the allowance is charged while the page is held.
     let small = podgate.get("small.test", "/boom").await;
@@ -942,4 +936,47 @@ async fn errors_page_over_tls_uses_the_transport() {
     // original response stays.
     let kept = podgate.get("b.test", "/boom").await;
     assert_eq!((kept.status, kept.body.as_str()), (503, "upstream down"));
+}
+
+#[tokio::test]
+async fn errors_cap_over_tenant_budget_rejected() {
+    let podgate = Podgate::start().await;
+    let (up, pages) = (upstream().await, pages().await);
+    let site_with = |extra: Value| {
+        let mut config = json!({"status": ["503"], "service": "pages"});
+        config.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
+        site("a", "a.test", up.addr, pages.addr, config)
+    };
+    let with_budget = |version: u64, bytes: u64, app: Value| {
+        let mut pushed = snapshot(version, &[app]);
+        pushed["tenants"][0]["budget"]["max_buffer_bytes"] = json!(bytes);
+        pushed
+    };
+
+    // The default cap (256 KiB) plus the 16 KiB allowance never fits 100 KiB: refused, with the
+    // numbers, instead of silently never serving a page.
+    let refused = podgate
+        .push_snapshot(&with_budget(1, 100 * 1024, site_with(json!({}))))
+        .await;
+    let entry = rejection(&refused);
+    assert_eq!(entry["code"], "invalid_middleware", "{entry}");
+    assert_eq!(entry["app"], "a");
+    assert_eq!(entry["needed_bytes"], 256 * 1024 + 16 * 1024, "{entry}");
+    assert_eq!(entry["max_buffer_bytes"], 100 * 1024, "{entry}");
+    assert_eq!(entry["tenant"], "t1", "{entry}");
+    let message = entry["message"].as_str().expect("message");
+    assert!(message.contains("t1") && message.contains("102400"), "{message}");
+
+    // Exactly the budget fits; a budget that is merely busy later keeps the original response.
+    let needed = 8192 + 16 * 1024;
+    push(
+        &podgate,
+        &with_budget(2, needed, site_with(json!({"max_body_bytes": 8192}))),
+    )
+    .await;
+    assert_eq!(podgate.get("a.test", "/boom").await.body, "<h1>page for /503.html</h1>");
+    let refused = podgate
+        .push_snapshot(&with_budget(3, needed - 1, site_with(json!({"max_body_bytes": 8192}))))
+        .await;
+    assert_eq!(rejection(&refused)["code"], "invalid_middleware");
 }

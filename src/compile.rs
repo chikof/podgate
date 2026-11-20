@@ -235,6 +235,22 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut rings = RingBudget::default();
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let stages = stages_of(app, app_routers, &mut engine, &mut rejected);
+        let max_buffer_bytes = snapshot
+            .tenants
+            .iter()
+            .find(|tenant| tenant.id == app.tenant)
+            .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes);
+        for named in &stages {
+            if let Stage::Errors(errors) = &named.stage
+                && let Err(invalid) = errors.check_budget(&app.tenant, max_buffer_bytes)
+            {
+                rejected.push(Rejected::new(
+                    app,
+                    format!("middleware {}", named.name),
+                    invalid,
+                ));
+            }
+        }
         let transports = transports_of(app, &mut rejected);
         let services = services_of(
             app,
@@ -245,11 +261,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             Limits {
                 statics: StaticCx {
                     roots: context.static_roots().of(&app.tenant),
-                    max_buffer_bytes: snapshot
-                        .tenants
-                        .iter()
-                        .find(|tenant| tenant.id == app.tenant)
-                        .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
+                    max_buffer_bytes,
                 },
                 rings: &mut rings,
             },

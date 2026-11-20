@@ -275,6 +275,27 @@ fn check_target(app: &App, target: &Target) -> Result<(), Invalid> {
 }
 
 impl Errors {
+    /// Refuses a page that could never be charged: the cap plus [`ALLOWANCE`] is more than the
+    /// tenant's whole `max_buffer_bytes`. A budget that is only full right now is not judged
+    /// here; the page is skipped when its charge is refused.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_middleware` naming the tenant, the bytes a page needs and the budget.
+    pub(crate) fn check_budget(&self, tenant: &str, max_buffer_bytes: u64) -> Result<(), Invalid> {
+        let needed = ALLOWANCE.saturating_add(u64::try_from(self.max_body).unwrap_or(u64::MAX));
+        if max_buffer_bytes >= needed {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "tenant {tenant} has max_buffer_bytes {max_buffer_bytes}, below the {needed} bytes one error page reserves (max_body_bytes {} plus {ALLOWANCE}); lower max_body_bytes or raise the budget",
+            self.max_body
+        ))
+        .with("tenant", tenant)
+        .with("needed_bytes", needed)
+        .with("max_buffer_bytes", max_buffer_bytes))
+    }
+
     fn matches(&self, status: u16) -> bool {
         self.statuses.iter().any(|range| range.contains(&status))
     }
