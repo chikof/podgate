@@ -17,11 +17,11 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 parses them (startup stops naming the entry point), 0058, 0062 |
 | `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | built: X-Forwarded-For, -Proto, -Host, -Port and X-Real-IP by default (Traefik's set minus -Server, which is `forwarded.server: true`); `forwarded.rfc7239` adds `Forwarded`; forged inbound values of untrusted peers are removed |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
-| HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | 0030 |
-| Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | 0030 (each knob works or is rejected as `unsupported_setting`) |
-| HTTP/2 stream limit, max header size | `http2.maxConcurrentStreams`, `http.maxHeaderBytes` | `max_header_size`, `protocols` | 0030 (same rule) |
-| Underscore and alias header names | `aliasHeadersStrategy`, `underscoreHeadersStrategy` | none | 0030 (`underscore_headers`) |
-| Encoded characters policy | `http.encodedCharacters` | none | built (normalization and refusal of encoded slashes, NUL, encoded dot segments), 0030 (`allow_encoded_slash` opt-in) |
+| HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | built: `redirect {to, permanent}`, `302`/`301` for `GET` and `307`/`308` for other methods, as Traefik, default not permanent |
+| Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | built: `write_secs`, `idle_secs`, and `read_secs` on plain entry points; `header_secs`, and `read_secs` on a TLS entry point, are `unsupported_setting` (Pingora 0.9) |
+| HTTP/2 stream limit, max header size | `http2.maxConcurrentStreams`, `http.maxHeaderBytes` | `max_header_size`, `protocols` | built: `http2.max_concurrent_streams` on TLS entry points, `max_header_bytes` up to 1048575 |
+| Underscore and alias header names | `aliasHeadersStrategy`, `underscoreHeadersStrategy` | none | built: `underscore_headers` `keep` (default), `delete`, `reject` |
+| Encoded characters policy | `http.encodedCharacters` | none | built (normalization and refusal of encoded slashes, NUL, encoded dot segments), built: `allow_encoded_slash` accepts `%2F` only, kept inside its segment |
 | Graceful shutdown | `transport.lifeCycle` | `grace_period` | built (`REQUEST_TIMEOUT_SECS`, SIGTERM) |
 | HTTP/3 and QUIC | `http3` | default | 0086 (a QUIC front inside the process, per-connection and per-tenant memory budgets; no mTLS or WebSockets over h3) |
 
@@ -85,7 +85,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
 | Add and strip prefix, replace path (and regexp) | `addPrefix`, `stripPrefix*`, `replacePath*` | `uri`, `rewrite`, `handle_path` | built: `src/middleware/{add_prefix,strip_prefix,strip_prefix_regex,replace_path,replace_path_regex}.rs`; `strip_prefix` strips whole segments, every result is re-normalized (no `//` authority, no dot segments, an encoded slash is a `500`), regexes are linear time with groups checked at compile |
-| Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | built: `301`/`302` as the pinned Traefik sends; the Location is refused on control characters (also escaped), other schemes and userinfo; a `redirect_scheme` removal is a plan posture change |
+| Redirect scheme and regexp | `redirectScheme`, `redirectRegex` | `redir` | built: `302`/`301` for `GET` and `307`/`308` for other methods (`middleware::redirect::status_for`), measured on the pinned Traefik 3.7.16; the Location is refused on control characters (also escaped), other schemes and userinfo; a `redirect_scheme` removal is a plan posture change |
 | Custom headers, security headers | `headers` | `header`, `request_header` | built: `src/middleware/headers.rs`; framing headers cannot be set; HSTS only over TLS |
 | CORS | in `headers` | plugin | built: exact origins or anchored regexes, never reflected; `*` with credentials refused |
 | Content type sniffing | `contentType` | none | built: never sniffs; `auto_detect: true` refused |
