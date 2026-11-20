@@ -103,12 +103,27 @@ fn get_request(host: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
 }
 
+/// `count` distinct free loopback ports.
+///
+/// All probes stay bound until every port is chosen: probing one at a time released each port
+/// before the next probe, and the kernel can hand the same port out twice in a row.
+fn free_ports(count: usize) -> Vec<u16> {
+    let probes: Vec<std::net::TcpListener> = (0..count)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port"))
+        .collect();
+    probes
+        .iter()
+        .map(|probe| probe.local_addr().expect("local addr").port())
+        .collect()
+}
+
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind free port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+    free_ports(1)[0]
+}
+
+fn free_port_pair() -> (u16, u16) {
+    let ports = free_ports(2);
+    (ports[0], ports[1])
 }
 
 /// Starts of `podgate` tried before the harness gives up; see [`Podgate::wait_until_ready`].
@@ -190,7 +205,7 @@ impl Podgate {
             let ports = first_proxy_port
                 .filter(|_| attempt == 0)
                 .map(|proxy| (proxy, free_port()))
-                .unwrap_or_else(|| (free_port(), free_port()));
+                .unwrap_or_else(free_port_pair);
             match Self::try_start(extra_env, ports, &[], false).await {
                 Ok(podgate) => return podgate,
                 Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
@@ -224,7 +239,7 @@ impl Podgate {
     pub async fn start_logged(extra_env: &[(&str, &str)]) -> Self {
         let mut failures = Vec::new();
         for attempt in 0..START_ATTEMPTS {
-            let ports = (free_port(), free_port());
+            let ports = free_port_pair();
             match Self::try_start(extra_env, ports, &[], true).await {
                 Ok(podgate) => return podgate,
                 Err(reason) => failures.push(format!("attempt {}: {reason}", attempt + 1)),
@@ -256,7 +271,7 @@ impl Podgate {
         exchange(&mut stream, &get_request(host, path)).await
     }
 
-    async fn try_start(
+    pub async fn try_start(
         extra_env: &[(&str, &str)],
         ports: (u16, u16),
         entries: &[(&str, &str)],
@@ -284,11 +299,9 @@ impl Podgate {
         } else {
             let listeners: Vec<(String, SocketAddr)> = entries
                 .iter()
-                .map(|(name, _)| {
-                    (
-                        (*name).to_owned(),
-                        SocketAddr::from(([127, 0, 0, 1], free_port())),
-                    )
+                .zip(free_ports(entries.len()))
+                .map(|((name, _), port)| {
+                    ((*name).to_owned(), SocketAddr::from(([127, 0, 0, 1], port)))
                 })
                 .collect();
             let list: Vec<String> = entries
@@ -299,6 +312,19 @@ impl Podgate {
             command.env("ENTRY_POINTS", list.join(","));
             listeners
         };
+        // Two entry points on one port: the bind of one retries while the other holds it, and the
+        // ownership check in [`Self::wait_until_ready`] passes for both, so a request lands on either.
+        let mut taken = std::collections::HashSet::new();
+        if let Some((name, addr)) = listeners
+            .iter()
+            .find(|(_, addr)| !taken.insert(addr.port()))
+        {
+            drop(std::fs::remove_dir_all(&dir));
+            return Err(format!(
+                "entry point {name} shares port {} with another",
+                addr.port()
+            ));
+        }
         let first_of = |wanted: &str| {
             entries
                 .iter()

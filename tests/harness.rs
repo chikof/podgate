@@ -41,3 +41,21 @@ async fn harness_start_ignores_a_squatted_port() {
     assert_eq!(response.status, 200, "{response:?}");
     assert_eq!(response.body, "upstream body");
 }
+
+/// Two `free_port()` probes in a row can return the same port, because the first one is released
+/// before the second runs. With `PROXY_ADDR` and `PROXY_TLS_ADDR` equal, one listener wins the
+/// bind and the other retries for 30 s. The ownership check passed for both (the pid does listen
+/// on the port), so `get` sometimes reached the TLS listener and read a TLS alert.
+#[tokio::test]
+async fn harness_start_rejects_two_listeners_on_one_port() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind probe")
+        .local_addr()
+        .expect("addr")
+        .port();
+    let result = Podgate::try_start(&[], (port, port), &[], false).await;
+    assert!(
+        result.is_err(),
+        "the harness started podgate with both listeners on port {port}"
+    );
+}
