@@ -40,6 +40,7 @@ pub mod buffering;
 pub mod circuit_breaker;
 pub mod compress;
 pub mod content_type;
+pub mod digest_auth;
 pub mod headers;
 mod path_rewrite;
 pub mod redirect;
@@ -464,7 +465,7 @@ kinds! {
 
     "basic_auth" => BasicAuth(basic_auth::BasicAuth),
 
-    "digest_auth" => unbuilt,
+    "digest_auth" => DigestAuth(digest_auth::DigestAuth),
 
     "forward_auth" => unbuilt,
 

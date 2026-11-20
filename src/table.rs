@@ -835,6 +835,8 @@ pub struct TableHandle {
     breakers: Arc<crate::middleware::circuit_breaker::Registry>,
     // Failure counters and credential cache of `basic_auth`; touched only by `swap`.
     basic_auth: Arc<middleware::basic_auth::Registry>,
+    // Nonce secret, replay table and failure counters of `digest_auth`; touched only by `swap`.
+    digest_auth: Arc<middleware::digest_auth::Registry>,
     // The entry points this process bound; fixed for the life of the handle.
     context: Arc<CompileContext>,
 }
@@ -966,6 +968,7 @@ impl TableHandle {
         self.states.settle(&mut table.apps);
         self.breakers.settle(&mut table.apps);
         self.basic_auth.settle(&mut table.apps);
+        self.digest_auth.settle(&mut table.apps);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);

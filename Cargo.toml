@@ -35,6 +35,7 @@ hmac = "0.13.0"
 http = "1.5.0"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "time", "x509-parser", "rcgen"] }
 ipnet = "2.12.2"
+md-5 = "0.11.0"
 miniz_oxide = "0.9.1"
 pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
@@ -45,6 +46,7 @@ ruzstd = "0.9.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
