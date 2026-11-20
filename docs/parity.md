@@ -93,9 +93,9 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Digest auth | `digestAuth` | none | built: `src/middleware/digest_auth.rs`; SHA-256 and MD5 by HA1 length, qop=auth only, stateless HMAC nonces, bounded charged nc table, state kept across pushes; Authorization stripped upstream by default |
 | Forward auth | `forwardAuth` | `forward_auth` | 0048 (fail closed) |
 | IP allow list | `ipAllowList` | `remote_ip` plus `respond` | built |
-| Rate limit | `rateLimit` | plugin | 0050 (bounded table, per node) |
+| Rate limit | `rateLimit` | plugin | built: `src/middleware/rate_limit.rs`; per node, bounded table charged to the tenant; the control plane divides a global limit by the node count |
 | Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | 0094 (Redis-compatible store, per-route `on_store_error: allow` with local fallback, or `deny`) |
-| In-flight request limit | `inFlightReq` | none | 0050 (per node), 0102 (cluster-wide with leases) |
+| In-flight request limit | `inFlightReq` | none | built (per node); 0102 (cluster-wide with leases) |
 | Circuit breaker | `circuitBreaker` (expression) | none | built: `src/middleware/circuit_breaker.rs`; structured `trip_when`, no expression language; `min_requests` floor |
 | Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | built: memory only, charged to `max_buffer_bytes` (no `mem_*`, no disk spill); `buffer_request` holds a body of at most 64 KiB before the upstream request starts; response limits need `buffer_response`; a chunked response over its limit is reset, not a `502` (Pingora sends the head first) |
 | Compression | `compress` (gzip, brotli, zstd) | `encode` | built (gzip 0009; gzip, brotli, zstd 0053, pure Rust, bounded; `min_bytes` not applied to unknown-length bodies) |
