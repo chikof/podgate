@@ -253,11 +253,15 @@ mod test {
     #[test]
     fn posture_lists_only_relaxations_of_existing_hosts() {
         let ca = |pem: &str| json!({"tls": {"mode": "acme", "client_ca_pem": pem}});
+        let (ca1, ca2) = (
+            crate::clientauth::test_ca_pem("ca1"),
+            crate::clientauth::test_ca_pem("ca2"),
+        );
         let live = table(
             1,
             &[
-                app("drop", &["drop.test"], 1, &ca("CA1")),
-                app("swap", &["swap.test"], 2, &ca("CA1")),
+                app("drop", &["drop.test"], 1, &ca(&ca1)),
+                app("swap", &["swap.test"], 2, &ca(&ca1)),
                 app("front", &["front.test"], 3, &json!({})),
                 app("lazy", &["lazy.test"], 4, &json!({})),
                 app(
@@ -272,7 +276,7 @@ mod test {
             2,
             &[
                 app("drop", &["drop.test"], 1, &json!({})),
-                app("swap", &["swap.test"], 2, &ca("CA2")),
+                app("swap", &["swap.test"], 2, &ca(&ca2)),
                 app(
                     "front",
                     &["front.test"],
@@ -285,7 +289,7 @@ mod test {
                     4,
                     &json!({"tls": {"mode": "on_demand"}}),
                 ),
-                app("tight", &["tight.test"], 5, &ca("CA1")),
+                app("tight", &["tight.test"], 5, &ca(&ca1)),
                 app(
                     "fresh",
                     &["fresh.test"],

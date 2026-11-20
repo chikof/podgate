@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::canary;
+use crate::clientauth;
 use crate::conflict::Conflict;
 use crate::route::RouteError;
 use crate::table::{ApplyError, CompileError};
@@ -22,6 +23,10 @@ pub enum AppError {
     /// A TLS request names a host other than its SNI: `421 Misdirected Request`.
     #[error("misdirected request")]
     Misdirected,
+    /// The app requires a client certificate and the connection presented none that its CA
+    /// accepts: `403 Forbidden`.
+    #[error("client certificate required")]
+    ClientCertRequired,
     /// No such route or resource: `404 Not Found`.
     #[error("not found")]
     NotFound,
@@ -63,6 +68,7 @@ impl AppError {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Misdirected => StatusCode::MISDIRECTED_REQUEST,
+            Self::ClientCertRequired => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -139,6 +145,10 @@ fn rejection(err: &CompileError) -> Vec<Value> {
         }
 
         CompileError::Acme(_) => other("invalid_acme"),
+        CompileError::ClientCa(rejections) => rejections
+            .iter()
+            .map(clientauth::Rejection::to_json)
+            .collect(),
     }
 }
 

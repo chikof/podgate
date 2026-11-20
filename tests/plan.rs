@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Podgate, Upstream, app, serving, snapshot};
+use common::{Podgate, TestCa, Upstream, app, serving, snapshot};
 use serde_json::{Value, json};
 
 fn with(mut app: Value, extra: &Value) -> Value {
@@ -89,12 +89,13 @@ async fn plan_posture_changes() {
     let podgate = Podgate::start().await;
     let up = Upstream::start("up").await;
     let ca = |pem: &str| json!({ "tls": { "mode": "acme", "client_ca_pem": pem } });
+    let (ca1, ca2) = (TestCa::new("ca1").pem, TestCa::new("ca2").pem);
     let rev = [serving("r1", up.addr)];
     let live = snapshot(
         1,
         &[
-            with(app("drop", &["drop.test"], &rev), &ca("CA1")),
-            with(app("swap", &["swap.test"], &rev), &ca("CA1")),
+            with(app("drop", &["drop.test"], &rev), &ca(&ca1)),
+            with(app("swap", &["swap.test"], &rev), &ca(&ca1)),
             app("front", &["front.test"], &rev),
             app("lazy", &["lazy.test"], &rev),
             with(
@@ -109,7 +110,7 @@ async fn plan_posture_changes() {
         2,
         &[
             app("drop", &["drop.test"], &rev),
-            with(app("swap", &["swap.test"], &rev), &ca("CA2")),
+            with(app("swap", &["swap.test"], &rev), &ca(&ca2)),
             with(
                 app("front", &["front.test"], &rev),
                 &json!({ "allow_domain_fronting": true }),
@@ -118,7 +119,7 @@ async fn plan_posture_changes() {
                 app("lazy", &["lazy.test"], &rev),
                 &json!({ "tls": { "mode": "on_demand" } }),
             ),
-            with(app("tight", &["tight.test"], &rev), &ca("CA1")),
+            with(app("tight", &["tight.test"], &rev), &ca(&ca1)),
             with(
                 app("fresh", &["fresh.test"], &rev),
                 &json!({ "allow_domain_fronting": true }),

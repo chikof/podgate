@@ -15,6 +15,9 @@
 //! A TLS connection with no recorded SNI is refused unless the app allows fronting. The
 //! listener's certificate resolver already aborts handshakes without SNI; this keeps the check
 //! closed on its own.
+//!
+//! The same handshake callback records the client certificate chain the connection presented,
+//! for [`crate::clientauth`].
 
 use std::any::Any;
 use std::sync::Arc;
@@ -24,17 +27,19 @@ use pingora::listeners::TlsAccept;
 use pingora::protocols::tls::TlsRef;
 use pingora::proxy::Session;
 
+use crate::clientauth::ClientChain;
 use crate::error::AppError;
 use crate::host;
 use crate::route;
 use crate::table::RoutingTable;
 
-/// The SNI a TLS connection negotiated, normalized like a request host. Stored in the
-/// connection's `SslDigest` extension by [`CaptureServerName`].
+/// What a TLS connection negotiated, stored in the connection's `SslDigest` extension by
+/// [`CaptureServerName`]: the SNI, normalized like a request host, and the client's chain.
 #[derive(Debug)]
-struct NegotiatedServerName(Option<Box<str>>);
+struct NegotiatedServerName(Option<Box<str>>, Option<ClientChain>);
 
-/// Handshake hook that records the SNI on the connection for [`check`].
+/// Handshake hook that records the SNI and the client certificate chain on the connection for
+/// [`check`] and [`crate::clientauth::admit`].
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureServerName;
 
@@ -47,8 +52,24 @@ impl TlsAccept for CaptureServerName {
         let name = ssl
             .server_name()
             .map(|name| Box::from(&*host::normalize(name)));
-        Some(Arc::new(NegotiatedServerName(name)))
+        Some(Arc::new(NegotiatedServerName(
+            name,
+            ClientChain::new(ssl.peer_cert_chain_der()),
+        )))
     }
+}
+
+/// The client certificate chain of the session's TLS connection; `None` on plain HTTP and when
+/// the client sent no certificate.
+pub(crate) fn client_chain(session: &Session) -> Option<&ClientChain> {
+    session
+        .digest()?
+        .ssl_digest
+        .as_ref()?
+        .extension
+        .get::<NegotiatedServerName>()?
+        .1
+        .as_ref()
 }
 
 /// Refuses a TLS request whose host differs from the connection's SNI.

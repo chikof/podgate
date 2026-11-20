@@ -1,5 +1,6 @@
 //! The TLS listener: certificates come from the live snapshot and are chosen by SNI per
-//! handshake, so a pushed certificate serves new connections without a restart.
+//! handshake, so a pushed certificate serves new connections without a restart. The same SNI
+//! decides whether the client is asked for a certificate (see [`crate::clientauth`]).
 
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use pingora::tls::{
 use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
+use crate::clientauth::{self, HandshakeVerifier};
 use crate::host::{self, HostMap, HostPattern};
 use crate::snapshot::Certificate;
 use crate::sni;
@@ -89,7 +91,8 @@ fn parse_certified_key(certificate: &Certificate) -> Result<CertifiedKey, String
 }
 
 /// Picks the certificate of the live routing table for each handshake. No SNI or no matching
-/// certificate aborts the handshake.
+/// certificate aborts the handshake. Also tells the client verifier whether this SNI belongs to
+/// an app with a client CA.
 #[derive(Debug)]
 struct SniResolver {
     table: TableHandle,
@@ -98,7 +101,13 @@ struct SniResolver {
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let name = client_hello.server_name()?;
-        self.table.load().certificates().lookup(name)
+        let table = self.table.load();
+        clientauth::decide(
+            table
+                .find_app(&host::normalize(name))
+                .is_some_and(|(_, app)| app.client_auth().is_some()),
+        );
+        table.certificates().lookup(name)
     }
 }
 
@@ -112,6 +121,7 @@ pub fn listener_settings(table: TableHandle) -> pingora::Result<TlsSettings> {
     // Pingora ignores the file paths once a resolver is set.
     let mut settings = TlsSettings::with_callbacks(Box::new(sni::CaptureServerName))?;
     settings.set_cert_resolver(Arc::new(SniResolver { table }));
+    settings.set_client_cert_verifier(Arc::new(HandshakeVerifier::new()));
     settings.enable_h2();
     Ok(settings)
 }

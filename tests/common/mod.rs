@@ -424,3 +424,84 @@ pub fn simple_snapshot(version: u64, routes: &[(&str, SocketAddr)]) -> Value {
         .collect();
     snapshot(version, &apps)
 }
+
+/// A certificate authority that signs client certificates, for specs that need mutual TLS.
+pub struct TestCa {
+    issuer: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
+    /// The CA certificate, PEM: the value of `tls.client_ca_pem`.
+    pub pem: String,
+}
+
+/// A client certificate chain and its key.
+pub struct TestClient {
+    /// Certificate chain, leaf first.
+    pub chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    /// The leaf's private key.
+    pub key: rustls::pki_types::PrivateKeyDer<'static>,
+}
+
+impl TestCa {
+    /// Generates a CA whose common name is `name`.
+    pub fn new(name: &str) -> Self {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, name);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let issuer = rcgen::CertifiedIssuer::self_signed(
+            params,
+            rcgen::KeyPair::generate().expect("CA key"),
+        )
+        .expect("self-signed CA");
+        let pem = issuer.pem();
+        Self { issuer, pem }
+    }
+
+    /// A client certificate with common name `common_name`, signed by this CA.
+    pub fn client(&self, common_name: &str) -> TestClient {
+        let key = rcgen::KeyPair::generate().expect("client key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .expect("sign client certificate");
+        TestClient {
+            chain: vec![cert.der().clone()],
+            key: rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+        }
+    }
+}
+
+impl Podgate {
+    /// `GET path` on the HTTPS listener with a caller-built client `config`: TLS handshake with
+    /// `sni` as server name, then `Host: host`. Unlike [`Self::https_get`] it returns the I/O
+    /// error of a refused handshake, or of a connection the server closed without answering.
+    pub async fn try_https_get(
+        &self,
+        config: Arc<rustls::ClientConfig>,
+        sni: &str,
+        host: &str,
+        path: &str,
+    ) -> std::io::Result<Response> {
+        let name = rustls::pki_types::ServerName::try_from(sni.to_owned()).expect("server name");
+        timeout(IO_TIMEOUT, async {
+            let tcp = TcpStream::connect(self.tls_addr).await?;
+            let mut stream = TlsConnector::from(config).connect(name, tcp).await?;
+            stream.write_all(get_request(host, path).as_bytes()).await?;
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).await?;
+            if raw.is_empty() {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            Ok(parse_response(&raw))
+        })
+        .await
+        .expect("response in time")
+    }
+}

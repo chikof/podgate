@@ -43,6 +43,7 @@ use pingora::upstreams::peer::HttpPeer;
 
 use crate::acme;
 use crate::budget::{Budgets, TenantSlot};
+use crate::clientauth;
 use crate::compress::{self, Gzip};
 use crate::error::AppError;
 use crate::failures::{self, Failures};
@@ -75,6 +76,9 @@ pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
     }
     if tls && !app.allow_domain_fronting() {
         chain.push("sni_check");
+    }
+    if app.client_auth().is_some() {
+        chain.push("client_cert");
     }
     chain.push("route");
     if app.scale_to_zero().is_some() {
@@ -227,6 +231,11 @@ impl ProxyHttp for Gateway {
         }
         // Before routing: a misdirected request learns nothing about the route it named.
         if let Err(err) = sni::check(session, &ctx.table) {
+            respond::write_error(session, &err).await?;
+            return Ok(true);
+        }
+        // Before routing, whatever the SNI was: an mTLS app is never reached without its client CA.
+        if let Err(err) = clientauth::admit(session, &ctx.table) {
             respond::write_error(session, &err).await?;
             return Ok(true);
         }

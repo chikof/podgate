@@ -243,6 +243,7 @@ mod test {
             tls: TlsPolicy {
                 mode: TlsMode::Acme,
                 client_ca_pem: ca.map(Into::into),
+                pass_client_cert: false,
             },
             revisions: Vec::new(),
             allow_domain_fronting: false,

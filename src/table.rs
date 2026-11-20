@@ -17,6 +17,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::canary::{self, Runtime};
+use crate::clientauth::{self, ClientAuth};
 
 use crate::acme::{Plan, PlanError};
 use crate::conflict::{self, Conflict};
@@ -66,6 +67,9 @@ pub enum CompileError {
     /// A canary policy is unsound. Every rejected policy is listed.
     #[error("{}", canary::join(.0))]
     Canary(Vec<canary::Rejection>),
+    /// A client CA that cannot be used. Every rejected app is listed.
+    #[error("{}", clientauth::join(.0))]
+    ClientCa(Vec<clientauth::Rejection>),
 
     /// The ACME settings or a certificate's validity cannot be used.
     #[error(transparent)]
@@ -208,6 +212,7 @@ pub struct CompiledApp {
     filters_digest: u64,
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
+    client_auth: Option<Arc<ClientAuth>>,
     canary: Option<Arc<Runtime>>,
 }
 
@@ -271,6 +276,7 @@ impl CompiledApp {
             filters_digest: filters_digest(&app.filters),
             tls: app.tls.clone(),
             canary,
+            client_auth: None,
         };
         compiled.reweigh();
         compiled
@@ -387,6 +393,18 @@ impl CompiledApp {
     #[must_use]
     pub fn tls(&self) -> &TlsPolicy {
         &self.tls
+    }
+
+    /// The app's compiled client CA; `None` when `tls.client_ca_pem` is absent and clients are
+    /// not asked for a certificate.
+    #[must_use]
+    pub fn client_auth(&self) -> Option<&Arc<ClientAuth>> {
+        self.client_auth.as_ref()
+    }
+
+    fn with_client_auth(mut self, client_auth: Option<Arc<ClientAuth>>) -> Self {
+        self.client_auth = client_auth;
+        self
     }
 
     /// Whether failed requests keep their bodies for replay.
@@ -552,6 +570,17 @@ impl RoutingTable {
         if !unsound.is_empty() {
             return Err(CompileError::Canary(unsound));
         }
+        let mut client_auth = Vec::with_capacity(snapshot.apps.len());
+        let mut bad_cas = Vec::new();
+        for app in &snapshot.apps {
+            match ClientAuth::compile(app) {
+                Ok(compiled) => client_auth.push(compiled),
+                Err(rejection) => bad_cas.push(rejection),
+            }
+        }
+        if !bad_cas.is_empty() {
+            return Err(CompileError::ClientCa(bad_cas));
+        }
         let mut wasm = wasm::Compiler::default();
         let mut filters = Vec::with_capacity(snapshot.apps.len());
         let mut rejected = Vec::new();
@@ -574,7 +603,8 @@ impl RoutingTable {
                 .apps
                 .iter()
                 .zip(filters)
-                .map(|(app, filters)| CompiledApp::new(app, filters))
+                .zip(client_auth)
+                .map(|((app, filters), auth)| CompiledApp::new(app, filters).with_client_auth(auth))
                 .collect(),
             hosts,
             certificates: CertStore::build(&snapshot.certificates)?,
@@ -814,6 +844,7 @@ mod test {
             tls: TlsPolicy {
                 mode: TlsMode::Acme,
                 client_ca_pem: None,
+                pass_client_cert: false,
             },
             revisions,
             allow_domain_fronting: false,

@@ -22,6 +22,7 @@ Each row is a failure class that Traefik or Caddy leave open and that podgate cl
 |HA ACME with ARI and on-demand TLS|Certificates are issued and renewed without a single owning node. Preview hosts get certificates on first use.|
 |Record failed requests for replay|The last failed requests per app are visible with secrets redacted, and replayable against another revision.|
 |WASM extensions with fuel and capability limits|Apps attach request filters that cannot hang the proxy or reach sockets or files.|
+|Client certificates per app|An app with a client CA only serves clients holding a certificate from it; hosts without one never ask, and fronting cannot get around it.|
 
 No HTTP/3 yet: Pingora 0.9 has no HTTP/3 server, while Caddy and Traefik ship one.
 

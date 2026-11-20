@@ -10,6 +10,7 @@
 //! - [`acme`]: HA ACME issuance with ARI renewal, HTTP-01 answers and on-demand TLS.
 //! - [`RoutingTable`] and [`TableHandle`]: the compiled snapshot and its atomic swap.
 //! - [`sni`]: the TLS check that the request host matches the negotiated SNI.
+//! - [`clientauth`]: client certificates per app (`tls.client_ca_pem`), asked for by SNI and checked per request.
 //! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
 //! - [`skew`]: the signed cookie that keeps a browser session on the revision that first served it.
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
@@ -31,6 +32,7 @@ pub mod acme;
 pub mod admin;
 pub mod budget;
 pub mod canary;
+pub mod clientauth;
 pub mod compress;
 pub mod config;
 pub mod conflict;
@@ -140,7 +142,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         proxy.add_tls_with_settings(&tls_addr.to_string(), None, settings);
         proxy
             .endpoints()
-            .set_pre_tls_callback(Arc::new(acme.clone()));
+            .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(acme.clone())));
     }
     server.add_service(proxy);
     server.add_service(background_service("acme issuer", acme));

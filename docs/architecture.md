@@ -29,6 +29,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/compress.rs` | Gzip response compression on `miniz_oxide` (pure Rust) with its memory charged up front: `start`, `filter`, `RESERVATION_BYTES`. |
 | `src/tls.rs` | `CertStore` (certificates of a snapshot) and the TLS listener settings that choose the certificate by SNI per handshake. |
 | `src/sni.rs` | The TLS check that a request's `Host` and `:authority` equal the connection's SNI: `CaptureServerName` (handshake hook that records the SNI on the connection) and `check`, called first in `request_filter`. |
+| `src/clientauth.rs` | Client certificates per app: `ClientAuth` (the app's compiled CA), `HandshakeVerifier` (asks for a certificate by SNI), `admit` (per-request check against the routed app, called after `sni::check`), `ClearDecision` (pre-TLS wrapper), `Rejection`. |
 | `src/acme.rs`, `src/acme/*.rs` | HA ACME and on-demand TLS. `acme.rs`: `Acme` (the node's handle: a background service for the issuer loop and Pingora's pre-TLS hook) and `PrivateKeyPem`. `plan.rs`: `Plan`, the ACME view compiled with each snapshot (HTTP-01 answers, hosts lacking a certificate, certificates' validity). `issuer.rs`: the loop that orders and renews. `handshake.rs`: reads the ClientHello and waits for an on-demand certificate. `http01.rs`: `serve_challenge`, called first in `request_filter`. |
 | `src/pool.rs` | Upstream connection pool isolation: `isolate` sets the peer's `group_key` from `(tenant, app, revision)` (Pingora adds the upstream address), and pins connections that carried `Authorization: NTLM` or `Negotiate` to their downstream connection (`State`, carried across keepalive requests by `persist`/`restore`). Called from `upstream_peer`. |
 | `src/skew.rs` | Skew protection: `SkewSecret`, the signed `__podgate_rev` cookie, `pinned` (called by `route::resolve`) and `set_cookie` (called by `response_filter`). |
@@ -42,6 +43,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/common/mod.rs` | Test harness: `Podgate::start()` spawns the built binary on free ports with a temp admin socket; `push_snapshot`, `get`, `https_get`; `Upstream::start(body)`; `TestCert`; snapshot builders. Include with `mod common;`. |
 | `tests/proxy.rs` | End-to-end tests through the real binary. New features add their own `tests/<feature>.rs`. |
 | `tests/sni.rs` | SNI against Host: 421 on mismatch over HTTP/1.1 and HTTP/2 (including `:scheme http`), the `allow_domain_fronting` opt-in, matching hosts served. |
+| `tests/mtls.rs` | Client certificates end to end: valid client served over TLS 1.3 and 1.2, missing or foreign certificate gets 403, no certificate request for hosts without a CA, invalid CA rejected with 422, fronting cannot bypass, the subject header. |
 | `tests/explain.rs` | End-to-end: `GET /v1/explain` for known, wildcard and unknown hosts, bad queries, and answers that follow a snapshot swap. |
 | `tests/skew.rs` | Skew protection end to end: cookie set and HMAC-signed, `serving` and `retiring` revisions pin, `draining`, removed, tampered and other-app cookies fall back, no cookie without `skew_secret`. |
 | `tests/wake.rs` | Scale to zero through the real binary: one `wake_requested` per cycle, release on snapshot, `503` after `wake_timeout_secs`, `app_idle`, and held requests counting against `max_inflight`. |
@@ -85,7 +87,7 @@ The control plane sends `PUT /v1/snapshot` with a JSON snapshot. Entities:
 |---|---|
 |`Snapshot`|`version` (u64, strictly increasing), `tenants`, `apps`|
 |`Tenant`|`id`, `weight` (fair-share weight), `budget` (`max_inflight`, `max_buffer_bytes`)|
-|`App`|`id`, `tenant`, `declared_by` (free text naming the source, used in errors and explain), `hosts` (exact names, or one leading `*.` wildcard), `tls` (`mode`: `acme` or `on_demand`; optional `client_ca_pem`), `revisions`|
+|`App`|`id`, `tenant`, `declared_by` (free text naming the source, used in errors and explain), `hosts` (exact names, or one leading `*.` wildcard), `tls` (`mode`: `acme` or `on_demand`; optional `client_ca_pem` and `pass_client_cert`), `revisions`|
 |`Revision`|`id`, `upstreams` (socket addresses), `weight` (u16), `state` (`serving`, `retiring` or `draining`)|
 
 `Snapshot` also takes an optional `certificates` list (`hosts`, `cert_pem`, `key_pem`), served on the TLS listener by SNI; change 0014 fills it from ACME. Later specs add optional fields to these entities. An absent optional field means the feature is off.
@@ -153,6 +155,8 @@ WASM filter failures use the codes `wasm_invalid` and `wasm_forbidden_import`; s
 Canary policy failures use the codes `canary_revision_missing`, `canary_revision_not_serving`, `canary_step_invalid`, `canary_interval_invalid`, `canary_threshold_invalid` and `canary_no_baseline`; see `### Canary`.
 
 A bad `acme` object or an unreadable certificate validity is code `invalid_acme`.
+
+A `tls.client_ca_pem` that holds no certificate or an unusable one is code `invalid_client_ca`, one entry per app with its `app` and `declared_by`; see `## Client certificates`.
 
 ### Snapshot conflicts
 
@@ -306,6 +310,17 @@ Tests: `tests/acme.rs` against `pebble` with `pebble-challtestsrv` as its DNS (e
 `Gateway::new_ctx` calls `TableHandle::load()` once and stores the `Arc<RoutingTable>` in the request's `Ctx`. Every callback of that request reads `ctx.table`, never the handle, so a snapshot swap mid-request cannot change its routing. `request_filter` resolves the route (`route::resolve`) into `ctx.route`; `upstream_peer` connects to `ctx.route.upstream`. `TableHandle::apply` takes a lock, checks the version, compiles, then swaps with `ArcSwap::store`; a failed compile or a stale version leaves the live table in place.
 
 Counting and draining: once `request_filter` has a route it takes an `InflightGuard` for (app id, revision id) from `Inflight` and keeps it in `ctx.inflight`; it is released when the request ends and its `Ctx` drops. Counters live outside the table, so they survive swaps. After every successful apply, `PUT /v1/snapshot` calls `Inflight::sync` with the live table. A `draining` revision gets exactly one `revision_drained {app, revision}` per draining period: at once when `sync` finds it idle, otherwise when its last guard drops. A period ends when a later snapshot makes the revision non-draining, so draining it again emits again. A request that routed with a table older than the one that drained its revision is refused a guard and routes again with the live table (three attempts, then `503`).
+
+## Client certificates
+
+An app with `tls.client_ca_pem` (PEM of one or more CA certificates) only serves TLS clients whose certificate chains to that CA. Two layers enforce it, because Pingora builds one rustls config for the whole listener:
+
+1. **Handshake.** The listener asks a client for a certificate only when the SNI it sent belongs to an app with a client CA (`ClientAuth` on the compiled app, found with the same host lookup routing uses, wildcards included). Hosts without a CA never send a `CertificateRequest`. The handshake proves the client holds the key of the certificate it sends but does not judge the chain, and it never fails a client that sends none: the listener cannot know the app yet. The certificate request carries no CA hints.
+2. **Request.** Before routing, `clientauth::admit` checks the certificate chain the connection presented against the CA of the app the request is routed to. A request with no chain, a chain from another CA, an expired chain, or arriving on the plain HTTP listener gets `403 {"error":"client certificate required"}`. This runs whatever the SNI was, so a client that handshook with the SNI of an app without a CA and names an mTLS app in `Host` (allowed when that app sets `allow_domain_fronting`) is refused the same way. The verdict is memoized per connection for 30 seconds.
+
+`tls.pass_client_cert: true` adds the verified leaf's subject (one line of printable ASCII, for example `CN=alice`) to the request as `x-forwarded-tls-client-cert-subject`. The header is removed from every incoming request first, so it is never client-controlled. Without the opt-in the app never sees it.
+
+A snapshot whose `client_ca_pem` is not a usable CA bundle is rejected with `422` and code `invalid_client_ca`; the previous snapshot keeps serving. Resuming a TLS session made before an app gained a client CA carries no certificate and gets `403` until the client handshakes anew.
 
 ## Plan and auto-revert
 

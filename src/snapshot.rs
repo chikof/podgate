@@ -159,6 +159,11 @@ pub struct TlsPolicy {
     /// PEM of the CA that must sign client certificates. Absent: no client authentication.
     #[serde(default)]
     pub client_ca_pem: Option<String>,
+    /// Pass the verified client certificate's subject to the app in the
+    /// `x-forwarded-tls-client-cert-subject` request header. Needs `client_ca_pem`.
+    /// Absent: the header is never sent.
+    #[serde(default)]
+    pub pass_client_cert: bool,
 }
 
 /// Certificate source for an app.
