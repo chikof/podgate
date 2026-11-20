@@ -40,9 +40,9 @@ const MAX_VALUE: usize = 8 * 1024;
 const DEFAULT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// The configuration of a `respond` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     status: u16,
     #[serde(default)]
     headers: BTreeMap<String, String>,

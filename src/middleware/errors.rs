@@ -113,7 +113,7 @@ struct Target {
     revision: Option<Box<str>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 enum StatusSpec {
     Code(u16),
@@ -149,9 +149,9 @@ impl StatusSpec {
 }
 
 /// The configuration of an `errors` middleware.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(super) struct Config {
     status: Vec<StatusSpec>,
     service: String,
     #[serde(default)]

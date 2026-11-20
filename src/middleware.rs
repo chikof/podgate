@@ -595,6 +595,10 @@ schemas! {
 
     "compress" => compress::Config,
 
+    "errors" => errors::Config,
+
+    "respond" => respond::Config,
+
     "pass_tls_client_cert" => pass_tls_client_cert::Config,
 }
 
