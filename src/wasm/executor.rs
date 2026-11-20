@@ -71,11 +71,13 @@ impl Executor {
             .map_err(|_| AppError::FilterBusy)?
             .map_err(|_| AppError::FilterBusy)?;
         let charge = match tenant {
-            Some(tenant) => Some(
-                tenant
-                    .reserve_filter(memory)
-                    .ok_or(AppError::FilterOverBudget)?,
-            ),
+            Some(tenant) => Some(tenant.reserve_filter(memory).ok_or(
+                if tenant.fits_at_all(memory) {
+                    AppError::FilterBusy
+                } else {
+                    AppError::FilterOverBudget
+                },
+            )?),
             None => None,
         };
         Ok(RunSlot {
@@ -119,12 +121,37 @@ mod test {
         assert_eq!(tenant.buffered(), 60);
         assert!(matches!(
             executor.admit(Some(&tenant), 60).await,
-            Err(AppError::FilterOverBudget)
+            Err(AppError::FilterBusy)
         ));
         assert_eq!(tenant.buffered(), 60, "a refused run charges nothing");
         drop(first);
         assert_eq!(tenant.buffered(), 0);
         assert!(executor.admit(Some(&tenant), 60).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn filter_budget_full_but_fits_is_capacity() {
+        let executor = Executor::new(4, Duration::from_millis(50));
+        let tenant = tenant(100);
+        let _held = tenant.reserve(80).expect("most of the budget");
+        let full = executor
+            .admit(Some(&tenant), 60)
+            .await
+            .expect_err("full now");
+        assert!(matches!(full, AppError::FilterBusy), "{full:?}");
+        assert!(
+            full.is_capacity_refusal(),
+            "a busy tenant cannot revert a deploy"
+        );
+        let never = executor
+            .admit(Some(&tenant), 101)
+            .await
+            .expect_err("never fits");
+        assert!(matches!(never, AppError::FilterOverBudget), "{never:?}");
+        assert!(
+            !never.is_capacity_refusal(),
+            "a filter that can never fit is the deploy's fault"
+        );
     }
 
     #[tokio::test]

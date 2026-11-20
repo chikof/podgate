@@ -332,7 +332,11 @@ impl Pool {
         if memory > 0
             && let Some(budget) = budget
         {
-            run._memory = Some(budget.charge(memory).ok_or(AppError::AuthOverBudget)?);
+            run._memory = Some(budget.charge(memory).ok_or(if budget.fits_at_all(memory) {
+                AppError::AuthBusy
+            } else {
+                AppError::AuthOverBudget
+            })?);
         }
         Ok(run)
     }
@@ -957,6 +961,37 @@ mod test {
         );
         assert_eq!(pool.runs(), 0);
         assert_eq!(tenant.buffered(), 0, "the failed charge is not kept");
+    }
+
+    #[tokio::test]
+    async fn basic_auth_budget_full_but_hash_fits_is_busy() {
+        let auth = compile(&json!({ "users": [format!("bob:{}", argon2_hash("hunter2", 64))] }))
+            .expect("compile");
+        let pool = Pool::default();
+        let budgets = crate::budget::Budgets::new();
+        let tenant = budgets.tenant(
+            "t",
+            podgate_model::Budget {
+                max_inflight: 10,
+                max_buffer_bytes: 128 * 1024,
+            },
+        );
+        // The hash (64 KiB) fits the budget alone, but 100 KiB is held by something else.
+        let _held = tenant.reserve(100 * 1024).expect("most of the budget");
+        let who = Who {
+            budget: Some(&tenant),
+            ..who(&pool)
+        };
+        let refused = auth
+            .authenticate(&who, Some(&header("bob", "hunter2")))
+            .await
+            .expect_err("budget is full now");
+        assert!(matches!(refused, AppError::AuthBusy), "{refused:?}");
+        assert!(
+            refused.is_capacity_refusal(),
+            "a busy tenant cannot revert a deploy"
+        );
+        assert_eq!(pool.runs(), 0);
     }
 
     #[test]

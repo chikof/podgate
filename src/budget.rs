@@ -100,6 +100,15 @@ impl TenantBudget {
         guard
     }
 
+    /// Whether `bytes` could ever be charged: it does not pass `max_buffer_bytes` even with
+    /// nothing else held. A refusal of a charge that does not fit at all is the deploy's fault
+    /// (it declared more than the tenant may hold); any other refusal is the budget being full
+    /// right now, a capacity condition that passes.
+    #[must_use]
+    pub(crate) fn fits_at_all(&self, bytes: u64) -> bool {
+        bytes <= self.max_buffer_bytes.load(Ordering::Relaxed)
+    }
+
     /// [`Self::reserve`] for the `buffering` middleware (see [`crate::middleware::buffering`]):
     /// the same charge, but a refusal counts as a refused buffer, not as skipped compression.
     #[must_use]
