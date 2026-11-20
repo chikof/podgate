@@ -107,7 +107,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Plugins | Yaegi (Go) plugins | Go modules | WASM filters in process; 0099 out-of-process plugins over a unix socket (no native code in podgate, any language); 0113 runs Traefik Go plugins through a Yaegi host. `dlopen` plugins are rejected |
 | JWT verification | Traefik Hub only | plugins | 0089 (JWKS fetched through the upstream policy) |
 | OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | 0090 (stateless encrypted cookie sessions; no refresh tokens) |
-| Response caching | Hub only | `cache` plugin | 0091 (memory only, charged to the tenant's `max_buffer_bytes`, capped share, purge API) |
+| Response caching | Hub only | `cache` plugin | built: memory only, bounded per tenant (charged to `max_buffer_bytes`, capped share), no disk tier, no distributed mode, purge API |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
 | Static files: `file_server`, `try_files`, precompressed | none | yes | built: operator-declared per-tenant roots opened as `cap-std` handles (`STATIC_ROOTS_FILE`), no `..` or symlink escape, no hidden files, `index`, `try_files`, status pages, validators, ranges, `br`/`gzip` sidecars, file buffers charged to `max_buffer_bytes`; see `docs/ref/svc-static.md` |
 | Directory listings (`browse`) | none | `file_server browse` | 0101 (opt-in by operator root and service, escaped names, no hidden files) |
