@@ -14,7 +14,7 @@ use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::conflict::{self, Conflict};
-use crate::host::{HostMap, HostPattern, InvalidHost};
+use crate::host::{HostMap, HostPattern, InvalidHost, MatchKind};
 use crate::snapshot::{App, Budget, Revision, RevisionState, Snapshot};
 use crate::tls::{CertError, CertStore};
 
@@ -104,6 +104,17 @@ impl CompiledRevision {
         self.weight
     }
 
+    /// The weight [`CompiledApp::pick`] gives this revision right now: the configured weight
+    /// while it takes new requests, `0` otherwise (not `serving`, or no backend).
+    #[must_use]
+    pub fn effective_weight(&self) -> u16 {
+        if self.takes_new_requests() {
+            self.weight
+        } else {
+            0
+        }
+    }
+
     /// The revision's backends.
     #[must_use]
     pub fn upstreams(&self) -> &[SocketAddr] {
@@ -114,6 +125,17 @@ impl CompiledRevision {
     fn takes_new_requests(&self) -> bool {
         self.state == RevisionState::Serving && self.weight > 0 && !self.upstreams.is_empty()
     }
+}
+
+/// The result of [`RoutingTable::lookup`].
+#[derive(Debug)]
+pub struct Lookup<'a> {
+    /// The app that answers for the host.
+    pub app: &'a CompiledApp,
+    /// Whether an exact host or a wildcard matched.
+    pub kind: MatchKind,
+    /// The declared host that matched, as written in the snapshot: `a.test` or `*.a.test`.
+    pub pattern: String,
 }
 
 /// An app ready for routing.
@@ -284,6 +306,25 @@ impl RoutingTable {
     pub fn find_app(&self, host: &str) -> Option<(usize, &CompiledApp)> {
         let index = *self.hosts.lookup(host)?;
         Some((index, self.apps.get(index)?))
+    }
+
+    /// Like [`Self::find_app`], and says which declared pattern matched and how. `host` must be
+    /// normalized.
+    #[must_use]
+    pub fn lookup(&self, host: &str) -> Option<Lookup<'_>> {
+        let matched = self.hosts.find(host)?;
+        Some(Lookup {
+            app: self.apps.get(*matched.value)?,
+            kind: matched.kind,
+            pattern: matched.pattern(),
+        })
+    }
+
+    /// The declared wildcard nearest to `host`, for explaining a miss; see
+    /// [`HostMap::nearest_wildcard`].
+    #[must_use]
+    pub fn nearest_wildcard(&self, host: &str) -> Option<String> {
+        self.hosts.nearest_wildcard(host)
     }
 
     /// The app at `index`, as returned by [`Self::find_app`].
@@ -556,5 +597,50 @@ mod test {
             .expect("applies");
         assert!(in_flight.find_app("a.test").is_some());
         assert!(handle.load().find_app("a.test").is_none());
+    }
+
+    #[test]
+    fn table_lookup() {
+        let revisions = vec![
+            revision("old", 1, 50, RevisionState::Draining),
+            revision("new", 2, 70, RevisionState::Serving),
+            revision("zero", 3, 0, RevisionState::Serving),
+        ];
+        let table = RoutingTable::compile(&snapshot(
+            1,
+            vec![
+                app("a", &["a.test"], revisions),
+                app("w", &["*.w.test"], serving(4)),
+            ],
+        ))
+        .expect("compiles");
+
+        let exact = table.lookup("a.test").expect("exact host");
+        assert_eq!(exact.app.id(), "a");
+        assert_eq!(exact.kind, MatchKind::Exact);
+        assert_eq!(exact.pattern, "a.test");
+        let weights: Vec<(u16, u16)> = exact
+            .app
+            .revisions()
+            .iter()
+            .map(|revision| (revision.weight(), revision.effective_weight()))
+            .collect();
+        assert_eq!(weights, [(50, 0), (70, 70), (0, 0)]);
+
+        let wild = table.lookup("x.w.test").expect("wildcard host");
+        assert_eq!(wild.app.id(), "w");
+        assert_eq!(wild.kind, MatchKind::Wildcard);
+        assert_eq!(wild.pattern, "*.w.test");
+
+        assert!(table.lookup("w.test").is_none());
+        assert_eq!(
+            table.nearest_wildcard("w.test").as_deref(),
+            Some("*.w.test")
+        );
+        assert_eq!(
+            table.nearest_wildcard("p.q.w.test").as_deref(),
+            Some("*.w.test")
+        );
+        assert_eq!(table.nearest_wildcard("nope.test"), None);
     }
 }

@@ -7,6 +7,7 @@
 //! `Result<_, AppError>` so every error is `{"error": "..."}`.
 
 mod events;
+mod explain;
 mod health;
 mod metrics;
 mod snapshot;
@@ -107,9 +108,8 @@ async fn not_found() -> AppError {
 
 /// Builds the router with all routes and middleware.
 ///
-/// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`;
-/// anything else is a
-/// JSON 404.
+/// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`, `GET /v1/events`,
+/// `GET /v1/explain`; anything else is a JSON 404.
 ///
 /// Middleware, outermost first:
 ///
@@ -125,6 +125,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(metrics::routes())
         .merge(snapshot::routes())
         .merge(events::routes())
+        .merge(explain::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
         .with_state(state)

@@ -10,6 +10,13 @@
 //! 3. one line in each callback it hooks, and one callback method when it needs a new hook.
 //!
 //! Core host routing is `route.rs`; this file never matches hosts or picks backends itself.
+//!
+//! # The middleware chain
+//!
+//! [`middleware_chain`] lists, in order, the request-path stages [`Gateway::request_filter`]
+//! runs for an app. `GET /v1/explain` (see [`crate::explain`]) reports it, so it must match
+//! the code. A feature that adds a stage to `request_filter` adds one line to
+//! [`middleware_chain`], in the same position as its call, and nothing else.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -31,10 +38,26 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::sni;
-use crate::table::{RoutingTable, TableHandle};
+use crate::table::{CompiledApp, RoutingTable, TableHandle};
 
 /// Routing attempts before a request gives up; see `Gateway::request_filter`.
 const MAX_ROUTE_ATTEMPTS: u8 = 3;
+
+/// The request-path stages `request_filter` runs for `app`, in the order it runs them; `tls`
+/// says the request arrived over a TLS connection. A stage that cannot act for this app is
+/// left out: `sni_check` never refuses an app that sets `allow_domain_fronting`.
+///
+/// Every stage appends one line here, next to where `request_filter` calls it.
+#[must_use]
+pub fn middleware_chain(app: &CompiledApp, tls: bool) -> Vec<&'static str> {
+    let mut chain = Vec::new();
+    if tls && !app.allow_domain_fronting() {
+        chain.push("sni_check");
+    }
+    chain.push("route");
+    chain.push("inflight_admit");
+    chain
+}
 
 /// State of one proxied request, created by [`Gateway::new_ctx`] and passed to every callback.
 ///

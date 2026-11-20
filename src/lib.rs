@@ -12,6 +12,7 @@
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
 //!   report drained revisions into it.
+//! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
@@ -23,6 +24,7 @@ pub mod config;
 pub mod conflict;
 pub mod error;
 pub mod events;
+pub mod explain;
 pub mod host;
 pub mod inflight;
 pub mod pool;

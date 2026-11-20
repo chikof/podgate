@@ -69,6 +69,39 @@ pub fn normalize(raw: &str) -> Cow<'_, str> {
     }
 }
 
+/// How a host matched a declared pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    /// The host is the declared name.
+    Exact,
+    /// The host is one label under a declared `*.` wildcard.
+    Wildcard,
+}
+
+/// A successful [`HostMap::find`]: what matched and the value stored under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Matched<'a, V> {
+    /// Whether an exact name or a wildcard matched.
+    pub kind: MatchKind,
+    /// The stored key: the name for [`MatchKind::Exact`], the suffix after `*.` for
+    /// [`MatchKind::Wildcard`].
+    pub key: &'a str,
+    /// The value stored under the pattern.
+    pub value: &'a V,
+}
+
+impl<V> Matched<'_, V> {
+    /// The declared pattern as written in a snapshot: `a.test` or `*.a.test`.
+    #[must_use]
+    pub fn pattern(&self) -> String {
+        match self.kind {
+            MatchKind::Exact => self.key.to_owned(),
+            MatchKind::Wildcard => format!("*.{}", self.key),
+        }
+    }
+}
+
 /// Maps host patterns to values. An exact name beats a wildcard.
 #[derive(Debug)]
 pub struct HostMap<V> {
@@ -98,10 +131,43 @@ impl<V> HostMap<V> {
     /// its first label.
     #[must_use]
     pub fn lookup(&self, host: &str) -> Option<&V> {
-        self.exact.get(host).or_else(|| {
-            let (_label, suffix) = host.split_once('.')?;
-            self.wildcard.get(suffix)
+        self.find(host).map(|matched| matched.value)
+    }
+
+    /// Like [`Self::lookup`], and says which pattern matched.
+    #[must_use]
+    pub fn find(&self, host: &str) -> Option<Matched<'_, V>> {
+        if let Some((key, value)) = self.exact.get_key_value(host) {
+            return Some(Matched {
+                kind: MatchKind::Exact,
+                key,
+                value,
+            });
+        }
+        let (_label, suffix) = host.split_once('.')?;
+        let (key, value) = self.wildcard.get_key_value(suffix)?;
+        Some(Matched {
+            kind: MatchKind::Wildcard,
+            key,
+            value,
         })
+    }
+
+    /// The declared wildcard nearest to `host`, for explaining a miss.
+    ///
+    /// "Nearest" is the wildcard whose suffix is the longest suffix of `host`, the whole host
+    /// counting as a suffix of itself: `p.q.a.test` is nearest to `*.a.test` (one label too
+    /// deep), and `a.test` to `*.a.test` (the apex, which a wildcard never matches). Returns the
+    /// pattern as declared, `*.a.test`.
+    #[must_use]
+    pub fn nearest_wildcard(&self, host: &str) -> Option<String> {
+        let mut suffix = host;
+        loop {
+            if self.wildcard.contains_key(suffix) {
+                return Some(format!("*.{suffix}"));
+            }
+            suffix = suffix.split_once('.')?.1;
+        }
     }
 }
 
@@ -147,5 +213,39 @@ mod test {
         assert_eq!(map.lookup("y.a.test"), Some(&"wild"));
         assert_eq!(map.lookup("a.test"), None);
         assert_eq!(map.lookup("p.q.a.test"), None);
+    }
+
+    #[test]
+    fn find_reports_the_matching_pattern() {
+        let mut map = HostMap::default();
+        map.insert(HostPattern::Wildcard("a.test".into()), 1);
+        map.insert(HostPattern::Exact("x.a.test".into()), 2);
+        let exact = map.find("x.a.test").expect("exact");
+        assert_eq!(exact.kind, MatchKind::Exact);
+        assert_eq!(exact.pattern(), "x.a.test");
+        assert_eq!(*exact.value, 2);
+        let wild = map.find("y.a.test").expect("wildcard");
+        assert_eq!(wild.kind, MatchKind::Wildcard);
+        assert_eq!(wild.pattern(), "*.a.test");
+        assert_eq!(*wild.value, 1);
+        assert!(map.find("a.test").is_none());
+    }
+
+    #[test]
+    fn nearest_wildcard_is_the_longest_declared_suffix() {
+        let mut map = HostMap::default();
+        map.insert(HostPattern::Wildcard("a.test".into()), ());
+        map.insert(HostPattern::Wildcard("example".into()), ());
+        assert_eq!(map.nearest_wildcard("a.test").as_deref(), Some("*.a.test"));
+        assert_eq!(
+            map.nearest_wildcard("p.q.a.test").as_deref(),
+            Some("*.a.test")
+        );
+        assert_eq!(
+            map.nearest_wildcard("b.q.example").as_deref(),
+            Some("*.example")
+        );
+        assert_eq!(map.nearest_wildcard("other.test"), None);
+        assert_eq!(map.nearest_wildcard("localhost"), None);
     }
 }
