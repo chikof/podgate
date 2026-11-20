@@ -38,6 +38,7 @@ use crate::events::EventFeed;
 use crate::failures::Failures;
 use crate::fairq::Backends;
 use crate::inflight::Inflight;
+use crate::observe::access_log::AccessLog;
 use crate::outcomes::Outcomes;
 use crate::revert::Reverter;
 use crate::service::upstream_policy::UpstreamPolicy;
@@ -54,6 +55,7 @@ pub struct AppState {
     backends: Backends,
     failures: Failures,
     upstream_policy: UpstreamPolicy,
+    access_log: AccessLog,
     reverter: Reverter,
 }
 
@@ -76,6 +78,7 @@ impl AppState {
             backends: Backends::new(),
             failures: Failures::new(),
             upstream_policy: UpstreamPolicy::builtin(),
+            access_log: AccessLog::new(),
             reverter,
         }
     }
@@ -159,6 +162,19 @@ impl AppState {
     #[must_use]
     pub fn upstream_policy(&self) -> &UpstreamPolicy {
         &self.upstream_policy
+    }
+
+    /// Reports `access_log`, the queue the proxy writes lines into, on `GET /metrics`.
+    #[must_use]
+    pub fn with_access_log(mut self, access_log: AccessLog) -> Self {
+        self.access_log = access_log;
+        self
+    }
+
+    /// The access log queue whose counters `GET /metrics` reports.
+    #[must_use]
+    pub fn access_log(&self) -> &AccessLog {
+        &self.access_log
     }
 
     /// Reads `outcomes`, the counters the proxy records into, for auto-revert.

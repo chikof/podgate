@@ -57,6 +57,7 @@ use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
 use crate::middleware::{self, Flow, RequestCx};
+use crate::observe::access_log::{self, AccessLog};
 use crate::outcomes::{self, Outcomes};
 use crate::pool;
 use crate::respond;
@@ -123,6 +124,9 @@ pub struct Ctx {
     /// it as active there and carries its latency to the balancer. Set with `route`, dropped in
     /// `logging`.
     pub lease: Option<Lease>,
+    /// What the access log notes while the request runs: the clock, upstream timing, retries and
+    /// the refusal reason.
+    pub access: access_log::Pending,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -140,6 +144,7 @@ pub struct Gateway {
     upstream_policy: UpstreamPolicy,
     entry_point: Arc<str>,
     events: EventFeed,
+    access_log: Option<AccessLog>,
 }
 
 impl Gateway {
@@ -161,6 +166,7 @@ impl Gateway {
             events: EventFeed::new(),
             backends: Backends::new(),
             entry_point: Arc::from(entry::WEB),
+            access_log: None,
         }
     }
 
@@ -229,6 +235,13 @@ impl Gateway {
     #[must_use]
     pub fn with_upstream_policy(mut self, policy: UpstreamPolicy) -> Self {
         self.upstream_policy = policy;
+        self
+    }
+
+    /// Writes an access log line for every request the live policy selects, into `access_log`.
+    #[must_use]
+    pub fn with_access_log(mut self, access_log: AccessLog) -> Self {
+        self.access_log = Some(access_log);
         self
     }
 
@@ -334,6 +347,7 @@ impl ProxyHttp for Gateway {
             capacity_refusal: false,
             backend: fairq::Slot::default(),
             lease: None,
+            access: access_log::Pending::new(),
         }
     }
 
@@ -398,6 +412,7 @@ impl ProxyHttp for Gateway {
                     );
                     if let Err(err) = held.await {
                         ctx.capacity_refusal = err.is_capacity_refusal();
+                        ctx.access.refused(&err);
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
@@ -417,6 +432,7 @@ impl ProxyHttp for Gateway {
                     Ok(slot) => ctx.tenant_slot = slot,
                     Err(err) => {
                         ctx.capacity_refusal = err.is_capacity_refusal();
+                        ctx.access.refused(&err);
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
@@ -425,6 +441,7 @@ impl ProxyHttp for Gateway {
                     Ok(slot) => ctx.backend = slot,
                     Err(err) => {
                         ctx.capacity_refusal = err.is_capacity_refusal();
+                        ctx.access.refused(&err);
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
@@ -529,6 +546,7 @@ impl ProxyHttp for Gateway {
         }
         if end_of_stream {
             ctx.backend.release();
+            ctx.access.upstream_done();
         }
         Ok(None)
     }
@@ -537,6 +555,7 @@ impl ProxyHttp for Gateway {
         self.failures.log(session, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
         self.finish_chain(session, error, ctx);
+        access_log::log(self.access_log.as_ref(), session, ctx);
         ctx.compression = None;
         ctx.tenant_slot = None;
         ctx.backend.release();
@@ -598,6 +617,7 @@ impl ProxyHttp for Gateway {
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         ctx.backend.connected();
+        ctx.access.upstream_connected();
         Ok(())
     }
 
@@ -612,6 +632,7 @@ impl ProxyHttp for Gateway {
         if let Some(lease) = &mut ctx.lease {
             lease.responded(status);
         }
+        ctx.access.upstream_responded();
         Ok(())
     }
 

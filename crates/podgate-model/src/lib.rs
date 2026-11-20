@@ -151,7 +151,8 @@ pub struct Router {
     pub chain: Vec<Box<str>>,
     /// The service that answers, by name: one of the revision's services, else one of the app's.
     pub service: Box<str>,
-    /// Per-router observability overrides. Not built yet.
+    /// Per-router observability overrides: `{"access_log": false}` silences the router, `true`
+    /// logs it. Metrics and tracing overrides are not built yet.
     #[serde(default)]
     pub observability: Option<Value>,
     /// Source of this router when it differs from the app's.

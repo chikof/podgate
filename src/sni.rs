@@ -60,6 +60,19 @@ impl TlsAccept for CaptureServerName {
     }
 }
 
+/// The server name the client sent in the handshake of the session's TLS connection, normalized;
+/// `None` on plain HTTP and when it sent none.
+pub(crate) fn server_name(session: &Session) -> Option<&str> {
+    session
+        .digest()?
+        .ssl_digest
+        .as_ref()?
+        .extension
+        .get::<NegotiatedServerName>()?
+        .0
+        .as_deref()
+}
+
 /// The client certificate chain of the session's TLS connection; `None` on plain HTTP and when
 /// the client sent no certificate.
 pub(crate) fn client_chain(session: &Session) -> Option<&ClientChain> {

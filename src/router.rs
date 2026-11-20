@@ -25,6 +25,7 @@ mod tree;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::host::HostPattern;
+use crate::observe::access_log;
 use podgate_model::{App, EntryPointPolicy, Router};
 
 pub use matcher::{Claim, Matcher, Spec, View};
@@ -65,6 +66,7 @@ pub struct CompiledRouter {
     unrestricted: bool,
     chain: Box<[usize]>,
     chain_digest: u64,
+    access_log: Option<bool>,
 }
 
 impl CompiledRouter {
@@ -110,6 +112,10 @@ impl CompiledRouter {
             unrestricted,
             chain: Box::default(),
             chain_digest: 0,
+            access_log: router
+                .observability
+                .as_ref()
+                .and_then(access_log::router_override),
         })
     }
 
@@ -207,6 +213,12 @@ impl CompiledRouter {
                 Claim::Pattern(pattern) => Some(pattern),
                 Claim::Regexp => None,
             })
+    }
+
+    /// The router's own access log switch: `Some(false)` silences it, `Some(true)` turns it on.
+    #[must_use]
+    pub fn access_log(&self) -> Option<bool> {
+        self.access_log
     }
 
     /// The effective middleware chain: indices into the app's stages.

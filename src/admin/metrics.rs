@@ -20,7 +20,8 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         state.budgets().render(&state.table().load())
             + &state.backends().render()
-            + &state.upstream_policy().render(),
+            + &state.upstream_policy().render()
+            + &state.access_log().render(),
     )
 }
 

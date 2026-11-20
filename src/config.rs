@@ -62,6 +62,7 @@ const _: () =
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
+/// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -90,6 +91,8 @@ pub struct Config {
     /// File with the upstream address policy. Absent: the built-in deny list. Read once at
     /// startup by [`Config::upstream_policy`].
     pub upstream_policy_file: Option<PathBuf>,
+    /// File the access log is appended to. Absent: standard output.
+    pub access_log_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -108,6 +111,7 @@ impl Default for Config {
             acme_ca_file: None,
             catch_all_tenants: Vec::new(),
             upstream_policy_file: None,
+            access_log_file: None,
         }
     }
 }
@@ -282,6 +286,7 @@ impl Config {
         config.node_name = non_empty("NODE_NAME")?.map(String::into_boxed_str);
         config.acme_ca_file = non_empty("ACME_CA_FILE")?.map(PathBuf::from);
         config.upstream_policy_file = non_empty("UPSTREAM_POLICY_FILE")?.map(PathBuf::from);
+        config.access_log_file = non_empty("ACCESS_LOG_FILE")?.map(PathBuf::from);
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -324,6 +329,7 @@ mod test {
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
+            ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
         ]);
         assert_eq!(
@@ -341,6 +347,7 @@ mod test {
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
+                access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
             })
         );
@@ -366,6 +373,7 @@ mod test {
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
             ("UPSTREAM_POLICY_FILE", " "),
+            ("ACCESS_LOG_FILE", " "),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);

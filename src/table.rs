@@ -26,6 +26,7 @@ use crate::compile::{self, Rejected};
 use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
 use crate::middleware;
+use crate::observe::access_log::{self, Policy};
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, Lease, PickCx, Upstream};
 use crate::tls::{CertError, CertStore};
@@ -627,6 +628,7 @@ pub struct RoutingTable {
     skew_secret: Option<SkewSecret>,
     forwarded: HashMap<Box<str>, Trust>,
     context: CompileContext,
+    access_log: Option<Arc<Policy>>,
 }
 
 impl RoutingTable {
@@ -678,6 +680,8 @@ impl RoutingTable {
             skew_secret: snapshot.skew_secret.clone(),
             forwarded: crate::client_ip::policies(snapshot),
             context: context.clone(),
+            // `compile::shape` refused an invalid policy before this runs.
+            access_log: access_log::compile(snapshot).ok().flatten(),
         })
     }
 
@@ -794,6 +798,16 @@ impl RoutingTable {
     /// Every entry point that has a forwarded-header policy, with it, by name.
     pub fn forwarded_trusts(&self) -> impl Iterator<Item = (&str, &Trust)> {
         self.forwarded.iter().map(|(name, trust)| (&**name, trust))
+    }
+
+    /// The access log policy for a request that matched `matched` (`None`: it matched no router),
+    /// or `None` when the request is not logged.
+    #[must_use]
+    pub fn access_log(&self, matched: Option<Matched>) -> Option<&Arc<Policy>> {
+        let router = matched
+            .and_then(|matched| self.router(matched))
+            .and_then(|(_, router)| router.access_log());
+        access_log::effective(self.access_log.as_ref(), router)
     }
 
     /// The ACME view of the snapshot: HTTP-01 answers, missing and due certificates.

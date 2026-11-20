@@ -29,6 +29,8 @@
 //!   tenants waiting for it.
 //! - [`service::upstream_policy`]: the operator's rule for which addresses a tenant's servers may
 //!   have, checked by the compiler and before every connection.
+//! - [`observe::access_log`]: the structured access log: fields, filters, sampling, a bounded
+//!   queue and a stdout or file sink that never delays a request.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -90,6 +92,7 @@ pub use events::{Event, EventFeed, EventKind};
 pub use failures::Failures;
 pub use fairq::Backends;
 pub use inflight::{Inflight, InflightGuard};
+pub use observe::access_log::AccessLog;
 pub use outcomes::Outcomes;
 pub use proxy::{Ctx, Gateway};
 pub use table::{ApplyError, CompileError, RoutingTable, TableHandle};
@@ -127,6 +130,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         config.acme_ca_file.clone(),
     );
     let backends = Backends::new();
+    let access_log = AccessLog::new();
+    let access_sink: Box<dyn observe::access_log::LineSink> = match &config.access_log_file {
+        Some(path) => Box::new(observe::access_log::FileSink::new(path.clone())),
+        None => Box::new(observe::access_log::StdoutSink),
+    };
     let timeout = config.request_timeout();
 
     let server_conf = ServerConf {
@@ -145,6 +153,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_wake(wake.clone())
         .with_outcomes(outcomes.clone())
         .with_upstream_policy(upstream_policy.clone())
+        .with_access_log(access_log.clone())
         .with_events(events.clone())
         .with_wasm(wasm::Executor::new(
             config.wasm_max_concurrent.get(),
@@ -186,6 +195,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
     server.add_service(background_service("acme issuer", acme));
     server.add_service(background_service(
+        "access log",
+        access_log.service(access_sink),
+    ));
+    server.add_service(background_service(
         "scale to zero",
         WakeService::new(wake, table.clone()),
     ));
@@ -201,6 +214,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 .with_budgets(budgets)
                 .with_backends(backends)
                 .with_failures(failures)
+                .with_access_log(access_log)
                 .with_upstream_policy(upstream_policy)
                 .with_outcomes(outcomes),
             timeout,

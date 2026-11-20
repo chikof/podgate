@@ -1,7 +1,8 @@
 //! Observability settings of a snapshot: access log, metrics and tracing.
 //!
-//! Not built yet: `src/observe/` owns the semantics. A snapshot that sets one of these is
-//! refused with `observability_not_built` rather than silently logging nothing.
+//! `src/observe/` owns the semantics. The access log is built; a snapshot that sets
+//! `metrics` or `tracing` is refused with `observability_not_built` rather than silently
+//! recording nothing.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,7 +10,8 @@ use serde_json::Value;
 /// Snapshot-wide observability settings; a router may override them per router.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observability {
-    /// Structured access log: fields, filters, sampling.
+    /// Structured access log: `format`, `fields`, `headers`, `filters`, `sampling_percent`; a
+    /// boolean switches it off or on with the defaults. Absent: nothing is logged.
     #[serde(default)]
     pub access_log: Option<Value>,
     /// Per entry point, router and service metrics.
