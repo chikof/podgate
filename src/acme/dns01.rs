@@ -187,6 +187,7 @@ pub(crate) fn reject(
                     ));
                 }
             }
+            ChallengeKind::TlsAlpn01 => {} // judged by `alpn01::reject`
             ChallengeKind::Http01 => {
                 if snapshot.acme.is_none() || app.tls.mode != TlsMode::Acme {
                     continue;

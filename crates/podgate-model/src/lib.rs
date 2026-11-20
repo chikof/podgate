@@ -348,6 +348,10 @@ pub enum ChallengeKind {
     /// that cannot serve plain HTTP.
     #[serde(rename = "dns-01")]
     Dns01,
+    /// Answered on the TLS listener with a challenge certificate, so only port 443 must be
+    /// reachable; cannot prove a wildcard.
+    #[serde(rename = "tls-alpn-01")]
+    TlsAlpn01,
 }
 
 /// Certificate source for an app.
@@ -431,8 +435,9 @@ pub struct Acme {
     /// account. Absent: the issuer creates a fresh account in memory.
     #[serde(default)]
     pub account_key_pem: Option<String>,
-    /// HTTP-01 answers the control plane pushes back after an `acme_challenge` event. Every
-    /// node serves them on the plain HTTP listener.
+    /// HTTP-01 and TLS-ALPN-01 answers the control plane pushes back after an `acme_challenge`
+    /// event. Every node serves the HTTP-01 ones on the plain HTTP listener and answers the
+    /// TLS-ALPN-01 ones on the TLS listener.
     #[serde(default)]
     pub challenges: Vec<Challenge>,
     /// Hosts the control plane asks the issuer to get certificates for: the hosts of
@@ -467,11 +472,18 @@ pub struct ExternalAccount {
     pub hmac_key: String,
 }
 
-/// One HTTP-01 answer: `GET /.well-known/acme-challenge/<token>` returns `key_authorization`.
+/// One challenge answer pushed back after an `acme_challenge` event. Exactly one of `token`
+/// (HTTP-01: `GET /.well-known/acme-challenge/<token>` returns `key_authorization`) and `name`
+/// (TLS-ALPN-01: the host that an `acme-tls/1` handshake proves with a challenge
+/// certificate over `key_authorization`) is set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Challenge {
-    /// The challenge token.
-    pub token: Box<str>,
+    /// The HTTP-01 challenge token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Box<str>>,
+    /// The host of a TLS-ALPN-01 challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Box<str>>,
     /// The key authorization to answer with.
     pub key_authorization: Box<str>,
 }

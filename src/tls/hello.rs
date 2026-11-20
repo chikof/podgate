@@ -1,10 +1,12 @@
 //! The listener's pre-TLS hook: reads the ClientHello before the handshake starts, but only
 //! when something needs it.
 //!
-//! Two things do. On-demand TLS waits for a certificate of the SNI ([`crate::acme`]), and a TLS
+//! Three things do. On-demand TLS waits for a certificate of the SNI ([`crate::acme`]), a TLS
 //! policy closes a connection whose hello offers no version, suite or ALPN protocol
-//! the app of that SNI allows (see [`super::options`]). With neither configured the hook reads
-//! nothing, so hosts without options pay nothing.
+//! the app of that SNI allows (see [`super::options`]), and while the snapshot holds a pending
+//! TLS-ALPN-01 challenge a hello that offers only `acme-tls/1` is answered here,
+//! because the listener's ALPN list cannot carry that protocol. With none of them configured
+//! the hook reads nothing, so hosts without options or challenges pay nothing.
 //!
 //! The hook reads the ClientHello (rustls' `Acceptor` parses it, so no TLS parsing lives here),
 //! then puts every byte back with `Stream::rewind` so the handshake sees the connection
@@ -25,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 use super::options::Violation;
-use crate::acme::Acme;
+use crate::acme::{Acme, alpn01};
 use crate::host;
 use crate::table::TableHandle;
 
@@ -98,7 +100,8 @@ impl PreTlsProcess for PreHandshake {
     async fn process(&self, stream: &mut Stream) -> pingora::Result<()> {
         {
             let table = self.table.load();
-            if !table.acme().on_demand_enabled() && !table.tls_hello_policy() {
+            let acme = table.acme();
+            if !acme.on_demand_enabled() && !table.tls_hello_policy() && !acme.alpn_pending() {
                 return Ok(());
             }
         }
@@ -106,6 +109,12 @@ impl PreTlsProcess for PreHandshake {
         let Some(hello) = peek(stream).await else {
             return Ok(());
         };
+        if hello.alpn == [alpn01::PROTOCOL] {
+            return Err(self
+                .acme
+                .answer_alpn01(stream, hello.server_name.as_deref())
+                .await);
+        }
         if let Some(violation) = self.violation(&hello) {
             // Best effort: the client learns why, but the refusal does not depend on it.
             let _ = timeout(ALERT_TIMEOUT, stream.write_all(&violation.alert())).await;
@@ -356,5 +365,97 @@ mod test {
             .await
             .expect("alert and close");
         assert_eq!(alert, [21, 3, 3, 0, 2, 2, 70], "fatal protocol_version");
+    }
+
+    /// A hook for a table whose one app proves `a.test` with TLS-ALPN-01 and whose snapshot
+    /// holds the pushed `challenges`.
+    fn alpn_hook(challenges: &serde_json::Value) -> PreHandshake {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "version": 1,
+            "tenants": [{"id": "t", "weight": 1, "budget": {"max_inflight": 1, "max_buffer_bytes": 1}}],
+            "acme": {"issuer_node": "n1", "directory_url": "https://acme.test/dir", "challenges": challenges},
+            "apps": [{
+                "id": "a", "tenant": "t", "declared_by": "test",
+                "tls": {"mode": "acme", "challenge": "tls-alpn-01"},
+                "routers": [{"name": "all", "match": {"host": ["a.test"]}, "service": "web"}],
+                "revisions": [{"id": "r1", "weight": 100, "state": "serving", "services": [
+                    {"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:1"}]}]}],
+            }],
+        }))
+        .expect("valid snapshot");
+        let table = TableHandle::new();
+        table.apply(&snapshot).expect("compiles");
+        PreHandshake::new(
+            Acme::new(table.clone(), EventFeed::new(), None, None),
+            table,
+        )
+    }
+
+    /// The first flight of a client for `a.test` that offers exactly `alpn`.
+    fn client_hello_offering(alpn: &[&[u8]]) -> Vec<u8> {
+        let mut config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+        let mut connection = ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("a.test").expect("server name"),
+        )
+        .expect("client connection");
+        let mut bytes = Vec::new();
+        connection.write_tls(&mut bytes).expect("write hello");
+        bytes
+    }
+
+    #[tokio::test]
+    async fn alpn01_hello_is_read_only_while_a_challenge_is_pending() {
+        let hello = client_hello_offering(&[b"h2", b"http/1.1"]);
+
+        let idle = alpn_hook(&json!([]));
+        let (mut stream, _client) = connected(&hello).await;
+        idle.process(&mut stream).await.expect("passes");
+        assert_eq!(idle.hello_reads(), 0, "no pending challenge: no read");
+
+        let pending = alpn_hook(&json!([{"name": "a.test", "key_authorization": "tok.k"}]));
+        let (mut stream, _client) = connected(&hello).await;
+        pending
+            .process(&mut stream)
+            .await
+            .expect("a normal hello is handed on");
+        assert_eq!(pending.hello_reads(), 1);
+        let mut again = vec![0_u8; hello.len()];
+        stream.read_exact(&mut again).await.expect("bytes put back");
+        assert_eq!(
+            again, hello,
+            "the listener's handshake sees the hello untouched"
+        );
+
+        // Offering `acme-tls/1` next to a normal protocol is a normal hello too.
+        let mixed = client_hello_offering(&[b"acme-tls/1", b"h2"]);
+        let (mut stream, _client) = connected(&mixed).await;
+        pending.process(&mut stream).await.expect("handed on");
+    }
+
+    #[tokio::test]
+    async fn alpn01_only_hello_without_a_pending_challenge_is_refused() {
+        let pending = alpn_hook(&json!([{"name": "b.test", "key_authorization": "tok.k"}]));
+        let (mut stream, mut client) = connected(&client_hello_offering(&[b"acme-tls/1"])).await;
+        pending
+            .process(&mut stream)
+            .await
+            .expect_err("no challenge is pending for a.test");
+        drop(stream);
+        let mut alert = Vec::new();
+        client
+            .read_to_end(&mut alert)
+            .await
+            .expect("alert and close");
+        assert_eq!(
+            alert,
+            [21, 3, 3, 0, 2, 2, 120],
+            "fatal no_application_protocol"
+        );
     }
 }

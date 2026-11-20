@@ -80,7 +80,8 @@ pub enum EventKind {
     },
     /// The issuer node needs a challenge answered: for HTTP-01 push the answer back in the
     /// snapshot's `acme.challenges`, for DNS-01 publish the TXT record and push the
-    /// confirmation back in `acme.dns_ready`.
+    /// confirmation back in `acme.dns_ready`, for TLS-ALPN-01 push `{name,
+    /// key_authorization}` back in `acme.challenges`.
     AcmeChallenge {
         /// What to publish.
         #[serde(flatten)]
@@ -127,7 +128,8 @@ pub enum EventKind {
 }
 
 /// What an ACME challenge asks the control plane to publish. Serialized inline in the event,
-/// next to `kind`, as `{"type": "http-01", ...}` or `{"type": "dns-01", ...}`.
+/// next to `kind`, as `{"type": "http-01", ...}`, `{"type": "dns-01", ...}` or
+/// `{"type": "tls-alpn-01", ...}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 #[non_exhaustive]
@@ -148,6 +150,16 @@ pub enum ChallengeProof {
         name: Box<str>,
         /// base64url of the SHA-256 of the key authorization.
         value: Box<str>,
+    },
+    /// Answer the TLS-ALPN-01 challenge of `name`: push `{name, key_authorization}`
+    /// back in `acme.challenges`. Every node then answers an `acme-tls/1` handshake for `name`
+    /// with a challenge certificate derived from `key_authorization`.
+    #[serde(rename = "tls-alpn-01")]
+    TlsAlpn01 {
+        /// The host being proven.
+        name: Box<str>,
+        /// The key authorization the challenge certificate commits to.
+        key_authorization: Box<str>,
     },
 }
 
@@ -356,6 +368,19 @@ mod test {
             serde_json::json!({
                 "kind": "acme_challenge_done", "type": "dns-01",
                 "name": "_acme-challenge.a.test", "value": "v"
+            })
+        );
+        let alpn = EventKind::AcmeChallenge {
+            proof: ChallengeProof::TlsAlpn01 {
+                name: "a.test".into(),
+                key_authorization: "tok.thumb".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&alpn).expect("serializes"),
+            serde_json::json!({
+                "kind": "acme_challenge", "type": "tls-alpn-01",
+                "name": "a.test", "key_authorization": "tok.thumb"
             })
         );
     }

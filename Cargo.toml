@@ -46,6 +46,7 @@ pingora = { version = "0.9", features = ["proxy", "lb", "rustls"] }
 pingora-ketama = "0.9"
 podgate-model = { version = "0.1.0", path = "crates/podgate-model" }
 prost = "0.14"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 regex = "1.13.2"
 rustix = { version = "1.1.6", features = ["fs"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -57,6 +58,7 @@ sha2 = "0.11.1"
 subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tower-http = { version = "0.7.1", features = ["request-id", "timeout", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -69,8 +71,6 @@ workspace = true
 [dev-dependencies]
 # tests/common: raw HTTP/1.1 over TCP and unix sockets, plus a tiny upstream server.
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
-rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
-tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 h2 = "0.4.20"
 wat = "1.263.0"
 # libzstd (C) only as the reference decoder in tests: the shipped encoder is ruzstd.

@@ -15,8 +15,9 @@ use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
 use thiserror::Error;
 
+use super::alpn01::{self, Answer};
 use super::dns01;
-use crate::host::{HostMap, HostPattern};
+use crate::host::{self, HostMap, HostPattern};
 use podgate_model::{Acme, ChallengeKind, Snapshot, TlsMode};
 
 /// A snapshot's ACME settings or certificates that cannot be used.
@@ -156,6 +157,7 @@ pub struct Wanted {
 pub struct Plan {
     settings: Option<Acme>,
     challenges: HashMap<Box<str>, Box<str>>,
+    alpn: HashMap<Box<str>, Answer>,
     claimed: HostMap<Claim>,
     dns_ready: HashSet<(Box<str>, Box<str>)>,
     on_demand: bool,
@@ -181,7 +183,15 @@ impl Plan {
             challenges: acme
                 .challenges
                 .iter()
-                .map(|challenge| (challenge.token.clone(), challenge.key_authorization.clone()))
+                .filter_map(|c| Some((c.token.clone()?, c.key_authorization.clone())))
+                .collect(),
+            alpn: acme
+                .challenges
+                .iter()
+                .filter_map(|c| {
+                    let name = host::normalize(c.name.as_deref()?).into_owned();
+                    Some((name.into(), Answer::new(c.key_authorization.clone())))
+                })
                 .collect(),
             dns_ready: acme
                 .dns_ready
@@ -249,6 +259,23 @@ impl Plan {
     #[must_use]
     pub fn challenge(&self, token: &str) -> Option<&str> {
         self.challenges.get(token).map(AsRef::as_ref)
+    }
+
+    /// Whether the snapshot holds any TLS-ALPN-01 answer. The TLS hook reads ClientHellos only
+    /// while it does (or for other reasons), so hosts without a pending challenge pay nothing.
+    #[must_use]
+    pub fn alpn_pending(&self) -> bool {
+        !self.alpn.is_empty()
+    }
+
+    /// The pending TLS-ALPN-01 answer for `host` (normalized): pushed in `acme.challenges`, and
+    /// the host is claimed exactly by an `acme` app that chose `tls-alpn-01`. A name nobody
+    /// claims, or that another challenge kind owns, gets none.
+    pub(super) fn alpn_answer(&self, host: &str) -> Option<&Answer> {
+        let claim = self.claimed.lookup(host)?;
+        (claim.mode == TlsMode::Acme && claim.challenge == ChallengeKind::TlsAlpn01)
+            .then(|| self.alpn.get(host))
+            .flatten()
     }
 
     /// Whether any app can get certificates on demand: there are ACME settings and an
@@ -377,22 +404,50 @@ fn validate(acme: &Acme) -> Result<(), PlanError> {
             return Err(invalid("eab.hmac_key", "is not base64url"));
         }
     }
+    if acme.challenges.iter().filter(|c| c.name.is_some()).count() > alpn01::MAX_ANSWERS {
+        return Err(invalid(
+            "challenges",
+            format!(
+                "lists more than {} tls-alpn-01 answers",
+                alpn01::MAX_ANSWERS
+            ),
+        ));
+    }
     for challenge in &acme.challenges {
-        let token_ok = !challenge.token.is_empty()
-            && challenge
-                .token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if !token_ok {
-            return Err(invalid(
-                "challenges",
-                format!("token {:?} is not base64url", challenge.token),
-            ));
-        }
+        let shown = match (&challenge.token, &challenge.name) {
+            (Some(token), None) => {
+                let token_ok = !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                if !token_ok {
+                    return Err(invalid(
+                        "challenges",
+                        format!("token {token:?} is not base64url"),
+                    ));
+                }
+                format!("token {token}")
+            }
+            (None, Some(name)) => {
+                if !matches!(HostPattern::parse(name), Ok(HostPattern::Exact(_))) {
+                    return Err(invalid(
+                        "challenges",
+                        format!("name {name:?} is not an exact host name"),
+                    ));
+                }
+                format!("name {name}")
+            }
+            _ => {
+                return Err(invalid(
+                    "challenges",
+                    "an entry sets exactly one of token (http-01) and name (tls-alpn-01)",
+                ));
+            }
+        };
         if challenge.key_authorization.is_empty() {
             return Err(invalid(
                 "challenges",
-                format!("token {} has an empty key_authorization", challenge.token),
+                format!("{shown} has an empty key_authorization"),
             ));
         }
     }

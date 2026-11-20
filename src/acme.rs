@@ -27,12 +27,18 @@
 //!    value}` and waits until the snapshot lists the record in `acme.dns_ready`; only then does
 //!    it tell the CA to validate, and it emits `acme_challenge_done` afterwards. podgate holds
 //!    no DNS credential: the control plane publishes the record (see `dns01`).
+//! 6. **TLS-ALPN-01**. An `acme` app whose `tls.challenge` is `tls-alpn-01` is
+//!    proven on port 443 only. The issuer emits `acme_challenge {type: "tls-alpn-01", name,
+//!    key_authorization}`; the control plane pushes `{name, key_authorization}` back in
+//!    `acme.challenges`, and every node then answers the CA's `acme-tls/1` handshake for the
+//!    name with a throwaway challenge certificate (see `alpn01`).
 //!
 //! Pingora's rustls backend has no async certificate callback (`certificate_callback` is
 //! OpenSSL-only) and rustls' `ResolvesServerCert` is synchronous, so the wait happens before
 //! the handshake starts: [`crate::tls::PreHandshake`] is Pingora's pre-TLS hook; it reads the ClientHello
 //! to learn the SNI, waits, and hands the bytes back to the handshake.
 
+pub(crate) mod alpn01;
 pub(crate) mod dns01;
 mod handshake;
 mod http01;

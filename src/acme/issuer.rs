@@ -35,6 +35,7 @@ use super::dns01::{self, NotReady, Round};
 use super::plan::{CertInfo, Plan, decode_hmac_key};
 use super::{Acme, PrivateKeyPem};
 use crate::events::{ChallengeProof, EventFeed, EventKind};
+use crate::host;
 use crate::table::TableHandle;
 use podgate_model::{self as snapshot, ChallengeKind, ExternalAccount};
 
@@ -138,7 +139,7 @@ impl Job {
     /// publish a record, which takes longer than serving an HTTP-01 answer.
     fn deadline(&self) -> Duration {
         match self.challenge {
-            ChallengeKind::Http01 => ORDER_DEADLINE,
+            ChallengeKind::Http01 | ChallengeKind::TlsAlpn01 => ORDER_DEADLINE,
             ChallengeKind::Dns01 => dns01::READY_WAIT + ORDER_AFTER_WAIT,
         }
     }
@@ -505,6 +506,33 @@ fn challenge_type(kind: ChallengeKind) -> ChallengeType {
     match kind {
         ChallengeKind::Http01 => ChallengeType::Http01,
         ChallengeKind::Dns01 => ChallengeType::Dns01,
+        ChallengeKind::TlsAlpn01 => ChallengeType::TlsAlpn01,
+    }
+}
+
+/// A challenge answer the control plane must push back before the order goes on.
+enum Published {
+    /// The HTTP-01 answer of this token.
+    Token(Box<str>),
+    /// The TLS-ALPN-01 answer of this host, for exactly this key authorization.
+    Alpn {
+        name: Box<str>,
+        key_authorization: Box<str>,
+    },
+}
+
+impl Published {
+    /// Whether the live plan answers it.
+    fn is_live(&self, plan: &Plan) -> bool {
+        match self {
+            Self::Token(token) => plan.challenge(token).is_some(),
+            Self::Alpn {
+                name,
+                key_authorization,
+            } => plan
+                .alpn_answer(&host::normalize(name))
+                .is_some_and(|answer| answer.key_authorization() == &**key_authorization),
+        }
     }
 }
 
@@ -532,7 +560,7 @@ impl Order {
         };
 
         let kind = challenge_type(job.challenge);
-        let mut tokens: Vec<Box<str>> = Vec::new();
+        let mut published: Vec<Published> = Vec::new();
         // Emits `acme_challenge_done` for every DNS-01 record it announced, however this
         // function ends: a record the control plane published must not outlive the order.
         let mut dns = Round::new(
@@ -564,17 +592,32 @@ impl Order {
                             key_authorization: challenge.key_authorization().as_str().into(),
                         },
                     });
-                    tokens.push(token);
+                    published.push(Published::Token(token));
                 }
                 ChallengeKind::Dns01 => {
                     if !dns.announce(&domain, challenge.key_authorization().dns_value()) {
                         return Err(IssueError::TooManyPending);
                     }
                 }
+                ChallengeKind::TlsAlpn01 => {
+                    let key_authorization: Box<str> = challenge.key_authorization().as_str().into();
+                    self.events.emit(EventKind::AcmeChallenge {
+                        proof: ChallengeProof::TlsAlpn01 {
+                            name: domain.as_str().into(),
+                            key_authorization: key_authorization.clone(),
+                        },
+                    });
+                    published.push(Published::Alpn {
+                        name: domain.as_str().into(),
+                        key_authorization,
+                    });
+                }
             }
         }
         match job.challenge {
-            ChallengeKind::Http01 => self.wait_for_challenges(&tokens).await?,
+            ChallengeKind::Http01 | ChallengeKind::TlsAlpn01 => {
+                self.wait_for_challenges(&published).await?;
+            }
             ChallengeKind::Dns01 => {
                 dns01::await_ready(&self.table, dns.records(), dns01::READY_WAIT)
                     .await
@@ -614,9 +657,9 @@ impl Order {
         Ok(())
     }
 
-    /// Waits until the live table serves every token, which is the control plane's signal that
-    /// the answers are published.
-    async fn wait_for_challenges(&self, tokens: &[Box<str>]) -> Result<(), IssueError> {
+    /// Waits until the live table serves every answer, which is the control plane's signal
+    /// that they are published.
+    async fn wait_for_challenges(&self, published: &[Published]) -> Result<(), IssueError> {
         let deadline = Instant::now() + CHALLENGE_WAIT;
         loop {
             let table = self.table.load();
@@ -624,7 +667,7 @@ impl Order {
             if plan.settings().is_none() {
                 return Err(IssueError::Cancelled);
             }
-            if tokens.iter().all(|token| plan.challenge(token).is_some()) {
+            if published.iter().all(|answer| answer.is_live(plan)) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
