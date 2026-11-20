@@ -38,7 +38,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `src/tls.rs` | `CertStore` (certificates of a snapshot) and the TLS listener settings that choose the certificate by SNI per handshake. |
 | `src/sni.rs` | The TLS check that a request's `Host` and `:authority` equal the connection's SNI: `CaptureServerName` (handshake hook that records the SNI on the connection) and `check`, called first in `request_filter`. |
 | `src/clientauth.rs` | Client certificates per app: `ClientAuth` (the app's compiled CA), `HandshakeVerifier` (asks for a certificate by SNI), `admit` (per-request check against the routed app, called after `sni::check`), `ClearDecision` (pre-TLS wrapper), `Rejection`. |
-| `src/acme.rs`, `src/acme/*.rs` | HA ACME and on-demand TLS. `acme.rs`: `Acme` (the node's handle: a background service for the issuer loop and Pingora's pre-TLS hook) and `PrivateKeyPem`. `plan.rs`: `Plan`, the ACME view compiled with each snapshot (HTTP-01 answers, hosts lacking a certificate, certificates' validity). `issuer.rs`: the loop that orders and renews. `handshake.rs`: reads the ClientHello and waits for an on-demand certificate. `http01.rs`: `serve_challenge`, called first in `request_filter`. |
+| `src/acme.rs`, `src/acme/*.rs` | HA ACME and on-demand TLS. `acme.rs`: `Acme` (the node's handle: a background service for the issuer loop and Pingora's pre-TLS hook) and `PrivateKeyPem`. `plan.rs`: `Plan`, the ACME view compiled with each snapshot (HTTP-01 answers, hosts lacking a certificate, certificates' validity). `issuer.rs`: the loop that orders and renews. `handshake.rs`: reads the ClientHello and waits for an on-demand certificate. `http01.rs`: `serve_challenge`, called first in `request_filter`. `dns01.rs`: DNS-01: `ACME_DNS_ZONES` parsing, the compile rules (`reject`), the pending-challenge `Ledger`, `Round` (announces records and always says `acme_challenge_done`) and `await_ready` (the wait for `acme.dns_ready`). |
 | `src/pool.rs` | Upstream connection pool isolation: `isolate` sets the peer's `group_key` from `(tenant, app, revision)` (Pingora adds the upstream address), and pins connections that carried `Authorization: NTLM` or `Negotiate` to their downstream connection (`State`, carried across keepalive requests by `persist`/`restore`). Called from `upstream_peer`. |
 | `src/skew.rs` | Skew protection: `SkewSecret`, the signed `__podgate_rev` cookie, `pinned` (called by `route::resolve`) and `set_cookie` (called by `response_filter`). |
 | `src/wake.rs` | Scale to zero: `Wake` holds requests for an app with no upstream (`hold`, woken by `TableHandle::subscribe`), emits `wake_requested` once per wake cycle, hands the held tenant slot on in `admit`, and `sweep` emits `app_idle`; `WakeService` runs the sweep as a background service; `State` is the per-request field of `Ctx`. |
@@ -80,6 +80,7 @@ podgate is a reverse proxy on Pingora, configured only by snapshots the PaaS con
 | `tests/inflight_alloc.rs` | The in-flight hot path allocates nothing. Its own test binary, with a counting global allocator. |
 | `tests/wasm_budget.rs` | Filter memory charged to the tenant (`503` over budget, peak and refusal metrics) and the bounded filter pool (queued filter runs refused, snapshot pushes and other tenants unaffected). |
 | `tests/acme.rs` | End-to-end against `pebble` (with `pebble-challtestsrv` as its DNS, so HTTP-01 is validated for real): the test plays the control plane. A missing `pebble` fails the tests. |
+| `tests/acme_dns01.rs` | DNS-01 and wildcard certificates against `pebble` with `pebble-challtestsrv` as DNS: the test publishes TXT records through challtestsrv's management API and confirms them in the snapshot. Includes the proof that the CA is not answered before `dns_ready`, ARI renewal of a wildcard, and the compile rejections. |
 | `examples/slow_upstream.rs` | A backend with a fixed latency and capacity (`slow_upstream <addr> <latency_ms> <capacity>`), for `scripts/load-fairness.sh`. |
 | `scripts/load-fairness.sh` | Load test of the per-tenant fair queue: tenant A floods at 1000 rps, tenant B sends 10 rps, with `oha` against the `podgate` binary and `slow_upstream`; see `## Backend admission`. |
 | `scripts/bench-proxies.sh`, `bench/` | Benchmark of podgate against Caddy and Traefik on one machine: the script, the Caddy and Traefik configs and the podgate snapshot it renders. `examples/fast_upstream.rs` is its backend and `examples/bench_cert.rs` writes the shared certificate. Method and results: `docs/benchmarks.md`. |
@@ -108,7 +109,7 @@ The control plane sends `PUT /v1/snapshot` with a JSON snapshot. Entities:
 |---|---|
 |`Snapshot`|`version` (u64, strictly increasing), `tenants`, `apps`|
 |`Tenant`|`id`, `weight` (fair-share weight), `budget` (`max_inflight`, `max_buffer_bytes`)|
-|`App`|`id`, `tenant`, `declared_by` (free text naming the source, used in errors and explain), `hosts` (exact names, or one leading `*.` wildcard), `tls` (`mode`: `acme` or `on_demand`; optional `client_ca_pem` and `pass_client_cert`), `revisions`|
+|`App`|`id`, `tenant`, `declared_by` (free text naming the source, used in errors and explain), `hosts` (exact names, or one leading `*.` wildcard), `tls` (`mode`: `acme` or `on_demand`; optional `client_ca_pem` and `pass_client_cert`; `challenge`: `http-01` default, or `dns-01`), `revisions`|
 |`Revision`|`id`, `upstreams` (socket addresses), `weight` (u16), `state` (`serving`, `retiring` or `draining`)|
 
 `Snapshot` also takes an optional `certificates` list (`hosts`, `cert_pem`, `key_pem`), served on the TLS listener by SNI; change 0014 fills it from ACME. Later specs add optional fields to these entities. An absent optional field means the feature is off.
@@ -157,7 +158,7 @@ The snapshot is compiled into an immutable routing table and swapped atomically.
 
 ### Event feed
 
-`GET /v1/events?after=<seq>&timeout_secs=<n>` is a long poll. It returns the ordered events with sequence numbers greater than `after`, or an empty list after the timeout. The event kinds are `revision_drained`, `wake_requested`, `app_idle`, `config_reverted`, `config_revert_failed`, `canary_regressed`, `acme_challenge`, `certificate_issued`, `certificate_requested`, `circuit_opened` and `circuit_closed`. The last two carry `app` and `middleware`: a `circuit_breaker` opened its circuit (again on a re-open during recovery), or finished its recovery.
+`GET /v1/events?after=<seq>&timeout_secs=<n>` is a long poll. It returns the ordered events with sequence numbers greater than `after`, or an empty list after the timeout. The event kinds are `revision_drained`, `wake_requested`, `app_idle`, `config_reverted`, `config_revert_failed`, `canary_regressed`, `acme_challenge`, `acme_challenge_done`, `certificate_issued`, `certificate_requested`, `circuit_opened` and `circuit_closed`. The last two carry `app` and `middleware`: a `circuit_breaker` opened its circuit (again on a re-open during recovery), or finished its recovery.
 
 `canary_regressed` carries `app`, `revision` and `error_permille` (the canary's `5xx` per thousand requests over the judged window).
 
@@ -187,7 +188,12 @@ Declarations are never merged. The compiler checks every host pattern of every a
 |---|---|---|
 |`host_conflict`|Two apps claim the same exact host or the same wildcard, whatever their tenants.|`host`, `apps`, `declared_by`: the first claimant, then the second.|
 |`cross_tenant_wildcard`|A claim lies under a wildcard of another tenant.|`host`, `wildcard`, `tenants`, `apps`, `declared_by`: the claim first, then the wildcard.|
-|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, and the two `tls.client_ca_pem` differ (compared as written, absent against present included). Exact wins over wildcard when routing, so without this rule an app could drop the client-certificate requirement of its wildcard.|`host`, `wildcard`, `apps`, `declared_by`: the claim first, then the wildcard.|
+|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, and the two `tls.client_ca_pem` differ (compared as written, absent against present included), or two apps of one tenant share a pattern with different `tls.challenge`. Exact wins over wildcard when routing, so without this rule an app could drop the client-certificate requirement of its wildcard.|`host`, `wildcard`, `apps`, `declared_by`: the claim first, then the wildcard.|
+|`dns01_not_enabled`|`challenge: dns-01` while `ACME_DNS_ZONES` is unset.|`app`, `declared_by`, `at`|
+|`dns01_zone_not_allowed`|A host or wildcard base outside every zone of `ACME_DNS_ZONES`.|plus `host`|
+|`dns01_needs_acme_mode`|`challenge: dns-01` on an `on_demand` app.|`app`, `declared_by`, `at`|
+|`dns01_too_many_hosts`|More than 4 hosts on a `dns-01` app.|`app`, `declared_by`, `at`|
+|`wildcard_needs_dns01`|An `acme` app with `challenge: http-01` claims a wildcard no certificate covers while `acme` settings are present.|plus `host`|
 
 Example: `{"code":"host_conflict","message":"host dup.test is claimed by app one (src/one) and app two (src/two)","host":"dup.test","apps":["one","two"],"declared_by":["src/one","src/two"]}`.
 
@@ -244,7 +250,7 @@ Design of change 0022, the shared contract for the feature specs after it. The v
 |---|---|
 |`Snapshot`|`version`, `tenants`, `apps`, `certificates?`, `skew_secret?`, `revert_window_secs?`, `acme?`, `entry_points?` (policies), `observability?`. Unchanged from v1 except the last two.|
 |`Tenant`|`id`, `weight`, `budget` (`max_inflight`, `max_buffer_bytes`). Unchanged.|
-|`App`|`id`, `tenant`, `declared_by`, `tls` (unchanged: `mode`, `client_ca_pem?`, later TLS options), `allow_domain_fronting?`, `record_bodies?`, `scale_to_zero?`, `canary?`, `default_chain?`, `routers`, `middlewares?`, `services?`, `transports?`, `revisions`, `tcp?`, `udp?`. The v1 fields `hosts` and `filters` are gone: hosts are matchers of routers, filters are middlewares of type `wasm`.|
+|`App`|`id`, `tenant`, `declared_by`, `tls` (`mode`, `client_ca_pem?`, `challenge?`: `http-01` default, or `dns-01`; later TLS options), `allow_domain_fronting?`, `record_bodies?`, `scale_to_zero?`, `canary?`, `default_chain?`, `routers`, `middlewares?`, `services?`, `transports?`, `revisions`, `tcp?`, `udp?`. The v1 fields `hosts` and `filters` are gone: hosts are matchers of routers, filters are middlewares of type `wasm`.|
 |`Router`|`name`, `entry_points?`, `match` (matcher tree), `priority?`, `chain?` (names of middlewares), `service` (service reference), `observability?`, `declared_by?` (defaults to the app's).|
 |`Declared`|The shape of every kind-tagged object: `{"name": "...", "type": "...", <the kind's own fields>}`. Used by `middlewares`, `services`, `transports` and the L4 equivalents. The envelope holds the kind's fields as an opaque JSON map; the kind's module owns their type and parses them with `deny_unknown_fields`.|
 |`Revision`|`id`, `state` (`serving`, `retiring`, `draining`), `weight`, `services` (the `Declared` services of this release). The v1 `upstreams` become a service of type `loadbalancer`.|
@@ -336,7 +342,7 @@ Host ownership: a literal host pattern is claimed by the positive `host` leaves 
 |`cross_tenant_wildcard`|A claim lies under another tenant's wildcard.|Unchanged.|
 |`cross_tenant_catch_all`|Fallback routers of two tenants share an entry point.|New.|
 |`catch_all_not_allowed`|A fallback router (no host constraint, or a `host_regexp` with no literal host beside it) of a tenant the operator has not allowed (`CATCH_ALL_TENANTS`), on an entry point whose `tenants` policy does not name that tenant alone.|New.|
-|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, or two apps of one tenant share a pattern, and their `tls.client_ca_pem` differ (compared as written). A later TLS option that restricts clients joins the comparison.|v1 compared the same field for wildcards only. TLS is decided per host at the handshake, before any path is known, so it is a property of the app and cannot vary per router.|
+|`tls_policy_conflict`|A claim lies under a wildcard of the same tenant in another app, or two apps of one tenant share a pattern, and their `tls.client_ca_pem` differ (compared as written), or two apps of one tenant share a pattern with different `tls.challenge`. A later TLS option that restricts clients joins the comparison.|v1 compared the same field for wildcards only. TLS is decided per host at the handshake, before any path is known, so it is a property of the app and cannot vary per router.|
 
 ### Services
 
@@ -591,6 +597,7 @@ All settings are environment variables, read once at startup by `Config::from_en
 | `LOG_FORMAT` | `pretty` | `pretty` or `json`. Use `json` in production. |
 | `NODE_NAME` | unset | Name of this node. The node whose name equals the snapshot's `acme.issuer_node` orders certificates; unset never does. |
 | `ACME_CA_FILE` | unset | PEM file with the root certificate to trust for the ACME server, for a private or test CA. Unset: the platform's roots. Operator-provided, never read from a snapshot. |
+| `ACME_DNS_ZONES` | unset | Comma-separated DNS zones an app may use the `dns-01` challenge for. A host is allowed when it is a zone or lies under one. Unset: `dns-01` is off and an app asking for it is rejected with `dns01_not_enabled`. Operator-provided, never read from a snapshot. |
 | `RUST_LOG` | `info` | Log filter, `tracing-subscriber` env-filter syntax (`info,podgate=debug`). Pingora's own `log` records are filtered by the same variable. |
 | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs that may execute at once across all tenants, 1..=256. Filters run through `spawn_blocking`, and this bounds how many threads of tokio's 512-thread blocking pool (which snapshot compiles also use) they can hold. |
 | `WASM_QUEUE_TIMEOUT_MS` | `1000` | Milliseconds a filter run waits for a free worker, 1..=60000. After that the request gets `503` with `retry-after: 1`. |
@@ -635,7 +642,7 @@ Errors: handlers return `Result<_, AppError>`. `AppError` renders `{"error": "<m
 
 ## ACME and on-demand TLS
 
-podgate keeps no state on disk and never calls the control plane, so certificates travel through the snapshot and the event feed. The control plane is the shared store; the TLS listener reads certificates only from `Snapshot.certificates`. HTTP-01 only: DNS-01 would put DNS-provider credentials in the proxy, and a wildcard host of an `acme` app therefore gets no certificate (supply one in `certificates`).
+podgate keeps no state on disk and never calls the control plane, so certificates travel through the snapshot and the event feed. The control plane is the shared store; the TLS listener reads certificates only from `Snapshot.certificates`. HTTP-01 is the default. DNS-01 (`docs/ref/acme-dns01.md`) proves wildcards without a DNS credential in podgate: the control plane publishes the TXT record and confirms it in `acme.dns_ready`. A wildcard of an `acme` app with `challenge: http-01` that no supplied certificate covers is rejected (`wildcard_needs_dns01`).
 
 **Snapshot field `acme`** (optional; absent means no ordering):
 
@@ -648,6 +655,7 @@ podgate keeps no state on disk and never calls the control plane, so certificate
 |`eab`|`{key_id, hmac_key}` external account binding (base64url key) for CAs that require one. Excludes `account_key_pem`: a CA binds only at account creation.|
 |`challenges`|`[{token, key_authorization}]` the control plane pushes back after `acme_challenge` events. Every node serves them.|
 |`requested_hosts`|Exact hosts of `on_demand` apps the control plane approves for ordering (see below).|
+|`dns_ready`|`[{name, value}]` DNS-01 TXT records the control plane published and confirmed. The issuer tells the CA to validate a `dns-01` challenge only when it is listed. At most 1024; no other field is accepted.|
 
 **Issuing.** For each `acme` app, the exact hosts that no certificate in the snapshot answers for are ordered together (one certificate). The issuer opens the order and emits `acme_challenge {token, key_authorization}` once per pending authorization. The control plane pushes a snapshot whose `acme.challenges` holds them. The issuer waits (up to 5 minutes) until its own table serves every token, tells the CA, finalizes and emits `certificate_issued {hosts, cert_pem, key_pem}`. The control plane stores `{hosts, cert_pem, key_pem}` under `certificates` and pushes it; a certificate for the same hosts replaces the old one. `key_pem` is a private key: the feed is reachable only through the `0600` admin socket, and `PrivateKeyPem` hides it from `Debug`.
 
@@ -665,7 +673,8 @@ Why before the handshake: Pingora's rustls backend has no async certificate call
 
 |Kind|Fields|Emitted by|
 |---|---|---|
-|`acme_challenge`|`token`, `key_authorization`|the issuer, per pending authorization|
+|`acme_challenge`|`type`: `http-01` with `token`, `key_authorization`; `dns-01` with `name`, `value`|the issuer, per pending authorization|
+|`acme_challenge_done`|`type`, `name`, `value` (`dns-01` only)|the issuer, per record, when its order's validation ends (passed, failed, abandoned or cancelled); the control plane removes the record|
 |`certificate_issued`|`hosts`, `cert_pem` (chain, leaf first), `key_pem` (PKCS#8)|the issuer|
 |`certificate_requested`|`host`|any node, on an on-demand handshake; once per host per pending period (until its certificate arrives, at most 10 minutes), not per handshake|
 
