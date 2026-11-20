@@ -5,6 +5,9 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -497,4 +500,123 @@ async fn sticky_composes_with_revision_pinning() {
     assert_eq!(&only_revision.body[..2], &first.body[..2]);
     assert!(header_of(&only_revision, NAME).is_some());
     assert!(header_of(&only_revision, "__podgate_rev").is_none());
+}
+
+/// A backend that answers its name on every path but `/healthz`, where it answers the status
+/// the test sets.
+struct Health {
+    addr: SocketAddr,
+    status: Arc<AtomicU16>,
+}
+
+impl Health {
+    async fn start(name: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status = Arc::new(AtomicU16::new(200));
+        let shared = Arc::clone(&status);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let status = Arc::clone(&shared);
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    loop {
+                        while let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&seen[..end]).into_owned();
+                            seen.drain(..end + 4);
+                            let (code, body) = if head.contains(" /healthz") {
+                                (status.load(Ordering::Relaxed), "probe")
+                            } else {
+                                (200, name)
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {code} X\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            if stream.write_all(response.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                });
+            }
+        });
+        Self { addr, status }
+    }
+
+    fn set_status(&self, status: u16) {
+        self.status.store(status, Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn sticky_repins_when_pinned_server_unhealthy() {
+    let podgate = Podgate::start().await;
+    let backends = [Health::start("one").await, Health::start("two").await];
+    let mut web = sticky_service(
+        "web",
+        &[backends[0].addr, backends[1].addr],
+        &json!({ "cookie": {} }),
+    );
+    web["health_check"] = json!({
+        "path": "/healthz", "interval_secs": 1, "timeout_secs": 1,
+        "healthy_threshold": 1, "unhealthy_threshold": 1
+    });
+    push(
+        &podgate,
+        &pushed(1, &[app("a", &["a.test"], &[serving("r1", &[web])])]),
+    )
+    .await;
+
+    let first = podgate.get("a.test", "/").await;
+    let old = cookie_of(&first, NAME);
+    let old_header = format!("{NAME}={old}");
+    let down = ["one", "two"]
+        .iter()
+        .position(|name| *name == first.body)
+        .expect("a known server");
+    for _ in 0..3 {
+        assert_eq!(
+            get(&podgate, "a.test", "/", &old_header).await.body,
+            first.body
+        );
+    }
+
+    backends[down].set_status(503);
+    let mut moved = None;
+    for _ in 0..200 {
+        let response = get(&podgate, "a.test", "/", &old_header).await;
+        if response.body != first.body {
+            moved = Some(response);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let moved = moved.expect("the unhealthy server stops taking its pinned client");
+    assert_eq!(moved.status, 200, "{moved:?}");
+    let fresh = cookie_of(&moved, NAME);
+    assert_ne!(fresh, old, "the client gets a new pin: {moved:?}");
+    let fresh_header = format!("{NAME}={fresh}");
+    for _ in 0..5 {
+        let again = get(&podgate, "a.test", "/", &fresh_header).await;
+        assert_eq!(again.body, moved.body, "{again:?}");
+        assert!(header_of(&again, NAME).is_none(), "{again:?}");
+    }
+
+    // The old cookie is not forgotten, only unusable while its server is down.
+    backends[down].set_status(200);
+    let mut back = false;
+    for _ in 0..200 {
+        if get(&podgate, "a.test", "/", &old_header).await.body == first.body {
+            back = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(back, "the recovered server takes its old pin again");
 }
