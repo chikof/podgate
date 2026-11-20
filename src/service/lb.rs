@@ -166,16 +166,28 @@ struct Object {
     include_query: Option<bool>,
 }
 
+/// Every algorithm `Balancer::compile` builds. `compile` refuses a name that is not listed here
+/// before it looks at its arms, so an arm for a new algorithm is dead until its name is listed;
+/// the `algorithm` schema is built from this list.
+pub(super) const BUILT: [&str; 9] = [
+    "round_robin",
+    "weighted_round_robin",
+    "least_conn",
+    "p2c_ewma",
+    "random",
+    "ip_hash",
+    "uri_hash",
+    "header_hash",
+    "hrw",
+];
+
 /// The schema of `algorithm`: one of the names, or the object form.
 pub(super) fn algorithm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     use schemars::JsonSchema as _;
     schemars::json_schema!({
         "description": "The balancing algorithm: a name, or an object `{\"type\": name, ...options}`. Absent: `round_robin`.",
         "oneOf": [
-            { "enum": [
-                "round_robin", "weighted_round_robin", "least_conn", "p2c_ewma", "random",
-                "ip_hash", "uri_hash", "header_hash", "hrw"
-            ] },
+            { "enum": BUILT },
             Object::json_schema(generator)
         ]
     })
@@ -211,6 +223,12 @@ impl Balancer {
                 ));
             }
         };
+        if !BUILT.contains(&name) {
+            return Err(Invalid::new(
+                "invalid_service",
+                format!("unknown algorithm {name}"),
+            ));
+        }
         if header.is_some() && name != "header_hash" {
             return Err(Invalid::new(
                 "invalid_service",
@@ -376,6 +394,26 @@ mod test {
             compile(header_hash()),
             compile(json!("hrw")),
         ]
+    }
+
+    #[test]
+    fn built_lists_exactly_the_algorithms_compile_builds() {
+        let up = servers(2);
+        for name in BUILT {
+            let declared = if name == "header_hash" {
+                header_hash()
+            } else {
+                json!(name)
+            };
+            let balancer = Balancer::compile(Some(&declared), &up)
+                .unwrap_or_else(|err| panic!("{name} is listed in BUILT: {}", err.message));
+            assert_eq!(balancer.name(), name);
+        }
+        let err = Balancer::compile(Some(&json!("zzz_unlisted")), &up).expect_err("unlisted");
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            ("invalid_service", "unknown algorithm zzz_unlisted")
+        );
     }
 
     #[test]
