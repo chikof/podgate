@@ -34,7 +34,7 @@ use crate::service::{self, NamedTransport, Service, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::CertStore;
 use crate::wasm as engine;
-use podgate_model::{App, Declared, EntryPointPolicy, RevisionState, Snapshot};
+use podgate_model::{App, Declared, EntryPointPolicy, RevisionState, SkewSecret, Snapshot};
 
 /// One configuration problem: a stable code, a message, and optional extra fields for the `422`
 /// body (the WASM rejection adds `module` and `name`, for example).
@@ -225,6 +225,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             app_routers,
             context.upstream_policy(),
             &transports,
+            snapshot.skew_secret.as_ref(),
             &mut rejected,
         );
         parts.push((stages, services));
@@ -707,12 +708,17 @@ fn services_of(
     routers: &[CompiledRouter],
     policy: &UpstreamPolicy,
     transports: &[NamedTransport],
+    skew_secret: Option<&SkewSecret>,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
         |declared: &Declared, at: String, rejected: &mut Vec<Rejected>| match Service::compile(
             declared, transports,
-        ) {
+        )
+        .and_then(|mut service| {
+            service.bind_sticky(skew_secret, &app.id, &declared.name)?;
+            Ok(service)
+        }) {
             Ok(service) => {
                 for invalid in
                     policy.forbidden_servers(&app.tenant, &declared.name, service.servers())

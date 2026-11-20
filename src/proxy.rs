@@ -64,9 +64,8 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
-use crate::service::Lease;
-use crate::service::outlier;
 use crate::service::upstream_policy::UpstreamPolicy;
+use crate::service::{Lease, outlier, sticky};
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
@@ -517,6 +516,7 @@ impl ProxyHttp for Gateway {
     ) -> pingora::Result<()> {
         ctx.failures.upstream_response(upstream_response);
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
+        sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         // Before compression: the chain judges the response as the upstream sent it.
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             let cx = middleware::ResponseCx {

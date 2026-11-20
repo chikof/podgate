@@ -12,9 +12,10 @@
 //! means the server receives nothing. An `https://` server is reached through the service's
 //! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
 //! `health_check` probes the servers ([`super::health`]), `passive` ejects servers that fail real
-//! requests ([`super::outlier`]), and a service declares at most 256 servers. Planned fields
-//! (`sticky`, a `false` `pass_host_header`), planned algorithms and `h2c://` servers are refused
-//! with `service_not_built`; a server named by host name is `dns_upstream_not_built`.
+//! requests ([`super::outlier`]), `sticky` pins a client to one server by cookie
+//! ([`super::sticky`]), and a service declares at most 256 servers. Planned fields (a `false`
+//! `pass_host_header`), planned algorithms and `h2c://` servers are refused with
+//! `service_not_built`; a server named by host name is `dns_upstream_not_built`.
 //!
 //! The runtime state of the servers (`healthy`, `ejected_until_ms`, `active`, `ewma_us`) and of
 //! the service (its turn counter) is in [`super::state`], outside the table, so a push that
@@ -31,9 +32,10 @@ use super::health::{self, Check};
 use super::lb::{Balancer, PickCx};
 use super::outlier::Passive;
 use super::state::{self, Lease, ServerState, ServiceState};
+use super::sticky::Sticky;
 use super::transport::{self, Transport, Upstream};
 use crate::compile::Invalid;
-use podgate_model::Declared;
+use podgate_model::{Declared, SkewSecret};
 
 /// The configuration of a `loadbalancer`.
 #[derive(Debug, Deserialize)]
@@ -98,6 +100,7 @@ pub struct LoadBalancer {
     transport: Arc<Transport>,
     health: Option<Arc<Check>>,
     passive: Option<Passive>,
+    sticky: Option<Sticky>,
 }
 
 fn not_built(what: &str) -> Invalid {
@@ -172,9 +175,7 @@ impl LoadBalancer {
             ));
         }
         let passive = config.passive.as_ref().map(Passive::compile).transpose()?;
-        if config.sticky.is_some() {
-            return Err(not_built("sticky"));
-        }
+        let sticky = config.sticky.as_ref().map(Sticky::compile).transpose()?;
         let transport = match config.transport.as_deref() {
             Some(name) => transport::find(transports, name)?,
             None => Arc::new(Transport::default()),
@@ -217,6 +218,7 @@ impl LoadBalancer {
             transport,
             health,
             passive,
+            sticky,
         })
     }
 
@@ -259,7 +261,14 @@ impl LoadBalancer {
     /// request on it until dropped. Lock-free and allocation-free.
     #[must_use]
     pub fn pick(&self, cx: PickCx<'_>) -> Option<(SocketAddr, Lease)> {
-        let index = self.balancer.pick(cx, &self.servers, &self.shared)?;
+        let index = match self
+            .sticky
+            .as_ref()
+            .and_then(|sticky| sticky.pinned(cx, &self.servers))
+        {
+            Some(index) => index,
+            None => self.balancer.pick(cx, &self.servers, &self.shared)?,
+        };
         let server = self.servers.get(index)?;
         Some((
             server.addr,
@@ -271,6 +280,25 @@ impl LoadBalancer {
     #[must_use]
     pub fn health_check(&self) -> Option<&Arc<Check>> {
         self.health.as_ref()
+    }
+
+    /// The sticky cookie setting, when the service has one.
+    #[must_use]
+    pub fn sticky(&self) -> Option<&Sticky> {
+        self.sticky.as_ref()
+    }
+
+    /// Keys the sticky cookie, if any, for this service of `app`; see `Sticky::bind`.
+    pub(super) fn bind_sticky(
+        &mut self,
+        secret: Option<&SkewSecret>,
+        app: &str,
+        service: &str,
+    ) -> Result<(), Invalid> {
+        match &mut self.sticky {
+            Some(sticky) => sticky.bind(secret, app, service),
+            None => Ok(()),
+        }
     }
 
     /// The service's fingerprint, its shared state and its servers, for [`state::Registry`] to
@@ -363,7 +391,7 @@ mod test {
         );
         let mut sticky = lb(&json!([]));
         sticky["sticky"] = json!({});
-        assert_eq!(code(sticky), "service_not_built");
+        assert_eq!(code(sticky), "invalid_service");
         let mut misspelt = lb(&json!([]));
         misspelt["algorithms"] = json!("round_robin");
         assert_eq!(code(misspelt), "invalid_service");

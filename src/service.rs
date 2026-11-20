@@ -15,10 +15,10 @@
 //! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
 //! (`state.rs`, see [`state`]), upstream transports (`transport.rs`: the TLS settings of the
 //! connection to a server), active health checks (`health.rs`, see [`health`]), passive outlier
-//! ejection (`outlier.rs`, see [`outlier`]) and, empty until their specs land, sticky cookies
-//! (`sticky.rs`) and DNS
+//! ejection (`outlier.rs`, see [`outlier`]) and, empty until its spec lands, DNS
 //! upstreams (`resolve.rs`). [`upstream_policy`] is built: the operator's rule for which
 //! addresses a tenant's servers may have, checked by the compiler and before every connection.
+//! Sticky cookies (`sticky.rs`) are built: the load balancer's `pick` consults them first.
 //!
 //! Adding a service type: a file here with `compile` and `pick`, one variant in [`Service`] and
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
@@ -31,7 +31,7 @@ mod mirroring;
 pub mod outlier;
 mod resolve;
 pub mod state;
-mod sticky;
+pub mod sticky;
 mod transport;
 pub mod upstream_policy;
 mod weighted;
@@ -39,12 +39,13 @@ mod weighted;
 use std::net::SocketAddr;
 
 use crate::compile::Invalid;
-use podgate_model::Declared;
+use podgate_model::{Declared, SkewSecret};
 
 pub use lb::PickCx;
 pub use loadbalancer::{LoadBalancer, Server};
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
+pub use sticky::Sticky;
 pub use transport::{Named as NamedTransport, Summary as TransportSummary, Transport, Upstream};
 
 /// Service types that are planned and not built yet.
@@ -101,6 +102,30 @@ impl Service {
     pub fn servers(&self) -> &[Server] {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
+        }
+    }
+
+    /// The sticky cookie setting, when the service pins clients to a server.
+    #[must_use]
+    pub fn sticky(&self) -> Option<&Sticky> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.sticky(),
+        }
+    }
+
+    /// Keys the service's sticky cookie, if it has one, with the snapshot's `secret` for `app`.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_service` when the service is sticky and the snapshot has no `skew_secret`.
+    pub fn bind_sticky(
+        &mut self,
+        secret: Option<&SkewSecret>,
+        app: &str,
+        service: &str,
+    ) -> Result<(), Invalid> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.bind_sticky(secret, app, service),
         }
     }
 
