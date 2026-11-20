@@ -21,7 +21,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | 0030 (each knob works or is rejected as `unsupported_setting`) |
 | HTTP/2 stream limit, max header size | `http2.maxConcurrentStreams`, `http.maxHeaderBytes` | `max_header_size`, `protocols` | 0030 (same rule) |
 | Underscore and alias header names | `aliasHeadersStrategy`, `underscoreHeadersStrategy` | none | 0030 (`underscore_headers`) |
-| Encoded characters policy | `http.encodedCharacters` | none | 0024 (normalization, refusal) and 0030 (`allow_encoded_slash` opt-in) |
+| Encoded characters policy | `http.encodedCharacters` | none | built (normalization and refusal of encoded slashes, NUL, encoded dot segments), 0030 (`allow_encoded_slash` opt-in) |
 | Graceful shutdown | `transport.lifeCycle` | `grace_period` | built (`REQUEST_TIMEOUT_SECS`, SIGTERM) |
 | HTTP/3 and QUIC | `http3` | default | 0086 (a QUIC front inside the process, per-connection and per-tenant memory budgets; no mTLS or WebSockets over h3) |
 
@@ -30,9 +30,9 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
 | Host exact and wildcard | `Host` | `host`, site names | built |
-| Host regexp | `HostRegexp` | `header_regexp Host` | 0027, with the cross-tenant capture rule |
-| Path, prefix, regexp | `Path`, `PathPrefix`, `PathRegexp` | `path`, `path_regexp` | 0024 (prefix is whole-segment) |
-| Method | `Method` | `method` | 0025 |
+| Host regexp | `HostRegexp` | `header_regexp Host` | built: a regexp only narrows a literal claim; a bare one needs an exclusive entry point or the operator's allowance (`catch_all_not_allowed`) |
+| Path, prefix, regexp | `Path`, `PathPrefix`, `PathRegexp` | `path`, `path_regexp` | built (prefix is whole-segment) |
+| Method | `Method` | `method` | built |
 | Header, header regexp | `Header`, `HeaderRegexp` | `header`, `header_regexp` | 0025 |
 | Query, query regexp | `Query`, `QueryRegexp` | `query` | 0025 |
 | Client IP | `ClientIP` (peer) | `remote_ip`, `client_ip` | 0026 (`client_ip` resolves through trusted proxies) |
