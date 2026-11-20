@@ -119,9 +119,12 @@ the log.
 - A file is never read whole. Reads are `pread` calls of 64 KiB on the blocking pool, and the next
   chunk is read while the previous one is written to the client.
 - A response in flight holds at most two chunks. podgate charges them (128 KiB) to the tenant's
-  `max_buffer_bytes` **before the file is opened**. A tenant over its budget gets `503`
-  with `retry-after: 1`; other tenants are unaffected. The charge ends when the response is
-  finished or the client has gone.
+  `max_buffer_bytes` **before the file is opened**. A tenant whose budget is full at
+  that moment gets `503` with `retry-after: 1` (a capacity refusal: auto-revert does not count
+  it); other tenants are unaffected. The charge ends when the response is finished or the
+  client has gone. A tenant whose whole `max_buffer_bytes` is below 131072 could never serve a
+  file, so a snapshot that gives it a static service is `invalid_service` (422), naming the
+  tenant, the bytes needed and the budget.
 - `STATIC_MAX_CONCURRENT_READS` (default four per core, at most 256) bounds the file-system
   operations (an open, or one chunk read) the whole process runs at once. An operation that finds
   no free slot within a second answers `503` with `retry-after: 1` (mid-response it cuts the

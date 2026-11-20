@@ -395,7 +395,12 @@ impl Record {
             router: router_name,
             service,
             revision,
-            server: ctx.route.as_ref().map(|selected| selected.upstream),
+            // A static service has no server; it reports the unspecified address.
+            server: ctx
+                .route
+                .as_ref()
+                .map(|selected| selected.upstream)
+                .filter(|addr| !addr.ip().is_unspecified()),
             method,
             host,
             path,

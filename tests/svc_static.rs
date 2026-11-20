@@ -921,6 +921,47 @@ async fn static_over_budget_503() {
 }
 
 #[tokio::test]
+async fn static_budget_too_small_rejected_at_compile() {
+    let site = Site::start().await;
+    let snapshot_with = |version: u64, budget: u64| {
+        json!({
+            "version": version,
+            "tenants": [{
+                "id": "t1", "weight": 1,
+                "budget": { "max_inflight": 100, "max_buffer_bytes": budget }
+            }],
+            "apps": [static_app("a", "t1", "a.test", site_config())],
+        })
+    };
+    let refused = site
+        .podgate
+        .push_snapshot(&snapshot_with(1, RESERVATION - 1))
+        .await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(conflict_codes(&refused), ["invalid_service"]);
+    let entry = &refused.json()["conflicts"][0];
+    let message = entry["message"].as_str().expect("message");
+    assert!(
+        message.contains("t1") && message.contains("131072") && message.contains("131071"),
+        "names the tenant, the bytes needed and the budget: {message}"
+    );
+    assert_eq!(
+        site.podgate.get("a.test", "/hello.txt").await.status,
+        404,
+        "nothing applied"
+    );
+    let exact = site
+        .podgate
+        .push_snapshot(&snapshot_with(2, RESERVATION))
+        .await;
+    assert_eq!(
+        exact.status, 200,
+        "a budget of exactly one reservation is enough"
+    );
+    assert_eq!(site.get("/hello.txt").await.status, 200);
+}
+
+#[tokio::test]
 async fn static_charge_released_on_abort() {
     let site = two_tenants(RESERVATION).await;
     let (held, _) = begin(site.podgate.proxy_addr, "a.test", "/big.bin").await;

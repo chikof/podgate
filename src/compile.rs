@@ -242,6 +242,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             &transports,
             snapshot.skew_secret.as_ref(),
             context.static_roots().of(&app.tenant),
+            snapshot
+                .tenants
+                .iter()
+                .find(|tenant| tenant.id == app.tenant)
+                .map_or(u64::MAX, |tenant| tenant.budget.max_buffer_bytes),
             &mut rejected,
         );
         parts.push((stages, services));
@@ -728,6 +733,7 @@ fn services_of(
     transports: &[NamedTransport],
     skew_secret: Option<&SkewSecret>,
     static_roots: Option<&TenantRoots>,
+    max_buffer_bytes: u64,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let compile =
@@ -741,6 +747,11 @@ fn services_of(
             Ok(service)
         }) {
             Ok(service) => {
+                if let Some(site) = service.as_static()
+                    && let Err(invalid) = site.check_budget(&app.tenant, max_buffer_bytes)
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
+                }
                 for invalid in
                     policy.forbidden_servers(&app.tenant, &declared.name, service.servers())
                 {

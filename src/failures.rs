@@ -306,7 +306,10 @@ impl Failures {
                 .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default(),
             revision: revision.map(|revision| revision.id().into()),
-            upstream: ctx.route.map(|selected| selected.upstream),
+            upstream: ctx
+                .route
+                .map(|selected| selected.upstream)
+                .filter(|addr| !addr.ip().is_unspecified()),
             request_headers: redacted(&request.headers),
             request_body: capture.request.into_body(),
             status: response.status.as_u16(),

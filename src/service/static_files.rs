@@ -255,6 +255,26 @@ impl StaticSite {
         &self.label
     }
 
+    /// Refuses the service when `tenant`'s whole `max_buffer_bytes` is below what one response
+    /// reserves: such a tenant could never serve a file, and the refusal at request time is a
+    /// capacity answer that auto-revert does not count.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_service` naming the tenant, the bytes one response needs and the budget.
+    pub(crate) fn check_budget(&self, tenant: &str, max_buffer_bytes: u64) -> Result<(), Invalid> {
+        if max_buffer_bytes >= reader::RESERVATION {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "tenant {tenant} has max_buffer_bytes {max_buffer_bytes}, below the {} bytes one static response reserves",
+            reader::RESERVATION
+        ))
+        .with("tenant", tenant)
+        .with("needed_bytes", reader::RESERVATION)
+        .with("max_buffer_bytes", max_buffer_bytes))
+    }
+
     /// Counts a request on the service, for the revision's in-flight bookkeeping.
     pub(super) fn lease(&self) -> Lease {
         Lease::take(&self.state, None)
