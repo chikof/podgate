@@ -13,7 +13,8 @@
 //!   ([`crate::compress::RESERVATION_BYTES`] per compressed response). A run that does not fit is
 //!   refused.
 //!
-//! Both refusals are [`AppError::FilterBusy`]: `503` with `retry-after`, never a partial run.
+//! Both refusals are `503` with `retry-after`, never a partial run: [`AppError::FilterBusy`] for no
+//! worker and [`AppError::FilterOverBudget`] for no memory.
 //! The permit comes first, so a queued request holds no memory while it waits.
 //!
 //! The returned [`RunSlot`] moves into the blocking closure and drops when the run ends, not
@@ -58,7 +59,7 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// [`AppError::FilterBusy`] when no worker frees up within the wait, or the tenant's buffer
+    /// [`AppError::FilterBusy`] when no worker frees up within the wait, [`AppError::FilterOverBudget`] when the tenant's buffer
     /// budget cannot take `memory`.
     pub async fn admit(
         &self,
@@ -70,7 +71,11 @@ impl Executor {
             .map_err(|_| AppError::FilterBusy)?
             .map_err(|_| AppError::FilterBusy)?;
         let charge = match tenant {
-            Some(tenant) => Some(tenant.reserve_filter(memory).ok_or(AppError::FilterBusy)?),
+            Some(tenant) => Some(
+                tenant
+                    .reserve_filter(memory)
+                    .ok_or(AppError::FilterOverBudget)?,
+            ),
             None => None,
         };
         Ok(RunSlot {
@@ -114,7 +119,7 @@ mod test {
         assert_eq!(tenant.buffered(), 60);
         assert!(matches!(
             executor.admit(Some(&tenant), 60).await,
-            Err(AppError::FilterBusy)
+            Err(AppError::FilterOverBudget)
         ));
         assert_eq!(tenant.buffered(), 60, "a refused run charges nothing");
         drop(first);

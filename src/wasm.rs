@@ -31,8 +31,9 @@
 //!   (the budget response compression also draws on, 640 KiB per compressed response) before
 //!   the store is created, and holds the charge until the run ends. A request that gets no
 //!   permit in time, or whose tenant cannot afford the memory, answers
-//!   `503 {"error": "wasm filters are over capacity"}` with `retry-after: 1`; the filter does
-//!   not run, not even partly.
+//!   `503` with `retry-after: 1` (`wasm filter pool is busy`, `wasm filter memory is over the
+//!   tenant's budget`); the filter does not run, not even partly. Only the pool-busy refusal is a
+//!   capacity refusal that auto-revert ignores (see [`AppError::is_capacity_refusal`]).
 //!
 //! # The host ABI (proxy-wasm 0.2.x subset)
 //!
@@ -1006,7 +1007,9 @@ async fn write_local(session: &mut Session, local: LocalResponse) -> pingora::Re
 /// is not forwarded. A filter that traps, runs out of fuel or exceeds its memory limit answers
 /// `500`. Before each run `executor` takes a worker and charges the filter's `max_memory_bytes`
 /// to `tenant` (the request's tenant, `None` for no charge); when either is unavailable the
-/// request answers `503` with `retry-after` and the filter does not run. Returns `true` when
+/// request answers `503` with `retry-after` and the filter does not run; `capacity_refusal` is
+/// set when that refusal is one auto-revert must not count ([`AppError::is_capacity_refusal`]).
+/// Returns `true` when
 /// the request was answered here, so the caller returns `Ok(true)` from `request_filter`;
 /// `false` means forward it. An app without filters costs one slice length check.
 ///
@@ -1019,6 +1022,7 @@ pub async fn run_filters(
     app: usize,
     tenant: Option<&Arc<TenantBudget>>,
     executor: &Executor,
+    capacity_refusal: &mut bool,
 ) -> pingora::Result<bool> {
     let count = table.app(app).map_or(0, |app| app.filters().len());
     for index in 0..count {
@@ -1038,6 +1042,7 @@ pub async fn run_filters(
                     filter = index,
                     "wasm filter refused: no worker or memory budget"
                 );
+                *capacity_refusal = err.is_capacity_refusal();
                 respond::write_error(session, &err).await?;
                 return Ok(true);
             }

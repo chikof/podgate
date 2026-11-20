@@ -7,9 +7,9 @@
 //!
 //! What counts: the status of the response podgate wrote to the client, so an upstream `5xx` and
 //! a `5xx` podgate made itself (`502`/`504` on a refused or slow upstream, or the `503` of an app
-//! with no serving revision) are both errors. Capacity refusals are not: the tenant `503` and the
-//! wake-timeout `503` of a scale-to-zero app (both carry `retry-after`) say busy or cold, not
-//! broken, and are left out. A request that got no response
+//! with no serving revision) are both errors. Capacity refusals are not: the tenant `503`, the wake-timeout `503` of a
+//! scale-to-zero app and the filter-pool-busy `503` say busy or cold, not broken, and are left
+//! out (`Ctx::capacity_refusal`, set where podgate answers them). A request that got no response
 //! (the client left first) counts as nothing. A request with a route counts under its revision;
 //! one without a route but with a known host counts under the app only (`revision` is `None`),
 //! so a deploy that leaves an app without a serving revision still shows. A request for an
@@ -299,16 +299,20 @@ impl Outcomes {
 
 /// Records the outcome of a finished request; the one call `Gateway::logging` makes.
 ///
-/// A request that has no response is not counted. A routed request counts under its revision;
-/// an unrouted one counts under the app its host names, when there is one, except a capacity
-/// refusal: an unrouted `503` that carries `retry-after` is the tenant being at `max_inflight`
-/// or a scale-to-zero app that did not wake in time. Both say the app is busy or cold, not that
-/// the deploy is broken, so they never count toward a revert. (The `503` for an app with no
-/// serving revision has no `retry-after` and does count.)
+/// A request that got no response is not counted, and neither is one podgate answered with a
+/// capacity refusal (`ctx.capacity_refusal`, see `AppError::is_capacity_refusal`): the tenant
+/// at `max_inflight`, a scale-to-zero app that did not wake in time, or a busy WASM filter
+/// pool. Those say the app or the proxy is busy or cold, not that the deploy is broken, so they
+/// never count toward a revert. A routed request counts under its revision; an unrouted one
+/// counts under the app its host names, when there is one. (The `503` for an app with no
+/// serving revision is no capacity refusal and does count.)
 pub fn record_request(outcomes: &Outcomes, session: &Session, ctx: &Ctx) {
     let Some(status) = session.response_written().map(|head| head.status.as_u16()) else {
         return;
     };
+    if ctx.capacity_refusal {
+        return;
+    }
     if let Some(selected) = ctx.route {
         let revision = ctx
             .table
@@ -317,13 +321,6 @@ pub fn record_request(outcomes: &Outcomes, session: &Session, ctx: &Ctx) {
         if let Some((app, revision)) = revision {
             outcomes.record(app.id(), Some(revision.id()), status);
         }
-        return;
-    }
-    let capacity_refusal = status == 503
-        && session
-            .response_written()
-            .is_some_and(|head| head.headers.contains_key("retry-after"));
-    if capacity_refusal {
         return;
     }
     let app = route::request_host(session.req_header())

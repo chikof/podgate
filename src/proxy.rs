@@ -106,6 +106,10 @@ pub struct Ctx {
     pub failures: failures::Capture,
     /// Wake and idle state for apps that scale to zero.
     pub wake: wake::State,
+    /// Set when podgate answers with a capacity refusal ([`AppError::is_capacity_refusal`]):
+    /// the request says the proxy or tenant is busy, not that the deploy is broken, so
+    /// [`crate::outcomes::record_request`] does not count it.
+    pub capacity_refusal: bool,
 }
 
 /// The reverse proxy logic: one instance serves every listener.
@@ -189,6 +193,7 @@ impl ProxyHttp for Gateway {
             pool: pool::State::default(),
             failures: failures::Capture::default(),
             wake: wake::State::default(),
+            capacity_refusal: false,
         }
     }
 
@@ -211,6 +216,7 @@ impl ProxyHttp for Gateway {
                         session.req_header(),
                     );
                     if let Err(err) = held.await {
+                        ctx.capacity_refusal = err.is_capacity_refusal();
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
@@ -228,6 +234,7 @@ impl ProxyHttp for Gateway {
                 {
                     Ok(slot) => ctx.tenant_slot = slot,
                     Err(err) => {
+                        ctx.capacity_refusal = err.is_capacity_refusal();
                         respond::write_error(session, &err).await?;
                         return Ok(true);
                     }
@@ -242,8 +249,15 @@ impl ProxyHttp for Gateway {
                 // After routing and every admission: a filter-answered request releases its
                 // guards with the context.
                 let tenant = ctx.tenant_slot.as_ref().map(TenantSlot::tenant);
-                return wasm::run_filters(session, &ctx.table, selected.app, tenant, &self.wasm)
-                    .await;
+                return wasm::run_filters(
+                    session,
+                    &ctx.table,
+                    selected.app,
+                    tenant,
+                    &self.wasm,
+                    &mut ctx.capacity_refusal,
+                )
+                .await;
             }
             // The revision drained after this request loaded its table: route again with the
             // live one. Repeated refusals mean snapshots are landing right now; give up.

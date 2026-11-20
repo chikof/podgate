@@ -92,7 +92,7 @@ async fn wasm_memory_charged() {
     assert_eq!(refused.header("retry-after"), Some("1"));
     assert_eq!(
         refused.json(),
-        json!({"error": "wasm filters are over capacity"})
+        json!({"error": "wasm filter memory is over the tenant's budget"})
     );
 
     let served = podgate.get("small.test", "/").await;

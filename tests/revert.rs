@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use common::{Podgate, Upstream, app, serving, snapshot};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
@@ -208,4 +209,67 @@ async fn auto_revert_releases_held_request() {
         .expect("request task");
     assert_eq!((released.status, released.body.as_str()), (200, "good"));
     assert_eq!(reverted_events(&podgate).await.len(), 1);
+}
+
+/// An app whose one filter loops until its fuel runs out: with a pool of one worker, the first
+/// request holds the pool and every other filtered request is refused as pool-busy.
+fn hogging(id: &str, host: &str, upstream: SocketAddr) -> Value {
+    let wat = r#"(module
+  (memory (export "memory") 1)
+  (func (export "proxy_abi_version_0_2_1"))
+  (func (export "proxy_on_memory_allocate") (param i32) (result i32) (i32.const 1024))
+  (func (export "proxy_on_request_headers") (param i32 i32 i32) (result i32)
+    (loop $again (br $again)) (i32.const 0)))"#;
+    let wasm = wat::parse_str(wat).expect("valid WAT");
+    let mut app = app(id, &[host], &[serving("r2", upstream)]);
+    app["filters"] = json!([{
+        "wasm_base64": base64::engine::general_purpose::STANDARD.encode(wasm),
+        "fuel": 1_000_000_000_000_u64,
+        "max_memory_bytes": 65_536,
+    }]);
+    app
+}
+
+#[tokio::test]
+async fn auto_revert_ignores_filter_pool_busy() {
+    let podgate = Arc::new(
+        Podgate::start_with_env(&[
+            ("WASM_MAX_CONCURRENT", "1"),
+            ("WASM_QUEUE_TIMEOUT_MS", "100"),
+        ])
+        .await,
+    );
+    let good = Upstream::start("good").await;
+    let before = snapshot(1, &[app("a", &["a.test"], &[serving("r1", good.addr)])]);
+    assert_eq!(podgate.push_snapshot(&before).await.status, 200);
+
+    // The change adds a filter. The first request keeps the only worker; the 30 after it are
+    // refused as pool-busy, a capacity answer another tenant's filters could cause too.
+    let after = with_window(snapshot(2, &[hogging("a", "a.test", good.addr)]), 3);
+    assert_eq!(podgate.push_snapshot(&after).await.status, 200);
+    let mut held = tokio::net::TcpStream::connect(podgate.proxy_addr)
+        .await
+        .expect("connect to the proxy");
+    tokio::io::AsyncWriteExt::write_all(
+        &mut held,
+        b"GET / HTTP/1.1\r\nHost: a.test\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect("send the request that takes the worker");
+    sleep(Duration::from_millis(500)).await;
+    let requests: Vec<_> = (0..30)
+        .map(|_| {
+            let podgate = Arc::clone(&podgate);
+            tokio::spawn(async move { podgate.get("a.test", "/").await })
+        })
+        .collect();
+    for request in requests {
+        let response = request.await.expect("request task");
+        assert_eq!(response.status, 503, "{}", response.body);
+        assert_eq!(response.header("retry-after"), Some("1"));
+    }
+
+    sleep(Duration::from_secs(5)).await;
+    assert!(reverted_events(&podgate).await.is_empty());
+    drop(held);
 }

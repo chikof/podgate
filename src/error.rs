@@ -39,9 +39,13 @@ pub enum AppError {
     /// A sleeping app did not wake within its `wake_timeout_secs`: `503`, retry in a few seconds.
     #[error("app did not wake in time")]
     WakeTimeout,
-    /// The tenant's WASM filters have no budget or worker to run on: `503`, retry in a second.
-    #[error("wasm filters are over capacity")]
+    /// No WASM filter worker freed up in time: `503`, retry in a second. The pool is shared by
+    /// every tenant, so this says the proxy is busy.
+    #[error("wasm filter pool is busy")]
     FilterBusy,
+    /// The tenant's buffer budget cannot take a filter's memory: `503`, retry in a second.
+    #[error("wasm filter memory is over the tenant's budget")]
+    FilterOverBudget,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -57,9 +61,11 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Unavailable(_) | Self::Overloaded | Self::WakeTimeout | Self::FilterBusy => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::Unavailable(_)
+            | Self::Overloaded
+            | Self::WakeTimeout
+            | Self::FilterBusy
+            | Self::FilterOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -68,10 +74,23 @@ impl AppError {
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<u32> {
         match self {
-            Self::Overloaded | Self::FilterBusy => Some(1),
+            Self::Overloaded | Self::FilterBusy | Self::FilterOverBudget => Some(1),
             Self::WakeTimeout => Some(5),
             _ => None,
         }
+    }
+
+    /// Whether this answer says the tenant, an app or the proxy is out of capacity (busy or
+    /// cold), not that the deploy is broken. Auto-revert does not count such answers.
+    /// [`Self::FilterBusy`] is one: the filter pool is shared by every tenant. A filter that
+    /// does not fit its own tenant's budget ([`Self::FilterOverBudget`]) is not: the deploy
+    /// raised the filter's memory above what the tenant can pay.
+    #[must_use]
+    pub fn is_capacity_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Overloaded | Self::WakeTimeout | Self::FilterBusy
+        )
     }
 
     /// The JSON body: `{"error": "<message>"}`, plus `conflicts` for a rejected snapshot.
