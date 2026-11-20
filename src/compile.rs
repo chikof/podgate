@@ -481,7 +481,19 @@ fn routers_of(
                     .filter(|name| admits(name))
                     .map(Box::from)
                     .collect();
-                if open.len() != context.entry_points().count() {
+                if open.is_empty() {
+                    rejected.push(Rejected::new(
+                        app,
+                        at,
+                        Invalid::new(
+                            "no_reachable_entry_point",
+                            format!(
+                                "router {} lists no entry points and no http or https entry point of this node admits tenant {}, so it would serve nothing",
+                                router.name, app.tenant
+                            ),
+                        ),
+                    ));
+                } else if open.len() != context.entry_points().count() {
                     compile.narrow_entry_points(open.into_boxed_slice());
                 }
             }

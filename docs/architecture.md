@@ -433,7 +433,7 @@ v1 ran `wasm_filters` after the admissions. It now runs in the chain, before the
 |`upstream_forbidden`|A literal server address that the upstream address policy denies, or that is outside the tenant's allow list. Fields: `service`, `server`, `rule`.|
 |`unknown_transport`, `invalid_transport`|As named.|
 |`invalid_forwarded_headers`|An entry point's `forwarded_headers` with an unknown field or an entry that is not an address or CIDR block.|
-|`unknown_entry_point`, `entry_point_forbidden`, `entry_point_protocol`, `unsupported_setting`|A router on an unbound entry point; on one reserved for another tenant; an HTTP router on a `tcp` entry point; a knob Pingora cannot apply.|
+|`unknown_entry_point`, `entry_point_forbidden`, `entry_point_protocol`, `no_reachable_entry_point`, `unsupported_setting`|A router on an unbound entry point; on one reserved for another tenant; an HTTP router on a `tcp` entry point; a router that lists no entry points when no `http` or `https` entry point of the node admits its tenant (it would serve nothing); a knob Pingora cannot apply.|
 |`duplicate_name`|Two objects of one kind with one name in one app.|
 |`host_conflict`, `route_ambiguity`, `cross_tenant_wildcard`, `tls_policy_conflict`|See above.|
 |`invalid_host`, `unknown_tenant`, `invalid_certificate`, `invalid_skew_secret`, `invalid_acme`, `wasm_*`, `canary_*`|Unchanged.|

@@ -39,11 +39,12 @@ Pingora gives every service its own worker pool, so each additional entry point 
 | Code | When |
 |---|---|
 | `unknown_entry_point` | A router or a policy names an entry point this node did not bind. A snapshot written for another node fails closed instead of exposing a router on the wrong port. |
+| `no_reachable_entry_point` | A router lists no entry points and no `http` or `https` entry point of this node admits its tenant. |
 | `entry_point_forbidden` | A router names an entry point whose `tenants` policy does not list its tenant. |
 | `entry_point_protocol` | An HTTP router names a `tcp` or `udp` entry point. |
 | `catch_all_not_allowed` | A router with no literal host (a bare `host_regexp`, or no host constraint) listens on an entry point that is not exclusive to its tenant. An entry point is exclusive when its `tenants` policy names that tenant alone; the operator can also list the tenant in `CATCH_ALL_TENANTS`. |
 
-A router with no `entry_points` list skips the entry points that do not admit its tenant, and the `tcp` and `udp` ones.
+A router with no `entry_points` list skips the entry points that do not admit its tenant, and the `tcp` and `udp` ones. If that leaves no entry point, the snapshot is rejected with `no_reachable_entry_point` naming the router and its tenant: a deploy that serves nothing must not answer `200`. A list that names only entry points excluding the tenant is `entry_point_forbidden` for each of them.
 
 ## Explain
 

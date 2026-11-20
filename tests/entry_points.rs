@@ -337,3 +337,37 @@ async fn explain_filters_by_entry_point() {
             .is_some_and(|e| e.contains("web"))
     );
 }
+
+#[tokio::test]
+async fn router_reachable_nowhere_rejected() {
+    let podgate = Podgate::start_with_entry_points(&LISTENERS, &[]).await;
+    let up = Upstream::start("b").await;
+    let mut tenant_b = app("b", &["b.test"], &[serving("r1", up.addr)]);
+    tenant_b["tenant"] = json!("t2");
+    // Every http and https entry point admits t1 alone, so a t2 router that lists none would
+    // serve nothing.
+    let mut pushed = two_tenants(1, &[tenant_b.clone()]);
+    pushed["entry_points"] = json!(
+        LISTENERS
+            .iter()
+            .map(|(name, _)| json!({ "name": name, "tenants": ["t1"] }))
+            .collect::<Vec<_>>()
+    );
+    let refused = podgate.push_snapshot(&pushed).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(codes(&refused.json()), ["no_reachable_entry_point"]);
+    let message = refused.json()["conflicts"][0]["message"].to_string();
+    assert!(
+        message.contains("router default") && message.contains("t2"),
+        "{message}"
+    );
+
+    // Naming the entry points explicitly is `entry_point_forbidden` instead.
+    pushed["apps"] = json!([on(tenant_b, &["public", "internal"])]);
+    let refused = podgate.push_snapshot(&pushed).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(
+        codes(&refused.json()),
+        ["entry_point_forbidden", "entry_point_forbidden"]
+    );
+}
