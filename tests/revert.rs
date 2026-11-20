@@ -273,3 +273,75 @@ async fn auto_revert_ignores_filter_pool_busy() {
     assert!(reverted_events(&podgate).await.is_empty());
     drop(held);
 }
+
+/// An upstream that answers `200` after `delay`, so requests pile up behind its limit.
+async fn delayed_upstream(delay: Duration) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                sleep(delay).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nslow")
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn auto_revert_ignores_backend_saturation() {
+    let podgate = Arc::new(Podgate::start().await);
+    let slow = delayed_upstream(Duration::from_millis(200)).await;
+    let before = snapshot(1, &[app("a", &["a.test"], &[serving("r1", slow)])]);
+    assert_eq!(podgate.push_snapshot(&before).await.status, 200);
+
+    // The change sends 600 requests at once at a backend that starts at 32 slots: the tenant's
+    // queue of 512 overflows and the rest is refused as saturated, a capacity answer another
+    // tenant sharing the backend could cause too.
+    let mut after = with_window(
+        snapshot(2, &[app("a", &["a.test"], &[serving("r2", slow)])]),
+        3,
+    );
+    after["tenants"][0]["budget"]["max_inflight"] = json!(10_000);
+    assert_eq!(podgate.push_snapshot(&after).await.status, 200);
+    let requests: Vec<_> = (0..600)
+        .map(|_| {
+            let podgate = Arc::clone(&podgate);
+            tokio::spawn(async move { podgate.get("a.test", "/").await })
+        })
+        .collect();
+    let mut saturated = 0;
+    for request in requests {
+        let response = request.await.expect("request task");
+        match response.status {
+            200 => {}
+            503 => {
+                assert_eq!(response.json()["error"], "backend is saturated");
+                assert_eq!(response.header("retry-after"), Some("1"));
+                saturated += 1;
+            }
+            other => panic!("unexpected status {other}: {}", response.body),
+        }
+    }
+    assert!(saturated >= 40, "only {saturated} requests were refused");
+
+    sleep(Duration::from_secs(5)).await;
+    assert!(reverted_events(&podgate).await.is_empty());
+}

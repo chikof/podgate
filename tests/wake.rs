@@ -189,6 +189,7 @@ async fn app_idle_event() {
             "wake_hold",
             "inflight_admit",
             "tenant_admit",
+            "backend_admit",
             "failure_capture"
         ])
     );

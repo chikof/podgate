@@ -183,6 +183,7 @@ async fn wasm_filter_runs() {
             "route",
             "inflight_admit",
             "tenant_admit",
+            "backend_admit",
             "failure_capture",
             "wasm_filters"
         ])
