@@ -42,9 +42,12 @@ pub mod compress;
 pub mod content_type;
 pub mod digest_auth;
 pub mod headers;
+pub mod in_flight_req;
 pub mod ip_allow_list;
+pub(crate) mod limits;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
+pub mod rate_limit;
 pub mod redirect;
 pub mod redirect_regex;
 pub mod redirect_scheme;
@@ -476,9 +479,9 @@ kinds! {
 
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
-    "rate_limit" => unbuilt,
+    "rate_limit" => RateLimit(rate_limit::RateLimit),
 
-    "in_flight_req" => unbuilt,
+    "in_flight_req" => InFlightReq(in_flight_req::InFlightReq),
 
     "circuit_breaker" => CircuitBreaker(circuit_breaker::CircuitBreaker),
 

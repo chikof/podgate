@@ -909,6 +909,10 @@ pub struct TableHandle {
     basic_auth: Arc<middleware::basic_auth::Registry>,
     // Nonce secret, replay table and failure counters of `digest_auth`; touched only by `swap`.
     digest_auth: Arc<middleware::digest_auth::Registry>,
+    // Buckets of `rate_limit` middlewares; touched only by `swap`.
+    rate_limits: Arc<middleware::rate_limit::Registry>,
+    // Counts of `in_flight_req` middlewares; touched only by `swap`.
+    in_flight_reqs: Arc<middleware::in_flight_req::Registry>,
     // Series of entry points, routers and services, and the snapshot counters; touched by
     // `swap` and when a snapshot is refused.
     metrics: Arc<metrics::Registry>,
@@ -1065,6 +1069,8 @@ impl TableHandle {
         self.breakers.settle(&mut table.apps);
         self.basic_auth.settle(&mut table.apps);
         self.digest_auth.settle(&mut table.apps);
+        self.rate_limits.settle(&mut table.apps);
+        self.in_flight_reqs.settle(&mut table.apps);
         self.metrics.settle(&mut table);
         let version = table.version;
         self.live.store(Arc::new(table));

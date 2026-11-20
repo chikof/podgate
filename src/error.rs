@@ -100,6 +100,20 @@ pub enum AppError {
     /// and the client should retry in a second.
     #[error("static file buffers are over the tenant's budget")]
     StaticOverBudget,
+    /// A `rate_limit` bucket is empty: `429`, with `retry-after` the whole seconds until it holds
+    /// a token (at least 1).
+    #[error("rate limit exceeded")]
+    RateLimited {
+        /// Seconds until the source may try again.
+        retry_after_secs: u32,
+    },
+    /// An `in_flight_req` source is at its `amount`: `429`, retry in a second.
+    #[error("too many requests in flight")]
+    TooManyInFlight,
+    /// The tenant's buffer budget cannot take a limiter's table of sources right now: `503`,
+    /// retry in a second. Declarations that can never fit are refused when the snapshot applies.
+    #[error("rate limiter memory is over the tenant's budget")]
+    LimiterBusy,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -127,7 +141,9 @@ impl AppError {
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
             | Self::AuthBusy
+            | Self::LimiterBusy
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
+            Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -141,6 +157,8 @@ impl AppError {
     pub fn retry_after_secs(&self) -> Option<u32> {
         match self {
             Self::Overloaded
+            | Self::TooManyInFlight
+            | Self::LimiterBusy
             | Self::Saturated
             | Self::StaticBusy
             | Self::StaticOverBudget
@@ -149,6 +167,7 @@ impl AppError {
             | Self::BufferingOverBudget
             | Self::AuthBusy
             | Self::AuthOverBudget => Some(1),
+            Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
             Self::WakeTimeout => Some(5),
             _ => None,
         }
@@ -165,6 +184,9 @@ impl AppError {
         matches!(
             self,
             Self::Overloaded
+                | Self::RateLimited { .. }
+                | Self::TooManyInFlight
+                | Self::LimiterBusy
                 | Self::Saturated
                 | Self::StaticBusy
                 | Self::StaticOverBudget
@@ -199,6 +221,9 @@ impl AppError {
             Self::FilterBusy => "filter_busy",
             Self::AuthBusy => "auth_busy",
             Self::AuthOverBudget => "auth_over_budget",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::TooManyInFlight => "in_flight_limit",
+            Self::LimiterBusy => "limiter_busy",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::Conflict(_) | Self::SnapshotRejected(_) | Self::Internal(_) => "internal",
@@ -325,5 +350,28 @@ mod test {
         assert!(!AppError::AuthOverBudget.is_capacity_refusal());
         assert_eq!(AppError::AuthBusy.log_reason(), "auth_busy");
         assert_eq!(AppError::AuthOverBudget.log_reason(), "auth_over_budget");
+    }
+
+    #[test]
+    fn limiter_refusals_are_429_capacity_refusals_with_retry_after() {
+        let limited = AppError::RateLimited {
+            retry_after_secs: 7,
+        };
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.retry_after_secs(), Some(7));
+        assert_eq!(limited.body(), json!({"error": "rate limit exceeded"}));
+        assert_eq!(limited.log_reason(), "rate_limited");
+        assert_eq!(
+            AppError::TooManyInFlight.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(AppError::TooManyInFlight.retry_after_secs(), Some(1));
+        assert_eq!(
+            AppError::LimiterBusy.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        for err in [limited, AppError::TooManyInFlight, AppError::LimiterBusy] {
+            assert!(err.is_capacity_refusal(), "{err:?}");
+        }
     }
 }

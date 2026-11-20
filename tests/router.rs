@@ -81,7 +81,7 @@ async fn v2_rejects_unknown_middleware() {
     let unknown = podgate.push_snapshot(&with("no_such_kind")).await;
     assert_eq!(unknown.status, 422, "{}", unknown.body);
     assert_eq!(conflict_codes(&unknown.json()), ["unknown_middleware"]);
-    let unbuilt = podgate.push_snapshot(&with("rate_limit")).await;
+    let unbuilt = podgate.push_snapshot(&with("grpc_web")).await;
     assert_eq!(unbuilt.status, 422, "{}", unbuilt.body);
     assert_eq!(conflict_codes(&unbuilt.json()), ["middleware_not_built"]);
 

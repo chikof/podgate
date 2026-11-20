@@ -253,6 +253,9 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         );
         parts.push((stages, services));
     }
+    let stage_lists: Vec<&[middleware::Named]> =
+        parts.iter().map(|(stages, _)| stages.as_slice()).collect();
+    rejected.extend(middleware::limits::over_budget(snapshot, &stage_lists));
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
