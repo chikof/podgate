@@ -81,7 +81,6 @@ use tokio::time::{sleep, timeout};
 
 use super::upstream_policy::UpstreamPolicy;
 use super::{Server, ServerState, Service, Upstream};
-use crate::budget::Escaped;
 use crate::compile::Invalid;
 use crate::router::digest;
 use crate::table::RoutingTable;
@@ -1054,43 +1053,6 @@ impl BackgroundService for HealthService {
         }
         self.scheduler.retain(HTTP_OWNER, |_| false);
     }
-}
-
-/// Prometheus text exposition of `podgate_service_server_up{app,revision,service,server}`: `1`
-/// for a server the health check has not marked down, `0` for one it has. Every server of every
-/// service of `table` has a row; `revision` is empty for a service the app shares.
-#[must_use]
-pub fn render(table: &RoutingTable) -> String {
-    use std::fmt::Write as _;
-
-    let name = "podgate_service_server_up";
-    let mut out = format!(
-        "# HELP {name} Whether the active health check has not marked the server down.\n# TYPE {name} gauge\n"
-    );
-    for app in table.apps() {
-        let shared = app.services().iter().map(|named| ("", named));
-        let own = app.revisions().iter().flat_map(|revision| {
-            revision
-                .services()
-                .iter()
-                .map(move |named| (revision.id(), named))
-        });
-        for (revision, named) in shared.chain(own) {
-            for server in named.service.servers() {
-                let up = u8::from(server.state.healthy.load(Ordering::Relaxed));
-                // Writing to a `String` cannot fail.
-                let _ = writeln!(
-                    out,
-                    "{name}{{app=\"{}\",revision=\"{}\",service=\"{}\",server=\"{}\"}} {up}",
-                    Escaped(app.id()),
-                    Escaped(revision),
-                    Escaped(&named.name),
-                    Escaped(&server.url),
-                );
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]

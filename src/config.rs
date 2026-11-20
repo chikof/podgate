@@ -1,7 +1,7 @@
 //! Settings read from environment variables, once at startup.
 
 use std::net::SocketAddr;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::acme;
 use crate::entry::{self, EntryPoint};
+use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
 
@@ -70,6 +71,8 @@ const _: () =
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
+/// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
+/// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -110,6 +113,12 @@ pub struct Config {
     pub upstream_policy_file: Option<PathBuf>,
     /// File the access log is appended to. Absent: standard output.
     pub access_log_file: Option<PathBuf>,
+    /// TCP address of the read-only metrics listener (`GET /metrics` and nothing else). Absent:
+    /// no listener; the admin socket still serves `GET /metrics`.
+    pub metrics_addr: Option<SocketAddr>,
+    /// Series each tenant may own for its routers, services and servers before they collapse
+    /// into `other` (see [`crate::observe::metrics`]).
+    pub metrics_series_per_tenant: NonZeroU32,
 }
 
 impl Default for Config {
@@ -130,6 +139,8 @@ impl Default for Config {
             catch_all_tenants: Vec::new(),
             upstream_policy_file: None,
             access_log_file: None,
+            metrics_addr: None,
+            metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
         }
     }
 }
@@ -347,6 +358,16 @@ impl Config {
         }
         config.upstream_policy_file = non_empty("UPSTREAM_POLICY_FILE")?.map(PathBuf::from);
         config.access_log_file = non_empty("ACCESS_LOG_FILE")?.map(PathBuf::from);
+        if let Some(raw) = non_empty("METRICS_ADDR")? {
+            config.metrics_addr = Some(parse_addr("METRICS_ADDR", &raw)?);
+        }
+        if let Some(raw) = lookup("METRICS_SERIES_PER_TENANT") {
+            config.metrics_series_per_tenant = raw.trim().parse().map_err(|err| ConfigError {
+                var: "METRICS_SERIES_PER_TENANT",
+                reason: format!("{raw:?} is not a whole number of series, at least 1 ({err})")
+                    .into(),
+            })?;
+        }
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -393,6 +414,8 @@ mod test {
             ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
+            ("METRICS_ADDR", "127.0.0.1:9100"),
+            ("METRICS_SERIES_PER_TENANT", "50"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
         ]);
         assert_eq!(
@@ -415,6 +438,8 @@ mod test {
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
+                metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
+                metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
             })
         );
     }
@@ -448,6 +473,10 @@ mod test {
             ("ACME_DNS_ZONES", "a b"),
             ("UPSTREAM_POLICY_FILE", " "),
             ("ACCESS_LOG_FILE", " "),
+            ("METRICS_ADDR", "nope"),
+            ("METRICS_ADDR", " "),
+            ("METRICS_SERIES_PER_TENANT", "0"),
+            ("METRICS_SERIES_PER_TENANT", "many"),
         ] {
             let err = config(&[(var, value)]).expect_err("value must be rejected");
             assert_eq!(err.var, var);

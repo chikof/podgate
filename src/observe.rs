@@ -3,7 +3,7 @@
 //! refused with `observability_not_built` rather than silently recording nothing.
 
 pub mod access_log;
-mod metrics;
+pub mod metrics;
 mod tracing;
 
 use crate::compile::Invalid;

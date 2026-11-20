@@ -22,6 +22,7 @@
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
 //! - [`admin`]: the admin API router and its background service.
+//! - [`observe::metrics`]: Prometheus series per entry point, router and service, with a series cap per tenant, rendered by `GET /metrics` on the admin socket and on `METRICS_ADDR`.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
 //!   and [`revert`] undoes a snapshot that makes the apps it changed fail.
@@ -120,7 +121,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
             .with_acme_dns_zones(config.acme_dns_zones.iter().map(AsRef::as_ref))
             .with_upstream_policy(upstream_policy.clone()),
-    );
+    )
+    .with_metrics(observe::metrics::Registry::new(
+        config.metrics_series_per_tenant,
+    ));
     let events = EventFeed::new();
     let inflight = Inflight::new(events.clone());
     let budgets = Budgets::new();
@@ -200,6 +204,22 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     }
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
+    if let Some(addr) = config.metrics_addr {
+        let listener = observe::metrics::bind(addr)
+            .with_context(|| format!("cannot bind METRICS_ADDR {addr}"))?;
+        server.add_service(background_service(
+            "metrics",
+            observe::metrics::MetricsService::new(
+                listener,
+                table.clone(),
+                budgets.clone(),
+                backends.clone(),
+                upstream_policy.clone(),
+                access_log.clone(),
+                timeout,
+            ),
+        ));
+    }
     server.add_service(background_service("acme issuer", acme));
     server.add_service(background_service(
         "access log",

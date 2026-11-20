@@ -58,6 +58,7 @@ use crate::fairq::{self, Backends};
 use crate::inflight::{Inflight, InflightGuard};
 use crate::middleware::{self, Flow, RequestCx};
 use crate::observe::access_log::{self, AccessLog};
+use crate::observe::metrics;
 use crate::outcomes::{self, Outcomes};
 use crate::pool;
 use crate::respond;
@@ -128,6 +129,9 @@ pub struct Ctx {
     /// What the access log notes while the request runs: the clock, upstream timing, retries and
     /// the refusal reason.
     pub access: access_log::Pending,
+    /// Counts the request open on its entry point and records it in `logging`, under its
+    /// entry point, router and service (see [`crate::observe::metrics`]).
+    pub metrics: metrics::InFlight,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -145,6 +149,7 @@ pub struct Gateway {
     basic_auth: middleware::basic_auth::Pool,
     upstream_policy: UpstreamPolicy,
     entry_point: Arc<str>,
+    entry: Arc<metrics::EntrySeries>,
     events: EventFeed,
     access_log: Option<AccessLog>,
 }
@@ -170,6 +175,7 @@ impl Gateway {
             backends: Backends::new(),
             entry_point: Arc::from(entry::WEB),
             access_log: None,
+            entry: Arc::default(),
         }
     }
 
@@ -178,6 +184,7 @@ impl Gateway {
     #[must_use]
     pub fn with_entry_point(mut self, name: &str) -> Self {
         self.entry_point = Arc::from(name);
+        self.entry = self.table.metrics().entry_point(name);
         self
     }
 
@@ -359,6 +366,7 @@ impl ProxyHttp for Gateway {
             backend: fairq::Slot::default(),
             lease: None,
             access: access_log::Pending::new(),
+            metrics: metrics::InFlight::begin(&self.entry),
         }
     }
 
@@ -577,6 +585,10 @@ impl ProxyHttp for Gateway {
         self.failures.log(session, ctx);
         outlier::observe(session, error, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
+        if let Some(status) = session.response_written().map(|head| head.status.as_u16()) {
+            ctx.metrics
+                .finish(&ctx.table, ctx.matched, ctx.route.is_some(), status);
+        }
         self.finish_chain(session, error, ctx);
         access_log::log(self.access_log.as_ref(), session, ctx);
         ctx.compression = None;

@@ -1,4 +1,4 @@
-//! `GET /metrics`: Prometheus text exposition of per-tenant usage.
+//! `GET /metrics`: Prometheus text exposition, rendered by [`crate::observe::metrics::render`].
 
 use axum::Router;
 use axum::extract::State;
@@ -7,25 +7,24 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 
 use super::AppState;
-use crate::service::outlier;
+use crate::observe::metrics::{self, CONTENT_TYPE as TEXT_FORMAT};
 
 pub(super) fn routes() -> Router<AppState> {
-    Router::new().route("/metrics", get(metrics))
+    Router::new().route("/metrics", get(scrape))
 }
 
-/// Per-tenant buffer bytes, in-flight requests and the counters behind them, as read from
-/// [`crate::Budgets`] against the live table, then each backend's limit and queue from
-/// [`crate::Backends`].
-async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
-    let table = state.table().load();
+/// Every series podgate has: the per-tenant and per-backend ones and the per entry point,
+/// router and service ones. The `METRICS_ADDR` listener serves the same text.
+async fn scrape(State(state): State<AppState>) -> impl IntoResponse {
     (
-        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        state.budgets().render(&table)
-            + &state.backends().render()
-            + &state.upstream_policy().render()
-            + &state.access_log().render()
-            + &crate::service::health::render(&table)
-            + &outlier::render(&table),
+        [(CONTENT_TYPE, TEXT_FORMAT)],
+        metrics::render(
+            state.table(),
+            state.budgets(),
+            state.backends(),
+            state.upstream_policy(),
+            state.access_log(),
+        ),
     )
 }
 
@@ -45,7 +44,7 @@ mod test {
             EventFeed::new(),
             Inflight::new(EventFeed::new()),
         );
-        let response = metrics(State(state)).await.into_response();
+        let response = scrape(State(state)).await.into_response();
         assert_eq!(
             response.headers()[CONTENT_TYPE],
             "text/plain; version=0.0.4; charset=utf-8"
@@ -53,8 +52,8 @@ mod test {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert!(
-            String::from_utf8_lossy(&body).contains("# TYPE podgate_tenant_buffer_bytes gauge\n")
-        );
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("# TYPE podgate_tenant_buffer_bytes gauge\n"));
+        assert!(body.contains("# TYPE podgate_entry_point_requests_total counter\n"));
     }
 }

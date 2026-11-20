@@ -33,6 +33,7 @@ pub struct CertError {
 #[derive(Debug, Default)]
 pub struct CertStore {
     by_host: HostMap<Arc<CertifiedKey>>,
+    expiries: Vec<(Box<str>, u64)>,
 }
 
 impl CertStore {
@@ -44,6 +45,7 @@ impl CertStore {
     /// or a host claimed by two certificates.
     pub fn build(certificates: &[Certificate]) -> Result<Self, CertError> {
         let mut by_host = HostMap::default();
+        let mut expiries = Vec::new();
         for certificate in certificates {
             let hosts = certificate.hosts.join(",");
             let reject = |reason: String| CertError {
@@ -51,20 +53,35 @@ impl CertStore {
                 reason: reason.into(),
             };
             let key = Arc::new(parse_certified_key(certificate).map_err(reject)?);
+            let not_after = key
+                .cert
+                .first()
+                .and_then(|leaf| x509_parser::parse_x509_certificate(leaf).ok())
+                .and_then(|(_, parsed)| {
+                    u64::try_from(parsed.validity().not_after.timestamp()).ok()
+                });
             for raw in &certificate.hosts {
+                expiries.extend(not_after.map(|at| (raw.clone(), at)));
                 let pattern = HostPattern::parse(raw).map_err(|err| reject(err.to_string()))?;
                 if by_host.insert(pattern, Arc::clone(&key)).is_some() {
                     return Err(reject(format!("host {raw:?} has a second certificate")));
                 }
             }
         }
-        Ok(Self { by_host })
+        Ok(Self { by_host, expiries })
     }
 
     /// The certificate for a server name from the client hello, if the snapshot has one.
     #[must_use]
     pub fn lookup(&self, server_name: &str) -> Option<Arc<CertifiedKey>> {
         self.by_host.lookup(&host::normalize(server_name)).cloned()
+    }
+
+    /// Each declared host with the Unix time its certificate stops being valid, in snapshot
+    /// order. A certificate whose validity cannot be read has no entry.
+    #[must_use]
+    pub fn expiries(&self) -> &[(Box<str>, u64)] {
+        &self.expiries
     }
 }
 

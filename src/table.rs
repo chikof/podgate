@@ -27,6 +27,7 @@ use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
 use crate::middleware;
 use crate::observe::access_log::{self, Policy};
+use crate::observe::metrics::{self, TableSeries};
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::{self, Lease, PickCx, Upstream};
 use crate::tls::{CertError, CertStore};
@@ -629,6 +630,7 @@ pub struct RoutingTable {
     forwarded: HashMap<Box<str>, Trust>,
     context: CompileContext,
     access_log: Option<Arc<Policy>>,
+    series: TableSeries,
 }
 
 impl RoutingTable {
@@ -682,6 +684,7 @@ impl RoutingTable {
             context: context.clone(),
             // `compile::shape` refused an invalid policy before this runs.
             access_log: access_log::compile(snapshot).ok().flatten(),
+            series: TableSeries::default(),
         })
     }
 
@@ -815,6 +818,17 @@ impl RoutingTable {
     pub fn acme(&self) -> &Plan {
         &self.acme
     }
+
+    /// The metric handles of the routers and services, resolved when the table went live.
+    #[must_use]
+    pub fn series(&self) -> &TableSeries {
+        &self.series
+    }
+
+    /// Gives the table the handles the registry settled for it, just before it goes live.
+    pub(crate) fn set_series(&mut self, series: TableSeries) {
+        self.series = series;
+    }
 }
 
 /// Shared handle to the live [`RoutingTable`]. Cheap to clone; every clone sees the same table.
@@ -837,6 +851,9 @@ pub struct TableHandle {
     basic_auth: Arc<middleware::basic_auth::Registry>,
     // Nonce secret, replay table and failure counters of `digest_auth`; touched only by `swap`.
     digest_auth: Arc<middleware::digest_auth::Registry>,
+    // Series of entry points, routers and services, and the snapshot counters; touched by
+    // `swap` and when a snapshot is refused.
+    metrics: Arc<metrics::Registry>,
     // The entry points this process bound; fixed for the life of the handle.
     context: Arc<CompileContext>,
 }
@@ -855,6 +872,21 @@ impl TableHandle {
             context: Arc::new(context),
             ..Self::default()
         }
+    }
+
+    /// Reports and settles metrics through `metrics`, the registry [`crate::observe::metrics`]
+    /// renders, instead of a default one. Call it before the handle is cloned.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: metrics::Registry) -> Self {
+        self.metrics = Arc::new(metrics);
+        self
+    }
+
+    /// The metric registry of this process: where entry points find their series and what the
+    /// endpoints render.
+    #[must_use]
+    pub fn metrics(&self) -> &metrics::Registry {
+        &self.metrics
     }
 
     /// The live table. Call once per request and keep the result.
@@ -888,12 +920,18 @@ impl TableHandle {
         let previous = self.live.load_full();
         let live = previous.version();
         if snapshot.version <= live {
-            return Err(ApplyError::Stale {
+            let err = ApplyError::Stale {
                 live,
                 offered: snapshot.version,
-            });
+            };
+            self.metrics.rejected(&err);
+            return Err(err);
         }
-        let table = RoutingTable::compile_with(snapshot, &self.context)?;
+        let table = RoutingTable::compile_with(snapshot, &self.context).map_err(|err| {
+            let err = ApplyError::from(err);
+            self.metrics.rejected(&err);
+            err
+        })?;
         tracing::info!(
             version = table.version,
             apps = table.apps.len(),
@@ -969,6 +1007,7 @@ impl TableHandle {
         self.breakers.settle(&mut table.apps);
         self.basic_auth.settle(&mut table.apps);
         self.digest_auth.settle(&mut table.apps);
+        self.metrics.settle(&mut table);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
