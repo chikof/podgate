@@ -8,11 +8,14 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::entry::{self, EntryPoint};
+use crate::service::health;
 use crate::service::upstream_policy::UpstreamPolicy;
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
 /// snapshot compiles always find threads.
 const WASM_WORKERS_MAX: usize = 256;
+/// Most active health probes that may run at once.
+const HEALTH_PROBES_MAX: usize = 4096;
 
 /// How log lines are rendered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,6 +64,7 @@ const _: () =
 /// | `WASM_MAX_CONCURRENT` | available cores, at most 256 | WASM filter runs at once, 1..=256. |
 /// | `WASM_QUEUE_TIMEOUT_MS` | `1000` | How long a filter run waits for a worker before `503`, 1..=60000. |
 /// | `BASIC_AUTH_MAX_CONCURRENT` | available cores, at most 256 | `basic_auth` password verifications at once, 1..=256; one tenant may hold half of them. |
+/// | `HEALTH_MAX_CONCURRENT` | `64` | Active health probes in flight at once across all tenants, 1..=4096. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
@@ -86,6 +90,9 @@ pub struct Config {
     /// may hold at most half of them; a verification that finds none free within a second
     /// answers `503` with `retry-after`.
     pub basic_auth_max_concurrent: NonZeroUsize,
+    /// Active health probes that may run at once, across all tenants: the cap that bounds how
+    /// many connections a tenant that declares many servers can make podgate open.
+    pub health_max_concurrent: NonZeroUsize,
     /// Name of this node, compared with the snapshot's `acme.issuer_node`. Absent: never issues.
     pub node_name: Option<Box<str>>,
     /// PEM file with the root certificate trusted for the ACME server. Absent: platform roots.
@@ -110,6 +117,8 @@ impl Default for Config {
             wasm_max_concurrent: default_workers(),
             wasm_queue_timeout_ms: NonZeroU16::MIN.saturating_add(999),
             basic_auth_max_concurrent: default_workers(),
+            health_max_concurrent: NonZeroUsize::MIN
+                .saturating_add(health::DEFAULT_MAX_CONCURRENT - 1),
             node_name: None,
             acme_ca_file: None,
             catch_all_tenants: Vec::new(),
@@ -299,6 +308,20 @@ impl Config {
             }
             config.basic_auth_max_concurrent = workers;
         }
+        if let Some(raw) = lookup("HEALTH_MAX_CONCURRENT") {
+            let probes: NonZeroUsize = raw.trim().parse().map_err(|err| ConfigError {
+                var: "HEALTH_MAX_CONCURRENT",
+                reason: format!("{raw:?} is not a whole number in 1..={HEALTH_PROBES_MAX} ({err})")
+                    .into(),
+            })?;
+            if probes.get() > HEALTH_PROBES_MAX {
+                return Err(ConfigError {
+                    var: "HEALTH_MAX_CONCURRENT",
+                    reason: format!("{probes} is outside 1..={HEALTH_PROBES_MAX}").into(),
+                });
+            }
+            config.health_max_concurrent = probes;
+        }
         let non_empty = |var: &'static str| match lookup(var) {
             Some(raw) if raw.trim().is_empty() => Err(ConfigError {
                 var,
@@ -351,6 +374,7 @@ mod test {
             ("WASM_MAX_CONCURRENT", "2"),
             ("WASM_QUEUE_TIMEOUT_MS", "250"),
             ("BASIC_AUTH_MAX_CONCURRENT", "3"),
+            ("HEALTH_MAX_CONCURRENT", "8"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
@@ -370,6 +394,7 @@ mod test {
                 wasm_max_concurrent: NonZeroUsize::new(2).expect("2 is not zero"),
                 wasm_queue_timeout_ms: NonZeroU16::new(250).expect("250 is not zero"),
                 basic_auth_max_concurrent: NonZeroUsize::new(3).expect("3 is not zero"),
+                health_max_concurrent: NonZeroUsize::new(8).expect("8 is not zero"),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
@@ -398,6 +423,9 @@ mod test {
             ("WASM_QUEUE_TIMEOUT_MS", "60001"),
             ("BASIC_AUTH_MAX_CONCURRENT", "0"),
             ("BASIC_AUTH_MAX_CONCURRENT", "257"),
+            ("HEALTH_MAX_CONCURRENT", "0"),
+            ("HEALTH_MAX_CONCURRENT", "4097"),
+            ("HEALTH_MAX_CONCURRENT", "lots"),
             ("NODE_NAME", " "),
             ("ACME_CA_FILE", ""),
             ("UPSTREAM_POLICY_FILE", " "),

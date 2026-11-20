@@ -16,12 +16,14 @@ pub(super) fn routes() -> Router<AppState> {
 /// [`crate::Budgets`] against the live table, then each backend's limit and queue from
 /// [`crate::Backends`].
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let table = state.table().load();
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        state.budgets().render(&state.table().load())
+        state.budgets().render(&table)
             + &state.backends().render()
             + &state.upstream_policy().render()
-            + &state.access_log().render(),
+            + &state.access_log().render()
+            + &crate::service::health::render(&table),
     )
 }
 

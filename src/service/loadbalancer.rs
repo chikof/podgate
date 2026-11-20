@@ -11,7 +11,8 @@
 //! [`super::lb`]); only `weighted_round_robin` takes server weights, and a weight of `0` there
 //! means the server receives nothing. An `https://` server is reached through the service's
 //! `transport` (`transport.rs`; platform roots and the URL host as SNI when it names none).
-//! Planned fields (`health_check`, `passive`, `sticky`, a `false` `pass_host_header`), planned
+//! `health_check` probes the servers ([`super::health`]), and a service declares at most 256
+//! servers. Planned fields (`passive`, `sticky`, a `false` `pass_host_header`), planned
 //! algorithms and `h2c://` servers are refused with `service_not_built`; a server named by host
 //! name is
 //! `dns_upstream_not_built`.
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::health::{self, Check};
 use super::lb::{Balancer, PickCx};
 use super::state::{self, Lease, ServerState, ServiceState};
 use super::transport::{self, Transport, Upstream};
@@ -94,6 +96,7 @@ pub struct LoadBalancer {
     shared: Arc<ServiceState>,
     fingerprint: u64,
     transport: Arc<Transport>,
+    health: Option<Arc<Check>>,
 }
 
 fn not_built(what: &str) -> Invalid {
@@ -152,8 +155,20 @@ impl LoadBalancer {
     ) -> Result<Self, Invalid> {
         let config: Config = serde_json::from_value(Value::Object(declared.config.clone()))
             .map_err(|err| Invalid::new("invalid_service", format!("loadbalancer: {err}")))?;
-        if config.health_check.is_some() {
-            return Err(not_built("health_check"));
+        let health = config
+            .health_check
+            .as_ref()
+            .map(|value| Check::compile(value).map(Arc::new))
+            .transpose()?;
+        if config.servers.len() > health::MAX_SERVERS {
+            return Err(Invalid::new(
+                "invalid_service",
+                format!(
+                    "loadbalancer declares {} servers, at most {} are allowed",
+                    config.servers.len(),
+                    health::MAX_SERVERS
+                ),
+            ));
         }
         if config.passive.is_some() {
             return Err(not_built("passive"));
@@ -201,6 +216,7 @@ impl LoadBalancer {
             shared: Arc::default(),
             fingerprint: state::fingerprint(declared),
             transport,
+            health,
         })
     }
 
@@ -243,6 +259,12 @@ impl LoadBalancer {
             server.addr,
             Lease::take(&server.state, self.balancer.observe()),
         ))
+    }
+
+    /// The compiled `health_check`, when the service has one.
+    #[must_use]
+    pub fn health_check(&self) -> Option<&Arc<Check>> {
+        self.health.as_ref()
     }
 
     /// The service's fingerprint, its shared state and its servers, for [`state::Registry`] to

@@ -52,7 +52,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Power of two choices | `strategy: p2c` | `random_choose` | built (0031 `p2c_ewma`: latency-aware peak-EWMA, which neither has) |
 | Random | none | `random` | built |
 | Hash policies | `strategy: hrw` | `ip_hash`, `uri_hash`, `header`, `query`, `cookie` | 0032 (`ip_hash`, `uri_hash`, `header_hash`, `hrw`; `query` and `cookie` declined, sticky is 0036) |
-| Active health checks | `healthCheck` | `health_uri` and friends | 0033 |
+| Active health checks | `healthCheck` | `health_uri` and friends | built (`health_check` with thresholds, status ranges, body regex, per-server jitter and a global probe cap; HTTPS probes follow the transport of 0039) |
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | 0034 |
 | Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | 0035 (connect errors; idempotent replay only; no retry on a response status) |
 | Sticky sessions | `sticky.cookie` | `lb_policy cookie` | 0036 (HMAC cookie) |

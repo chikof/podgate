@@ -213,7 +213,9 @@ impl From<RouteError> for AppError {
     fn from(err: RouteError) -> Self {
         match err {
             RouteError::NoRoute => Self::NotFound,
-            RouteError::NoUpstream => Self::Unavailable(err.to_string().into()),
+            RouteError::NoUpstream | RouteError::AllUnhealthy => {
+                Self::Unavailable(err.to_string().into())
+            }
         }
     }
 }

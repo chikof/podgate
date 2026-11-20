@@ -44,6 +44,11 @@ pub enum RouteError {
     /// The router matched but no revision takes new requests.
     #[error("no upstream available")]
     NoUpstream,
+    /// A revision takes new requests but the router's service has no available server: every
+    /// one is unhealthy or ejected. Unlike [`Self::NoUpstream`] the app is not asleep, so a
+    /// `scale_to_zero` app is not woken for it.
+    #[error("no healthy upstream available")]
+    AllUnhealthy,
 }
 
 /// The normalized host a request is for: the URI authority (HTTP/2, absolute-form) or else the
@@ -89,7 +94,8 @@ pub fn matching(
 /// # Errors
 ///
 /// [`RouteError::NoRoute`] when `matched` points outside the table, [`RouteError::NoUpstream`]
-/// when no revision takes new requests or the router's service has no available server.
+/// when no revision takes new requests, [`RouteError::AllUnhealthy`] when one does and its
+/// service has no available server.
 pub fn select(
     table: &RoutingTable,
     matched: Matched,
@@ -100,7 +106,19 @@ pub fn select(
     let (pick, pinned) = match skew::pinned(table, app, matched.router, cx) {
         Some(pick) => (pick, true),
         None => (
-            app.pick(matched.router, cx).ok_or(RouteError::NoUpstream)?,
+            // A revision takes requests but none of its servers does: the app is not asleep,
+            // so nothing may wake it.
+            app.pick(matched.router, cx).ok_or_else(|| {
+                if app
+                    .revisions()
+                    .iter()
+                    .any(|revision| revision.effective_weight() > 0)
+                {
+                    RouteError::AllUnhealthy
+                } else {
+                    RouteError::NoUpstream
+                }
+            })?,
             false,
         ),
     };
@@ -224,6 +242,24 @@ mod test {
         assert_eq!(
             port(&table, &request(Some("a.test"), "/")),
             Err(RouteError::NoUpstream)
+        );
+    }
+
+    #[test]
+    fn a_serving_revision_whose_servers_are_all_down_is_not_asleep() {
+        let table = table(ONE_APP);
+        let revision = &table.app(0).expect("app").revisions()[0];
+        for named in revision.services() {
+            for server in named.service.servers() {
+                server
+                    .state
+                    .healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        assert_eq!(
+            port(&table, &request(Some("a.test"), "/")),
+            Err(RouteError::AllUnhealthy)
         );
     }
 }

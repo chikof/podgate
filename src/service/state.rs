@@ -76,6 +76,8 @@ pub struct ServerState {
     pub ewma_us: AtomicU64,
     /// [`now_ms`] time of the last write of `ewma_us`, which decays with the time since.
     pub ewma_at_ms: AtomicU64,
+    /// Passive outlier counters, owned by `outlier.rs`.
+    pub outlier: super::outlier::State,
 }
 
 impl Default for ServerState {
@@ -86,6 +88,7 @@ impl Default for ServerState {
             active: AtomicU32::new(0),
             ewma_us: AtomicU64::new(0),
             ewma_at_ms: AtomicU64::new(0),
+            outlier: super::outlier::State::default(),
         }
     }
 }
@@ -168,6 +171,12 @@ impl Lease {
     #[must_use]
     pub fn server(&self) -> &Arc<ServerState> {
         &self.state
+    }
+
+    /// Time since the request took this lease: the latency of the response once it came.
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
     }
 
     /// The server answered with `status`. A response below `500` hands the time since the pick

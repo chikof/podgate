@@ -31,6 +31,8 @@
 //!   have, checked by the compiler and before every connection.
 //! - [`observe::access_log`]: the structured access log: fields, filters, sampling, a bounded
 //!   queue and a stdout or file sink that never delays a request.
+//! - [`service::health`]: active health checks: probes each declared server of a service with a
+//!   `health_check` and writes the flag the balancers read.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -209,6 +211,14 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.add_service(background_service(
         "canary",
         CanaryService::new(table.clone(), outcomes.clone(), events.clone()),
+    ));
+    server.add_service(background_service(
+        "health checks",
+        service::health::HealthService::new(
+            table.clone(),
+            upstream_policy.clone(),
+            config.health_max_concurrent,
+        ),
     ));
     server.add_service(background_service(
         "admin API",

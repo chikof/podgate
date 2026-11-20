@@ -4,3 +4,7 @@
 //!
 //! Not built: the `loadbalancer` refuses a `passive` setting with `service_not_built` until its
 //! spec lands.
+
+/// What passive outlier detection keeps per server; the fields arrive with its spec.
+#[derive(Debug, Default)]
+pub struct State {}
