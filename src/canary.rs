@@ -1,8 +1,12 @@
 //! SLO-driven canary: one revision of an app gains traffic only while it stays healthy.
 //!
-//! The snapshot owns the policy ([`Canary`]); podgate owns the live share, kept in the compiled
-//! table (atomics) so a new snapshot, and the recompile of an auto-revert, start
-//! every canary over by construction.
+//! The snapshot owns the policy ([`Canary`]); podgate owns the live share. It is kept outside
+//! the table, in a registry the [`crate::table::TableHandle`] owns, keyed by app id and a
+//! fingerprint of the canary policy plus the app's serving set (every revision's id, backends,
+//! weight and state). A swap that leaves that fingerprint as it was gives the new table the same
+//! runtime, so a push for another app neither restarts a ramp nor revives a regressed canary;
+//! any change to the policy or the serving set, and an auto-revert that restores a different
+//! one, starts the canary over. Entries of apps that lost their canary are dropped.
 //!
 //! # Weight model
 //!
@@ -30,7 +34,8 @@
 //! - at or above it: the share drops to `0` for good and `canary_regressed {app, revision,
 //!   error_permille}` is emitted once. The canary stays at `0`, and
 //!   [`crate::table::CompiledApp::pick_pinned`] refuses it, so sessions pinned to it fall back to
-//!   the weighted pick and get a fresh cookie. A new snapshot is the only way back.
+//!   the weighted pick and get a fresh cookie. Only a change to the canary policy or the app's
+//!   serving set gives it traffic again; a push for another app does not.
 //!
 //! At `100` the canary is promoted and judging stops; the control plane makes it the only
 //!
@@ -40,9 +45,9 @@
 //! ([`crate::revert`]) while the pushed snapshot has a canary policy: the canary already
 //! isolates them to its share and pulls itself back. The other revisions of the app still count.
 
-use std::sync::Mutex;
-use std::sync::PoisonError;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -54,7 +59,7 @@ use thiserror::Error;
 
 use crate::events::{EventFeed, EventKind};
 use crate::outcomes::Outcomes;
-use crate::snapshot::{App, Canary, RevisionState};
+use crate::snapshot::{App, Canary, Revision, RevisionState};
 use crate::table::{CompiledApp, TableHandle};
 
 /// Fewest requests of the canary in a window before its error rate means anything.
@@ -173,38 +178,71 @@ pub(crate) fn validate(app: &App) -> Vec<Rejection> {
         .collect()
 }
 
-/// The live state of one app's canary, owned by its [`CompiledApp`].
+/// What a canary's runtime state is valid for: the policy (which names the canary revision) and
+/// the serving set of its app, every revision's id, backends, weight and state in order. A new
+/// snapshot that leaves all of it as it was keeps the state; any difference starts over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fingerprint {
+    policy: Canary,
+    revisions: Box<[Revision]>,
+}
+
+impl Fingerprint {
+    pub(crate) fn of(app: &App, policy: &Canary) -> Self {
+        Self {
+            policy: policy.clone(),
+            revisions: app.revisions.iter().cloned().collect(),
+        }
+    }
+}
+
+/// The live state of one app's canary. Shared by every table of the app that has the same
+/// [`Fingerprint`]: the registry ([`Registry`]) hands the same runtime to each, so a push that
+/// does not touch the app neither resets the share nor forgets a regression.
 #[derive(Debug)]
 pub(crate) struct Runtime {
-    policy: Canary,
+    fingerprint: Fingerprint,
     /// Index of the canary in the app's revisions.
     index: usize,
     share: AtomicU8,
     regressed: AtomicBool,
     /// Where the window of the next judgment starts.
     since: Mutex<Instant>,
+    /// The effective weight of each revision, shared with the revisions of every table using
+    /// this runtime, so a share change reaches requests that still hold an older table.
+    weights: Box<[Arc<AtomicU16>]>,
 }
 
 impl Runtime {
     /// A canary at its first step. Judging starts one second after `now`: outcomes are counted in
     /// whole seconds, so this keeps what the revision did before the snapshot out of the first window.
-    pub(crate) fn new(policy: Canary, index: usize, now: Instant) -> Self {
-        let share = u8::try_from(policy.step_percent.min(100)).unwrap_or(100);
+    pub(crate) fn new(
+        fingerprint: Fingerprint,
+        index: usize,
+        weights: Box<[Arc<AtomicU16>]>,
+        now: Instant,
+    ) -> Self {
+        let share = u8::try_from(fingerprint.policy.step_percent.min(100)).unwrap_or(100);
         Self {
-            policy,
+            fingerprint,
             index,
             share: AtomicU8::new(share),
             regressed: AtomicBool::new(false),
             since: Mutex::new(now + Duration::from_secs(1)),
+            weights,
         }
     }
 
     pub(crate) fn policy(&self) -> &Canary {
-        &self.policy
+        &self.fingerprint.policy
     }
 
     pub(crate) fn index(&self) -> usize {
         self.index
+    }
+
+    pub(crate) fn weights(&self) -> &[Arc<AtomicU16>] {
+        &self.weights
     }
 
     pub(crate) fn share(&self) -> u8 {
@@ -217,6 +255,40 @@ impl Runtime {
 
     pub(crate) fn regressed(&self) -> bool {
         self.regressed.load(Ordering::Acquire)
+    }
+}
+
+/// The canary runtimes of the live table, by app id. Owned by [`crate::table::TableHandle`],
+/// outside any table, so they outlive swaps like [`crate::Outcomes`] and [`crate::Inflight`].
+#[derive(Debug, Default)]
+pub(crate) struct Registry {
+    runtimes: Mutex<HashMap<Box<str>, Arc<Runtime>>>,
+}
+
+impl Registry {
+    /// Settles the canaries of a table about to go live: an app whose [`Fingerprint`] equals the
+    /// registered one takes over the registered runtime (and its share, verdict and weights);
+    /// any other app keeps the fresh runtime compiled for it, which replaces the old entry.
+    /// Entries of apps the table no longer has, or no longer gives a canary, are dropped.
+    pub(crate) fn settle(&self, apps: &mut [CompiledApp]) {
+        let mut runtimes = self.runtimes.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut kept = HashMap::new();
+        for app in apps {
+            let Some(fresh) = app.canary_runtime() else {
+                continue;
+            };
+            let id: Box<str> = app.id().into();
+            let runtime = match runtimes.get(&id) {
+                Some(old) if old.fingerprint == fresh.fingerprint => {
+                    let old = Arc::clone(old);
+                    app.adopt_canary(Arc::clone(&old));
+                    old
+                }
+                _ => Arc::clone(fresh),
+            };
+            kept.insert(id, runtime);
+        }
+        *runtimes = kept;
     }
 }
 
@@ -240,12 +312,12 @@ pub struct Status<'a> {
 impl<'a> Status<'a> {
     pub(crate) fn of(runtime: &'a Runtime) -> Self {
         Self {
-            revision: &runtime.policy.revision,
+            revision: &runtime.policy().revision,
             share_percent: runtime.share(),
             regressed: runtime.regressed(),
-            step_percent: runtime.policy.step_percent,
-            interval_secs: runtime.policy.interval_secs,
-            max_error_permille: runtime.policy.max_error_permille,
+            step_percent: runtime.policy().step_percent,
+            interval_secs: runtime.policy().interval_secs,
+            max_error_permille: runtime.policy().max_error_permille,
         }
     }
 }
@@ -259,7 +331,7 @@ pub fn judge(app: &CompiledApp, outcomes: &Outcomes, events: &EventFeed, now: In
     if runtime.regressed() || share >= 100 {
         return;
     }
-    let policy = &runtime.policy;
+    let policy = runtime.policy();
     let mut since = runtime.since.lock().unwrap_or_else(PoisonError::into_inner);
     let elapsed = now.saturating_duration_since(*since);
     if elapsed < Duration::from_secs(policy.interval_secs) {
@@ -338,7 +410,7 @@ mod test {
 
     use super::*;
     use crate::snapshot::Snapshot;
-    use crate::table::{CompileError, RoutingTable};
+    use crate::table::{CompileError, RoutingTable, TableHandle};
 
     fn snapshot(canary: &serde_json::Value) -> Snapshot {
         serde_json::from_value(json!({
@@ -458,5 +530,82 @@ mod test {
         assert_eq!(on_canary(app), 0);
         assert!(app.pick_pinned("new").is_none());
         assert!(app.pick_pinned("old").is_some());
+    }
+
+    fn regress(handle: &TableHandle) {
+        let table = handle.load();
+        let app = table.app(0).expect("app");
+        app.canary_runtime()
+            .expect("canary")
+            .regressed
+            .store(true, Ordering::Release);
+        app.set_canary_share(0);
+    }
+
+    fn with_version(version: u64, mut snapshot: Snapshot) -> Snapshot {
+        snapshot.version = version;
+        snapshot
+    }
+
+    #[test]
+    fn canary_state_follows_the_registry_across_swaps() {
+        let handle = TableHandle::new();
+        let first = snapshot(&policy("new", 20, 5, 50));
+        handle.apply(&first).expect("applies");
+        let held = handle.load();
+        regress(&handle);
+
+        // Another app appears: the canary app is untouched, so its verdict carries over, in the
+        // new table and in the one a request still holds.
+        let mut with_other = with_version(2, first.clone());
+        let mut other = with_other.apps[0].clone();
+        other.id = "b".into();
+        other.hosts = vec!["b.test".into()];
+        other.canary = None;
+        with_other.apps.push(other);
+        handle.apply(&with_other).expect("applies");
+        let live = handle.load();
+        let status = live.app(0).and_then(CompiledApp::canary).expect("canary");
+        assert_eq!((status.share_percent, status.regressed), (0, true));
+        assert_eq!(live.app(0).map(|app| app.pick().is_some()), Some(true));
+        let weights = |table: &RoutingTable| -> Vec<u16> {
+            table.app(0).map_or_else(Vec::new, |app| {
+                app.revisions()
+                    .iter()
+                    .map(|rev| rev.effective_weight())
+                    .collect()
+            })
+        };
+        assert_eq!(weights(&live), [10_000, 0, 0]);
+        assert_eq!(
+            weights(&held),
+            weights(&live),
+            "an older table shares the weights"
+        );
+
+        // A different serving set starts over.
+        let mut changed = with_version(3, with_other.clone());
+        changed.apps[0].revisions[0].weight = 4;
+        handle.apply(&changed).expect("applies");
+        let status = handle
+            .load()
+            .app(0)
+            .and_then(CompiledApp::canary)
+            .map(|s| (s.share_percent, s.regressed));
+        assert_eq!(status, Some((20, false)));
+
+        // Losing the canary drops its entry; a canary that comes back is new.
+        regress(&handle);
+        let mut without = with_version(4, changed.clone());
+        without.apps[0].canary = None;
+        handle.apply(&without).expect("applies");
+        let back = with_version(5, changed);
+        handle.apply(&back).expect("applies");
+        let status = handle
+            .load()
+            .app(0)
+            .and_then(CompiledApp::canary)
+            .map(|s| (s.share_percent, s.regressed));
+        assert_eq!(status, Some((20, false)));
     }
 }

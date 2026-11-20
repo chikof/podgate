@@ -66,7 +66,8 @@ pub enum EventKind {
         error: Box<str>,
     },
     /// The canary of an app breached its `max_error_permille` and was pulled back to
-    /// a share of `0`. Emitted once per canary; only a new snapshot gives it traffic again.
+    /// a share of `0`. Emitted once per canary; only a change to its policy or to its app's
+    /// serving set gives it traffic again.
     CanaryRegressed {
         /// The app.
         app: Box<str>,

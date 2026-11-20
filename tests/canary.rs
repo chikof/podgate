@@ -400,9 +400,10 @@ async fn canary_reset_on_snapshot() {
     load.stop().await;
     assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
 
-    // The same policy in a newer snapshot starts over from one step, with a healthy canary.
+    // A newer snapshot that changes the canary policy starts over from one step, with a healthy
+    // canary.
     canary.set(200);
-    let again = snapshot(2, &[canary_app(base.addr, canary.addr, 25, 100)]);
+    let again = snapshot(2, &[canary_app(base.addr, canary.addr, 25, 200)]);
     assert_eq!(podgate.push_snapshot(&again).await.status, 200);
     let reset = explain(&podgate).await;
     assert_eq!(reset["canary"]["regressed"], false);
@@ -467,4 +468,112 @@ async fn canary_regressed_unpins_sessions() {
             "the old pin must not be renewed: {fresh}"
         );
     }
+}
+
+/// The snapshot of `canary_app` plus an app `other` on `other.test`, which only differs by
+/// `other_weight`: pushing a new one changes nothing about app `a`.
+fn with_other(version: u64, canary: Value, upstream: SocketAddr, other_weight: u16) -> Value {
+    let other = app(
+        "other",
+        &["other.test"],
+        &[revision("r1", upstream, other_weight, "serving")],
+    );
+    snapshot(version, &[canary, other])
+}
+
+#[tokio::test]
+async fn canary_survives_unrelated_push() {
+    let podgate = Arc::new(Podgate::start().await);
+    let base = Upstream::start("base").await;
+    let canary = Switch::start("canary", 500).await;
+    let app_a = canary_app(base.addr, canary.addr, 25, 100);
+    let pushed = with_other(1, app_a.clone(), base.addr, 1);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+
+    let load = Load::start(&podgate);
+    wait_until(&podgate, 20, |explained| {
+        explained["canary"]["regressed"] == true
+    })
+    .await;
+    load.stop().await;
+    assert_eq!(events_of(&podgate, "canary_regressed").await.len(), 1);
+
+    // The canary recovers on its own, which must not matter: the verdict stands. Pushes that
+    // only change another app leave it at 0.
+    canary.set(200);
+    for version in 2..5 {
+        let pushed = with_other(version, app_a.clone(), base.addr, 1 + version as u16);
+        assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+        let explained = explain(&podgate).await;
+        assert_eq!(explained["version"], version);
+        assert_eq!(explained["canary"]["regressed"], true);
+        assert_eq!(share(&explained), 0);
+        assert_eq!(weights(&explained), [10_000, 0]);
+    }
+    let load = Load::start(&podgate);
+    sleep(Duration::from_secs(3)).await;
+    load.stop().await;
+    assert_eq!(share(&explain(&podgate).await), 0);
+    assert_eq!(
+        events_of(&podgate, "canary_regressed").await.len(),
+        1,
+        "no new event"
+    );
+    for _ in 0..30 {
+        assert_eq!(podgate.get("a.test", "/").await.body, "base");
+    }
+}
+
+#[tokio::test]
+async fn canary_ramp_survives_unrelated_push() {
+    let podgate = Arc::new(Podgate::start().await);
+    let base = Upstream::start("base").await;
+    let canary = Upstream::start("canary").await;
+    let mut app_a = canary_app(base.addr, canary.addr, 20, 500);
+    app_a["canary"]["interval_secs"] = json!(2);
+    let pushed = with_other(1, app_a.clone(), base.addr, 1);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+
+    // Pushes for another app land more often than the interval; the ramp must still climb.
+    let load = Load::start(&podgate);
+    let mut version = 1;
+    let mut peak = 0;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while peak < 60 {
+        assert!(Instant::now() < deadline, "ramp stalled at {peak}");
+        version += 1;
+        let pushed = with_other(version, app_a.clone(), base.addr, 1 + (version % 50) as u16);
+        assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+        let now = share(&explain(&podgate).await);
+        assert!(now >= peak, "a push reset the share from {peak} to {now}");
+        peak = now;
+        sleep(Duration::from_millis(400)).await;
+    }
+    load.stop().await;
+    assert!(version > 4, "several pushes landed during the ramp");
+}
+
+#[tokio::test]
+async fn canary_reset_on_serving_set_change() {
+    let podgate = Arc::new(Podgate::start().await);
+    let base = Upstream::start("base").await;
+    let canary = Switch::start("canary", 500).await;
+    let pushed = with_other(1, canary_app(base.addr, canary.addr, 25, 100), base.addr, 1);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    let load = Load::start(&podgate);
+    wait_until(&podgate, 20, |explained| {
+        explained["canary"]["regressed"] == true
+    })
+    .await;
+    load.stop().await;
+
+    // The base revision's weight changes: the serving set differs, so the canary starts over.
+    canary.set(200);
+    let mut changed = canary_app(base.addr, canary.addr, 25, 100);
+    changed["revisions"][0]["weight"] = json!(50);
+    let pushed = with_other(2, changed, base.addr, 1);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    let reset = explain(&podgate).await;
+    assert_eq!(reset["canary"]["regressed"], false);
+    assert_eq!(share(&reset), 25);
 }

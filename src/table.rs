@@ -103,7 +103,7 @@ pub struct CompiledRevision {
     upstreams: Box<[SocketAddr]>,
     weight: u16,
     state: RevisionState,
-    live: AtomicU16,
+    live: Arc<AtomicU16>,
     next_upstream: AtomicU64,
 }
 
@@ -114,7 +114,7 @@ impl CompiledRevision {
             upstreams: revision.upstreams.clone().into_boxed_slice(),
             weight: revision.weight,
             state: revision.state,
-            live: AtomicU16::new(0),
+            live: Arc::new(AtomicU16::new(0)),
             next_upstream: AtomicU64::new(0),
         }
     }
@@ -202,7 +202,7 @@ pub struct CompiledApp {
     filters_digest: u64,
     hosts: Box<[Box<str>]>,
     tls: TlsPolicy,
-    canary: Option<Runtime>,
+    canary: Option<Arc<Runtime>>,
 }
 
 fn filters_digest(filters: &[Filter]) -> u64 {
@@ -232,12 +232,20 @@ pub struct Pick {
 
 impl CompiledApp {
     fn new(app: &App, filters: Box<[CompiledFilter]>) -> Self {
+        let revisions: Box<[CompiledRevision]> =
+            app.revisions.iter().map(CompiledRevision::new).collect();
         let canary = app.canary.as_ref().and_then(|policy| {
             let index = app
                 .revisions
                 .iter()
                 .position(|rev| rev.id == policy.revision)?;
-            Some(Runtime::new(policy.clone(), index, Instant::now()))
+            let weights = revisions.iter().map(|rev| Arc::clone(&rev.live)).collect();
+            Some(Arc::new(Runtime::new(
+                canary::Fingerprint::of(app, policy),
+                index,
+                weights,
+                Instant::now(),
+            )))
         });
         let compiled = Self {
             filters,
@@ -247,7 +255,7 @@ impl CompiledApp {
             allow_domain_fronting: app.allow_domain_fronting,
             record_bodies: app.record_bodies,
             scale_to_zero: app.scale_to_zero,
-            revisions: app.revisions.iter().map(CompiledRevision::new).collect(),
+            revisions,
             next_revision: AtomicU64::new(0),
             hosts: app
                 .hosts
@@ -308,8 +316,16 @@ impl CompiledApp {
         }
     }
 
+    /// Takes over `runtime`, the state of an equal canary of an earlier table: from now on this
+    /// app's revisions share its weights. Only the registry calls this, before the table is live.
+    pub(crate) fn adopt_canary(&mut self, runtime: Arc<Runtime>) {
+        for (revision, weight) in self.revisions.iter_mut().zip(runtime.weights()) {
+            revision.live = Arc::clone(weight);
+        }
+        self.canary = Some(runtime);
+    }
     /// The canary's runtime state, for [`canary::judge`].
-    pub(crate) fn canary_runtime(&self) -> Option<&Runtime> {
+    pub(crate) fn canary_runtime(&self) -> Option<&Arc<Runtime>> {
         self.canary.as_ref()
     }
 
@@ -324,13 +340,13 @@ impl CompiledApp {
     /// The canary policy as declared, `None` when the app has none.
     #[must_use]
     pub fn canary_policy(&self) -> Option<&crate::snapshot::Canary> {
-        self.canary.as_ref().map(Runtime::policy)
+        self.canary.as_deref().map(Runtime::policy)
     }
 
     /// The canary's policy and where it stands, `None` when the app has none.
     #[must_use]
     pub fn canary(&self) -> Option<canary::Status<'_>> {
-        self.canary.as_ref().map(canary::Status::of)
+        self.canary.as_deref().map(canary::Status::of)
     }
 
     /// The app's WASM request filters, in the order they run.
@@ -628,6 +644,8 @@ pub struct TableHandle {
     swapped: Arc<watch::Sender<u64>>,
     // The snapshot the live table was compiled from; touched only while `apply_lock` is held.
     source: Arc<Mutex<Option<Arc<Snapshot>>>>,
+    // Canary state that outlives swaps; touched only by `swap`.
+    canaries: Arc<canary::Registry>,
 }
 
 impl TableHandle {
@@ -726,7 +744,8 @@ impl TableHandle {
 
     /// The one place the live table is replaced: stores `table` and fires the [`Self::subscribe`]
     /// signal. Every path that changes the live table goes through here.
-    fn swap(&self, table: RoutingTable) {
+    fn swap(&self, mut table: RoutingTable) {
+        self.canaries.settle(&mut table.apps);
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
