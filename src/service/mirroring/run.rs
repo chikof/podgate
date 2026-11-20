@@ -561,11 +561,13 @@ impl Handover<'_> {
                 shed(Dropped::Backend);
                 continue;
             };
-            let Some(upstream) = service.upstream(addr) else {
+            // The server is one the resolver's checked addresses made (for a name), never the
+            // name: the copy dials the IP, and `send` checks it again.
+            let Some(peer) = service.with_upstream(addr, |upstream| upstream.peer()) else {
                 continue;
             };
             let job = Job {
-                peer: upstream.peer(),
+                peer,
                 copy: Arc::clone(&copy),
                 timeout: self.plan.settings().timeout,
                 policy: self.policy.clone(),

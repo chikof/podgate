@@ -31,6 +31,7 @@ use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
 use crate::service::mirroring::{Plan as MirrorPlan, Scope as MirrorScope, Scopes as MirrorScopes};
+use crate::service::resolve::{NameBudget, Resolver};
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{self, NamedTransport, RingBudget, Service, TenantRoots, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
@@ -235,6 +236,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut rejected = Vec::new();
     let mut parts = Vec::with_capacity(snapshot.apps.len());
     let mut rings = RingBudget::default();
+    let mut names = NameBudget::default();
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let limits = crate::cache::Limits {
             tenant_budget: snapshot
@@ -283,6 +285,8 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                     max_buffer_bytes,
                 },
                 rings: &mut rings,
+                names: &mut names,
+                resolver: context.resolver(),
             },
             &mut rejected,
         );
@@ -778,6 +782,10 @@ struct Limits<'a> {
     statics: StaticCx<'a>,
     /// The hash ring points the snapshot has used so far.
     rings: &'a mut RingBudget,
+    /// The distinct DNS names the snapshot's servers use so far, per app and per tenant.
+    names: &'a mut NameBudget,
+    /// Where servers named by host name find their addresses.
+    resolver: &'a Resolver,
 }
 
 /// Compiles the services of `app` and of each of its revisions, and finds every router's
@@ -791,49 +799,59 @@ fn services_of(
     limits: Limits<'_>,
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
-    let Limits { statics, rings } = limits;
+    let Limits {
+        statics,
+        rings,
+        names,
+        resolver,
+    } = limits;
     let problems = rejected.len();
     // Once a cap on hash rings is exceeded the snapshot is rejected: the remaining services are
     // not built, so one push cannot make the proxy build rings without end.
-    let compile =
-        |declared: &Declared, at: String, rings: &mut RingBudget, rejected: &mut Vec<Rejected>| {
-            if rings.refused() {
-                return None;
-            }
-            match Service::compile(declared, transports, statics.roots).and_then(|mut service| {
+    let compile = |declared: &Declared,
+                   at: String,
+                   rings: &mut RingBudget,
+                   names: &mut NameBudget,
+                   rejected: &mut Vec<Rejected>| {
+        if rings.refused() {
+            return None;
+        }
+        match Service::compile(declared, transports, statics.roots, &app.tenant, resolver).and_then(
+            |mut service| {
                 service.bind_sticky(skew_secret, &app.id, &declared.name)?;
                 rings.charge(&app.tenant, service.ring_points())?;
+                names.charge(&app.tenant, &app.id, service.dns_names())?;
                 Ok(service)
-            }) {
-                Ok(service) => {
-                    if let Some(site) = service.as_static()
-                        && let Err(invalid) =
-                            site.check_budget(&app.tenant, statics.max_buffer_bytes)
-                    {
-                        rejected.push(Rejected::new(app, at.as_str(), invalid));
-                    }
-                    if let Some(mirroring) = service.as_mirroring()
-                        && let Err(invalid) =
-                            mirroring.check_budget(&app.tenant, statics.max_buffer_bytes)
-                    {
-                        rejected.push(Rejected::new(app, at.as_str(), invalid));
-                    }
-                    for invalid in
-                        policy.forbidden_servers(&app.tenant, &declared.name, service.servers())
-                    {
-                        rejected.push(Rejected::new(app, at.as_str(), invalid));
-                    }
-                    Some(service::Named {
-                        name: declared.name.clone(),
-                        service,
-                    })
+            },
+        ) {
+            Ok(service) => {
+                if let Some(site) = service.as_static()
+                    && let Err(invalid) = site.check_budget(&app.tenant, statics.max_buffer_bytes)
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
                 }
-                Err(invalid) => {
-                    rejected.push(Rejected::new(app, at, invalid));
-                    None
+                if let Some(mirroring) = service.as_mirroring()
+                    && let Err(invalid) =
+                        mirroring.check_budget(&app.tenant, statics.max_buffer_bytes)
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
                 }
+                for invalid in
+                    policy.forbidden_servers(&app.tenant, &declared.name, &service.servers())
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
+                }
+                Some(service::Named {
+                    name: declared.name.clone(),
+                    service,
+                })
             }
-        };
+            Err(invalid) => {
+                rejected.push(Rejected::new(app, at, invalid));
+                None
+            }
+        }
+    };
     let shared: Vec<service::Named> = app
         .services
         .iter()
@@ -842,6 +860,7 @@ fn services_of(
                 declared,
                 format!("service {}", declared.name),
                 rings,
+                names,
                 rejected,
             )
         })
@@ -858,6 +877,7 @@ fn services_of(
                         declared,
                         format!("revision {} service {}", revision.id, declared.name),
                         rings,
+                        names,
                         rejected,
                     )
                 })

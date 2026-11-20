@@ -137,9 +137,11 @@ fn balancer_pick_allocates_nothing() {
     let tried = ["127.0.0.1:3".parse().expect("addr")];
     for (index, algorithm) in ALGORITHMS.iter().enumerate() {
         let app = table.app(index).expect("app");
-        let first = app
+        let servers = app
             .service(0, 0)
-            .and_then(|service| service.servers().first());
+            .map(podgate::service::Service::servers)
+            .unwrap_or_default();
+        let first = servers.first();
         // Warm up: first use may initialise lazily.
         drop(app.pick(0, PickCx::new(&keyed)).expect("a server"));
 

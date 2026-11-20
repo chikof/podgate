@@ -585,7 +585,7 @@ struct ServerRow<'a> {
     /// The revision that defines the service; empty for a service the app shares.
     revision: &'a str,
     service: &'a str,
-    url: &'a str,
+    url: Box<str>,
     up: bool,
 }
 
@@ -601,18 +601,19 @@ fn servers_of(app: &CompiledApp) -> Vec<ServerRow<'_>> {
             .map(move |named| (revision.id(), named))
     });
     let mut rows: Vec<ServerRow<'_>> = Vec::new();
-    let mut seen: HashMap<(&str, &str, &str), usize> = HashMap::new();
+    let mut seen: HashMap<(&str, &str, Box<str>), usize> = HashMap::new();
     for (revision, named) in shared.chain(own) {
-        for server in named.service.servers() {
+        // A server named by DNS is several servers with one URL: one row, up when any is.
+        for server in &named.service.servers() {
             let up = server.available();
-            match seen.get(&(revision, &*named.name, &*server.url)) {
+            match seen.get(&(revision, &*named.name, server.url.clone())) {
                 Some(at) => rows[*at].up |= up,
                 None => {
-                    seen.insert((revision, &*named.name, &*server.url), rows.len());
+                    seen.insert((revision, &*named.name, server.url.clone()), rows.len());
                     rows.push(ServerRow {
                         revision,
                         service: &named.name,
-                        url: &server.url,
+                        url: server.url.clone(),
                         up,
                     });
                 }
@@ -637,7 +638,7 @@ fn render_servers(out: &mut String, live: &RoutingTable) {
                 ("app", app.id()),
                 ("revision", row.revision),
                 ("service", row.service),
-                ("server", row.url),
+                ("server", &row.url),
             ]);
             text::sample(out, name, &labels, u8::from(row.up));
         }

@@ -44,6 +44,7 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, RandomState};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -114,6 +115,9 @@ pub struct ServiceState {
     next: AtomicU64,
     /// The secret key of the hashing balancers, random per service and process.
     key: RandomState,
+    /// The state of each address of each server named by DNS, by the server's URL: they are not
+    /// in the registry's server keys, which name one state per URL.
+    named: Mutex<HashMap<(Box<str>, SocketAddr), Arc<ServerState>>>,
 }
 
 impl ServiceState {
@@ -123,7 +127,28 @@ impl ServiceState {
         Self {
             next: AtomicU64::new(seed),
             key: RandomState::new(),
+            named: Mutex::default(),
         }
+    }
+
+    /// The state of the server at `addr` that `url` (a DNS name) stands for, created healthy on
+    /// first use. It survives a push that keeps the service, like every server's state.
+    pub(crate) fn named_state(&self, url: &str, addr: SocketAddr) -> Arc<ServerState> {
+        let mut named = self.named.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(named.entry((url.into(), addr)).or_default())
+    }
+
+    /// Forgets the states of servers named by DNS that are not in `servers`. Requests still
+    /// holding one finish against it.
+    pub(crate) fn retain_named(&self, servers: &[super::Server]) {
+        self.named
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(url, addr), _| {
+                servers
+                    .iter()
+                    .any(|server| server.url == *url && server.addr == *addr)
+            });
     }
 
     /// A keyed hash (SipHash) of `value` under a secret the service keeps for its lifetime: the
@@ -255,19 +280,20 @@ impl Registry {
             for (revision, named) in app.services_mut() {
                 match &mut named.service {
                     Service::LoadBalancer(balancer) => {
-                        let (fingerprint, shared, servers) = balancer.state_mut();
                         let key = Key {
                             app: app_id.clone(),
                             revision: revision.map(Into::into),
                             service: named.name.clone(),
                             server: None,
-                            fingerprint,
+                            fingerprint: balancer.fingerprint(),
                         };
                         if let Some(old) = settled.services.get(&key) {
-                            *shared = Arc::clone(old);
+                            balancer.adopt_shared(Arc::clone(old));
                         }
-                        kept.services.insert(key.clone(), Arc::clone(shared));
-                        for server in servers {
+                        kept.services.insert(key.clone(), balancer.shared());
+                        // Servers named by DNS keep their states in the service's state, which
+                        // was just adopted; these are the ones declared by IP address.
+                        balancer.settle_servers(|server| {
                             let key = Key {
                                 server: Some(server.url.clone()),
                                 ..key.clone()
@@ -279,7 +305,7 @@ impl Registry {
                                 server.state = Arc::clone(old);
                             }
                             kept.servers.insert(key, Arc::clone(&server.state));
-                        }
+                        });
                     }
                     Service::Static(_) | Service::Mirroring(_) => {}
                 }
@@ -338,15 +364,16 @@ mod test {
         table
             .app(0)
             .and_then(|app| app.service(0, 0))
-            .and_then(|service| {
+            .map(|service| {
                 service
                     .servers()
                     .iter()
                     .find(|server| server.addr.port() == port)
+                    .map_or(u32::MAX, |server| {
+                        server.state.active.load(Ordering::Relaxed)
+                    })
             })
-            .map_or(u32::MAX, |server| {
-                server.state.active.load(Ordering::Relaxed)
-            })
+            .unwrap_or(u32::MAX)
     }
 
     #[test]

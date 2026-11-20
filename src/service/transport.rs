@@ -427,13 +427,17 @@ impl Upstream<'_> {
         if !server.tls {
             return HttpPeer::new(server.addr, false, String::new());
         }
-        // Never empty: an empty SNI makes Pingora skip verification. An IP literal is verified
-        // against the certificate's IP SAN and is not sent as SNI.
+        // Never empty: an empty SNI makes Pingora skip verification. The transport's name wins,
+        // then the DNS name the server was declared by (the address is dialled, the name is only
+        // what the certificate is checked against). An IP literal is verified against the
+        // certificate's IP SAN and is not sent as SNI.
         let sni = self
             .transport
             .server_name
             .as_deref()
-            .map_or_else(|| server.addr.ip().to_string(), str::to_owned);
+            .map(str::to_owned)
+            .or_else(|| server.sni_name())
+            .unwrap_or_else(|| server.addr.ip().to_string());
         let mut peer = HttpPeer::new(server.addr, true, sni);
         if self.transport.insecure_skip_verify {
             peer.options.verify_cert = false;

@@ -424,7 +424,7 @@ impl Check {
     pub fn peer(&self, upstream: Upstream<'_>) -> HttpPeer {
         let server = upstream.server;
         let probed = Server {
-            url: Box::default(),
+            url: server.url.clone(),
             addr: self.target(server.addr),
             tls: self.tls.unwrap_or(server.tls),
             h2c: false,
@@ -445,7 +445,14 @@ impl Check {
 
     /// The request bytes for a probe of `target`: `Host` is the check's `hostname`, else the
     /// address being probed.
+    #[cfg(test)]
     fn request(&self, target: SocketAddr) -> Vec<u8> {
+        self.request_for(target, None)
+    }
+
+    /// [`Self::request`] for a server declared by the DNS name `name`: `Host` is the name and the
+    /// probed port rather than the address.
+    fn request_for(&self, target: SocketAddr, name: Option<&str>) -> Vec<u8> {
         let mut out = Vec::with_capacity(256);
         out.extend_from_slice(self.method.as_str().as_bytes());
         out.push(b' ');
@@ -453,7 +460,10 @@ impl Check {
         out.extend_from_slice(b" HTTP/1.1\r\nHost: ");
         match &self.host {
             Some(host) => out.extend_from_slice(host.as_bytes()),
-            None => out.extend_from_slice(target.to_string().as_bytes()),
+            None => match name {
+                Some(name) => out.extend_from_slice(format!("{name}:{}", target.port()).as_bytes()),
+                None => out.extend_from_slice(target.to_string().as_bytes()),
+            },
         }
         out.extend_from_slice(b"\r\nConnection: close\r\n");
         let sets = |name: &str| self.headers.iter().any(|(set, _)| set == name);
@@ -692,6 +702,7 @@ pub struct HttpProbe {
     peer: HttpPeer,
     policy: UpstreamPolicy,
     connector: Arc<TransportConnector>,
+    name: Option<Box<str>>,
 }
 
 impl fmt::Debug for HttpProbe {
@@ -721,7 +732,16 @@ impl HttpProbe {
             peer,
             policy,
             connector,
+            name: None,
         }
+    }
+
+    /// Probes a server declared by the DNS name `name` (when it is one): `Host` is the name and
+    /// the probed port, unless the check sets a `hostname`. The address is what is dialled.
+    #[must_use]
+    pub fn named(mut self, name: Option<String>) -> Self {
+        self.name = name.map(Into::into);
+        self
     }
 
     /// A Pingora connector for probes. One is shared by every probe of a [`HealthService`].
@@ -743,9 +763,13 @@ impl HttpProbe {
             Ok(stream) => stream,
             Err(err) => return Verdict::fail(format!("connect: {err}")),
         };
-        exchange(&mut stream, &self.check.request(target), &self.check)
-            .await
-            .0
+        exchange(
+            &mut stream,
+            &self.check.request_for(target, self.name.as_deref()),
+            &self.check,
+        )
+        .await
+        .0
     }
 }
 
@@ -997,8 +1021,11 @@ impl HealthService {
                 let Some(check) = balancer.health_check() else {
                     continue;
                 };
-                for server in balancer.servers() {
-                    let Some(upstream) = balancer.upstream(server.addr) else {
+                let servers = balancer.servers();
+                for server in &servers {
+                    let Some(probe) = balancer.with_upstream(server.addr, |upstream| {
+                        self.probe_of(check, app.tenant(), upstream, server.sni_name())
+                    }) else {
                         continue;
                     };
                     let key = Key {
@@ -1006,7 +1033,7 @@ impl HealthService {
                         app: app.id().into(),
                         revision: revision.map(Into::into),
                         service: named.name.clone(),
-                        server: server.url.clone(),
+                        server: server.identity().into_owned().into(),
                         fingerprint: check.fingerprint(),
                     };
                     wanted.insert(key.clone());
@@ -1014,7 +1041,7 @@ impl HealthService {
                         key,
                         check.schedule(),
                         Arc::clone(&server.state),
-                        self.probe_of(check, app.tenant(), upstream),
+                        probe,
                     );
                 }
             }
@@ -1023,14 +1050,23 @@ impl HealthService {
             .retain(HTTP_OWNER, |key| wanted.contains(key));
     }
 
-    fn probe_of(&self, check: &Arc<Check>, tenant: &str, upstream: Upstream<'_>) -> ProbeFn {
-        let probe = Arc::new(HttpProbe::new(
-            Arc::clone(check),
-            tenant,
-            check.peer(upstream),
-            self.policy.clone(),
-            Arc::clone(&self.connector),
-        ));
+    fn probe_of(
+        &self,
+        check: &Arc<Check>,
+        tenant: &str,
+        upstream: Upstream<'_>,
+        name: Option<String>,
+    ) -> ProbeFn {
+        let probe = Arc::new(
+            HttpProbe::new(
+                Arc::clone(check),
+                tenant,
+                check.peer(upstream),
+                self.policy.clone(),
+                Arc::clone(&self.connector),
+            )
+            .named(name),
+        );
         Arc::new(move || {
             let probe = Arc::clone(&probe);
             Box::pin(async move { probe.run().await })

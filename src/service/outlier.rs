@@ -257,14 +257,14 @@ pub fn observe(session: &Session, error: Option<&Error>, ctx: &Ctx) {
         (Some(_), _) | (None, None) => return,
         (None, Some(head)) => passive.is_failure(head.status.as_u16(), lease.elapsed()),
     };
-    passive.record(service.servers(), lease.server(), failed, now_ms());
+    passive.record(&service.servers(), lease.server(), failed, now_ms());
 }
 
 /// Counts a failed attempt against the server it was sent to, before the request goes on to
 /// another one: `retry` calls this once per retried attempt, so `observe` counts only the last.
 pub fn observe_failed_attempt(ctx: &Ctx) {
     if let Some((passive, service, lease)) = target(ctx) {
-        passive.record(service.servers(), lease.server(), true, now_ms());
+        passive.record(&service.servers(), lease.server(), true, now_ms());
     }
 }
 

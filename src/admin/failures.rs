@@ -86,17 +86,17 @@ async fn replay(
             .into(),
         ));
     }
-    let upstream = compiled
-        .first_upstream(revision)
+    let (peer, h2c) = compiled
+        .first_peer(revision)
         .ok_or_else(|| AppError::Unavailable("revision has no upstream".into()))?;
-    if upstream.server.h2c {
+    if h2c {
         return Err(AppError::Conflict(
             "the first server of the revision is h2c://: a replay is written in HTTP/1.1, which \
              it cannot answer"
                 .into(),
         ));
     }
-    match failures::replay(&failed, upstream.peer()).await {
+    match failures::replay(&failed, peer).await {
         Ok(replayed) => Ok(Json(replayed.to_json()).into_response()),
         Err(err) => Ok((
             StatusCode::BAD_GATEWAY,

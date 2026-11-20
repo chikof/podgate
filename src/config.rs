@@ -13,6 +13,7 @@ use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
 use crate::service::StaticRoots;
 use crate::service::health;
+use crate::service::resolve;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
 
@@ -93,6 +94,12 @@ const _: () =
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 /// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
 /// | `UPSTREAM_POOL_SIZE` | `128` | Idle upstream connections kept for reuse, per worker thread (one thread per core): Pingora keeps one LRU for the whole process, so the pool holds this times the thread count and evicts the least recently used past it. 1..=65536. A transport's `max_idle_per_host` is refused for the same reason. |
+/// | `DNS_SERVERS` | system configuration | Comma-separated name servers (`10.0.0.2`, `10.0.0.2:5353`, `[fd00::2]:53`) that resolve the host names of upstream servers, instead of `/etc/resolv.conf`. |
+/// | `DNS_MIN_TTL_SECS` | `1` | Shortest time an answer is kept whatever its TTL says, 1..=86400, at most `DNS_MAX_TTL_SECS`. |
+/// | `DNS_MAX_TTL_SECS` | `60` | Longest time an answer is kept before the name is resolved again, 1..=86400. |
+/// | `DNS_TIMEOUT_MS` | `2000` | Longest one lookup takes, 1..=60000. |
+/// | `DNS_MAX_STALE_SECS` | `300` | How long after its TTL ran out the last good answer is still used while resolution fails, 0..=86400. Then the name has no address and its requests get `503`. |
+/// | `DNS_MAX_QUERIES_PER_SEC` | `200` | Lookups a second this node sends in all, 1..=100000. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -154,6 +161,8 @@ pub struct Config {
     pub cache_tenant_max_percent: u8,
     /// Idle upstream connections the pool keeps per worker thread.
     pub upstream_pool_size: NonZeroUsize,
+    /// How servers named by host name are resolved (`DNS_*`).
+    pub dns: resolve::Settings,
 }
 
 impl Default for Config {
@@ -182,6 +191,7 @@ impl Default for Config {
             static_max_concurrent_reads: default_static_reads(),
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
             upstream_pool_size: DEFAULT_UPSTREAM_POOL,
+            dns: resolve::Settings::default(),
         }
     }
 }
@@ -488,6 +498,7 @@ impl Config {
         }
         config.otel = ExportConfig::from_lookup(&lookup)?;
         config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
+        config.dns = resolve::Settings::from_lookup(&lookup)?;
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
                 .split(',')
@@ -531,6 +542,12 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "8"),
             ("STATIC_MAX_CONCURRENT_READS", "5"),
             ("UPSTREAM_POOL_SIZE", "64"),
+            ("DNS_SERVERS", "10.0.0.2, [fd00::2]:5353"),
+            ("DNS_MIN_TTL_SECS", "2"),
+            ("DNS_MAX_TTL_SECS", "30"),
+            ("DNS_TIMEOUT_MS", "500"),
+            ("DNS_MAX_STALE_SECS", "0"),
+            ("DNS_MAX_QUERIES_PER_SEC", "7"),
             ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
@@ -559,6 +576,17 @@ mod test {
                 health_max_concurrent: NonZeroUsize::new(8).expect("8 is not zero"),
                 static_max_concurrent_reads: NonZeroUsize::new(5).expect("5 is not zero"),
                 upstream_pool_size: NonZeroUsize::new(64).expect("64 is not zero"),
+                dns: resolve::Settings {
+                    servers: vec![
+                        SocketAddr::from(([10, 0, 0, 2], 53)),
+                        "[fd00::2]:5353".parse().expect("socket address"),
+                    ],
+                    min_ttl: Duration::from_secs(2),
+                    max_ttl: Duration::from_secs(30),
+                    timeout: Duration::from_millis(500),
+                    max_stale: Duration::ZERO,
+                    max_queries_per_sec: NonZeroU32::new(7).expect("7 is not zero"),
+                },
                 static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
@@ -598,6 +626,15 @@ mod test {
             ("HEALTH_MAX_CONCURRENT", "4097"),
             ("HEALTH_MAX_CONCURRENT", "lots"),
             ("STATIC_MAX_CONCURRENT_READS", "0"),
+            ("DNS_SERVERS", " "),
+            ("DNS_SERVERS", "ns.example.com"),
+            ("DNS_MIN_TTL_SECS", "0"),
+            ("DNS_MIN_TTL_SECS", "86401"),
+            ("DNS_MAX_TTL_SECS", "0"),
+            ("DNS_TIMEOUT_MS", "0"),
+            ("DNS_TIMEOUT_MS", "60001"),
+            ("DNS_MAX_STALE_SECS", "-1"),
+            ("DNS_MAX_QUERIES_PER_SEC", "0"),
             ("STATIC_MAX_CONCURRENT_READS", "257"),
             ("UPSTREAM_POOL_SIZE", "0"),
             ("UPSTREAM_POOL_SIZE", "65537"),

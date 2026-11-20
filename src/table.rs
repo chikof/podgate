@@ -31,8 +31,9 @@ use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
 use crate::observe::tracing as trace;
 use crate::router::{CompiledRouter, Index, Matched};
-use crate::service::{self, Lease, PickCx, Upstream};
+use crate::service::{self, Lease, PickCx};
 use crate::tls::{CertError, CertStore, Options};
+use pingora::upstreams::peer::HttpPeer;
 use podgate_model::SkewSecret;
 use podgate_model::{
     App, Budget, Forwarded, Revision, RevisionState, ScaleToZero, Snapshot, TlsPolicy,
@@ -531,28 +532,34 @@ impl CompiledApp {
         self.service(revision, router)?.as_static()
     }
 
-    /// Every server address the app can send to, in any revision.
-    pub fn upstream_addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    /// Every server address the app can send to, in any revision, as of now.
+    #[must_use]
+    pub fn upstream_addrs(&self) -> Vec<SocketAddr> {
         self.services
             .iter()
             .chain(self.revisions.iter().flat_map(|rev| rev.services.iter()))
-            .flat_map(|named| named.service.servers().iter().map(|server| server.addr))
+            .flat_map(|named| {
+                named
+                    .service
+                    .servers()
+                    .iter()
+                    .map(|server| server.addr)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
-    /// The first server of revision `revision`, whichever service it belongs to: the revision's
-    /// own services first, then the app's, with the transport that reaches it. `None` when it
-    /// has none.
+    /// A peer for the first server of revision `revision`, whichever service it belongs to: the
+    /// revision's own services first, then the app's, with the transport that reaches it.
+    /// `None` when it has none. The flag says whether that server is `h2c://`.
     #[must_use]
-    pub fn first_upstream(&self, revision: usize) -> Option<Upstream<'_>> {
+    pub fn first_peer(&self, revision: usize) -> Option<(HttpPeer, bool)> {
         let revision = self.revisions.get(revision)?;
         revision
             .services
             .iter()
             .chain(self.services.iter())
-            .find_map(|named| {
-                let addr = named.service.servers().first()?.addr;
-                named.service.upstream(addr)
-            })
+            .find_map(|named| named.service.first_peer())
     }
 
     /// The names of the services, the app's and every revision's, that connect to an `https://`
@@ -1151,6 +1158,13 @@ impl TableHandle {
         let version = table.version;
         self.live.store(Arc::new(table));
         self.swapped.send_replace(version);
+    }
+
+    /// Fires the [`Self::subscribe`] signal for a change that is not a swap: the servers of a
+    /// service named by DNS changed with the answers of its name. The table is the same one; the
+    /// watchers that keep per-server work (health probes) reconcile with it again.
+    pub fn servers_changed(&self) {
+        self.swapped.send_modify(|_| ());
     }
 
     /// A signal that fires after every swap of the live table, carrying the new table's

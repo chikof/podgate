@@ -18,8 +18,9 @@
 //! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
 //! (`state.rs`, see [`state`]), upstream transports (`transport.rs`: the TLS settings of the
 //! connection to a server), active health checks (`health.rs`, see [`health`]), passive outlier
-//! ejection (`outlier.rs`, see [`outlier`]) and, empty until its spec lands, DNS
-//! upstreams (`resolve.rs`). [`upstream_policy`] is built: the operator's rule for which
+//! ejection (`outlier.rs`, see [`outlier`]), DNS upstreams (`resolve.rs`, see [`resolve`]: servers
+//! named by host name, resolved off the request path) and the upstream policy
+//! ([`upstream_policy`]). It is built: the operator's rule for which
 //! addresses a tenant's servers may have, checked by the compiler and before every connection.
 //! Sticky cookies (`sticky.rs`) are built: the load balancer's `pick` consults them first.
 //!
@@ -32,7 +33,7 @@ pub mod lb;
 mod loadbalancer;
 pub mod mirroring;
 pub mod outlier;
-mod resolve;
+pub mod resolve;
 pub mod state;
 mod static_files;
 pub mod sticky;
@@ -44,11 +45,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::compile::Invalid;
+use pingora::upstreams::peer::HttpPeer;
 use podgate_model::{Declared, SkewSecret};
+use resolve::Resolver;
 
 pub use lb::PickCx;
 pub(crate) use lb::RingBudget;
-pub use loadbalancer::{LoadBalancer, Server};
+pub use loadbalancer::{LoadBalancer, Server, Servers};
 pub use mirroring::Mirroring;
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
@@ -119,18 +122,21 @@ pub struct Named {
 }
 
 impl Service {
-    /// Compiles one declared service. `static_roots` are the roots the operator declared for the
-    /// tenant that owns it.
+    /// Compiles one declared service of `tenant`. `static_roots` are the roots the operator
+    /// declared for the tenant; `resolver` holds the answers for servers named by host name.
     ///
     /// # Errors
     ///
     /// `service_not_built` for a planned type nobody has built, `invalid_service` for an unknown
-    /// type or a configuration the type refuses, `dns_upstream_not_built` for a server named by
-    /// host name, `unknown_static_root` for a `static` service naming a root the tenant lacks.
+    /// type or a configuration the type refuses (a server host that is not an IP address or a
+    /// valid host name included), `unknown_static_root` for a `static` service naming a root the
+    /// tenant lacks.
     pub fn compile(
         declared: &Declared,
         transports: &[NamedTransport],
         static_roots: Option<&TenantRoots>,
+        tenant: &str,
+        resolver: &Resolver,
     ) -> Result<Self, Invalid> {
         match &*declared.kind {
             other if !BUILT.contains(&other) && UNBUILT.contains(&other) => Err(Invalid::new(
@@ -141,7 +147,7 @@ impl Service {
                 "invalid_service",
                 format!("unknown service type {other}"),
             )),
-            "loadbalancer" => LoadBalancer::compile(declared, transports)
+            "loadbalancer" => LoadBalancer::compile(declared, transports, tenant, resolver)
                 .map(|balancer| Self::LoadBalancer(Box::new(balancer))),
             "static" => {
                 StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
@@ -193,12 +199,14 @@ impl Service {
         }
     }
 
-    /// The servers the service may send to, in declaration order.
+    /// The servers the service may send to, in declaration order, as of now. A server named by
+    /// DNS is one server per address its name resolves to. Hold the result for one use: see
+    /// [`Servers`].
     #[must_use]
-    pub fn servers(&self) -> &[Server] {
+    pub fn servers(&self) -> Servers {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
-            Self::Static(_) | Self::Mirroring(_) => &[],
+            Self::Static(_) | Self::Mirroring(_) => Servers::default(),
         }
     }
 
@@ -238,17 +246,42 @@ impl Service {
         }
     }
 
-    /// Whether the service has at least one server.
+    /// Whether the service has at least one server to send to now.
     #[must_use]
     pub fn has_servers(&self) -> bool {
         !self.servers().is_empty()
     }
 
-    /// Whether the service can answer a request: a load balancer with a server, or a static
-    /// service, which answers from its directory and never sleeps.
+    /// Whether the service can answer a request: a load balancer with a server declared (one
+    /// whose name has no address yet is still backed: it answers `503`, it is not asleep), or a
+    /// static service, which answers from its directory and never sleeps.
     #[must_use]
     pub fn is_backed(&self) -> bool {
-        matches!(self, Self::Static(_)) || self.has_servers()
+        match self {
+            Self::LoadBalancer(balancer) => balancer.is_backed(),
+            Self::Static(_) => true,
+            Self::Mirroring(_) => false,
+        }
+    }
+
+    /// The distinct DNS names the service's servers use, in lower case.
+    pub fn dns_names(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::LoadBalancer(balancer) => Some(balancer.dns_names()),
+            Self::Static(_) | Self::Mirroring(_) => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    /// Takes the addresses the DNS resolver holds now for the names of the service's servers.
+    /// Returns whether its servers changed.
+    #[must_use]
+    pub fn refresh(&self) -> bool {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.refresh(),
+            Self::Static(_) | Self::Mirroring(_) => false,
+        }
     }
 
     /// The compiled `static` service, or `None` for any other type.
@@ -269,14 +302,36 @@ impl Service {
         }
     }
 
-    /// The server at `addr` and the transport that reaches it, or `None` when the service has no
-    /// such server.
+    /// The transport the service's `https://` servers are reached through, `None` for a type
+    /// that has no server.
     #[must_use]
-    pub fn upstream(&self, addr: SocketAddr) -> Option<Upstream<'_>> {
+    pub fn transport(&self) -> Option<&Transport> {
         match self {
-            Self::LoadBalancer(balancer) => balancer.upstream(addr),
+            Self::LoadBalancer(balancer) => Some(balancer.transport()),
             Self::Static(_) | Self::Mirroring(_) => None,
         }
+    }
+
+    /// Runs `f` on the server at `addr` and the transport that reaches it. `None` when the
+    /// service has no such server: a request that picked it may find it gone when the DNS answer
+    /// of its name changed in between.
+    pub fn with_upstream<R>(
+        &self,
+        addr: SocketAddr,
+        f: impl FnOnce(Upstream<'_>) -> R,
+    ) -> Option<R> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.with_upstream(addr, f),
+            Self::Static(_) | Self::Mirroring(_) => None,
+        }
+    }
+
+    /// A peer for the first server of the service, with the transport that reaches it, and
+    /// whether that server is `h2c://`.
+    #[must_use]
+    pub fn first_peer(&self) -> Option<(HttpPeer, bool)> {
+        let addr = self.servers().first()?.addr;
+        self.with_upstream(addr, |upstream| (upstream.peer(), upstream.server.h2c))
     }
 
     /// Whether some `https://` server of the service skips certificate verification
@@ -316,7 +371,8 @@ mod test {
     fn built_lists_exactly_the_types_compile_builds() {
         for kind in BUILT {
             // An empty declaration is refused by the type itself, never as unknown or planned.
-            let err = Service::compile(&declared(kind), &[], None).expect_err(kind);
+            let err = Service::compile(&declared(kind), &[], None, "t", &Resolver::default())
+                .expect_err(kind);
             assert!(
                 !err.message.starts_with("unknown service type")
                     && !err.message.contains("planned and not built"),
@@ -324,13 +380,21 @@ mod test {
                 err.message
             );
         }
-        let err = Service::compile(&declared("zzz_unlisted"), &[], None).expect_err("unlisted");
+        let err = Service::compile(
+            &declared("zzz_unlisted"),
+            &[],
+            None,
+            "t",
+            &Resolver::default(),
+        )
+        .expect_err("unlisted");
         assert_eq!(
             (err.code, err.message.as_str()),
             ("invalid_service", "unknown service type zzz_unlisted")
         );
         for kind in UNBUILT {
-            let err = Service::compile(&declared(kind), &[], None).expect_err(kind);
+            let err = Service::compile(&declared(kind), &[], None, "t", &Resolver::default())
+                .expect_err(kind);
             assert_eq!(err.code, "service_not_built", "{kind}");
             assert!(!BUILT.contains(&kind));
         }

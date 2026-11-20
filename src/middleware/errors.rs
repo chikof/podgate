@@ -450,7 +450,7 @@ impl Kind for Errors {
         let target = RequestHeader::build("GET", path.as_bytes(), None).ok()?;
         // The lease counts the fetch on its server while it runs; the pick is the balancer's own.
         let (addr, _lease) = service.pick(PickCx::new(&target))?;
-        let peer = service.upstream(addr)?.peer();
+        let peer = service.with_upstream(addr, |upstream| upstream.peer())?;
         let query = fetch::Query {
             host: host_of(cx.request)?,
             accept: accept_of(cx.request),

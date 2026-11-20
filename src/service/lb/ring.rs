@@ -26,6 +26,11 @@ use crate::service::{Server, ServiceState};
 /// 40 960 points, 320 KiB, and building it costs about twice that for a moment.
 const MAX_WEIGHT: u64 = 256;
 
+/// The points of the largest ring a service can hold, `MAX_WEIGHT` weight units: what a service
+/// whose servers are named by DNS is charged, since how many addresses a name has is not known
+/// until it resolves.
+pub(crate) const MAX_SERVICE_POINTS: u64 = MAX_WEIGHT * DEFAULT_POINT_MULTIPLE as u64;
+
 /// The most ring points one tenant's hash services may hold together, over every app and every
 /// revision it declares (a service declared in three revisions is compiled, and counted, three
 /// times). 1 048 576 points are 8 MiB (8 bytes a point): about 25 services of the most weight

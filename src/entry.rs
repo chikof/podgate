@@ -27,6 +27,7 @@ use thiserror::Error;
 
 use crate::router::path::{self, Refused};
 use crate::service::StaticRoots;
+use crate::service::resolve::Resolver;
 use crate::service::upstream_policy::UpstreamPolicy;
 use podgate_model::TlsVersion;
 
@@ -237,6 +238,7 @@ pub struct CompileContext {
     static_roots: StaticRoots,
     addrs: Vec<(Box<str>, SocketAddr)>,
     proxy_header: Option<Vec<Box<str>>>,
+    resolver: Resolver,
 }
 
 impl Default for CompileContext {
@@ -263,6 +265,7 @@ impl CompileContext {
             static_roots: StaticRoots::default(),
             addrs: Vec::new(),
             proxy_header: None,
+            resolver: Resolver::default(),
         }
     }
 
@@ -380,6 +383,21 @@ impl CompileContext {
     #[must_use]
     pub fn static_roots(&self) -> &StaticRoots {
         &self.static_roots
+    }
+
+    /// Resolves servers named by host name from `resolver`'s answers. `run` installs the
+    /// resolver its DNS service drives; a context without one never resolves a name, which is
+    /// for tests and tools that compile snapshots outside a running process.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Resolver) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// The resolver servers named by host name take their addresses from.
+    #[must_use]
+    pub fn resolver(&self) -> &Resolver {
+        &self.resolver
     }
 
     /// The policy the compiler checks literal server addresses against.

@@ -320,9 +320,13 @@ mod test {
             .expect("declared"),
             &[],
             None,
+            "t",
+            &crate::service::resolve::Resolver::default(),
         )
         .expect("service");
-        balancer.upstream(addr).expect("server").peer()
+        balancer
+            .with_upstream(addr, |upstream| upstream.peer())
+            .expect("server")
     }
 
     fn job(addr: SocketAddr, policy: UpstreamPolicy, limit: Duration) -> Job {
@@ -340,6 +344,8 @@ mod test {
             .expect("declared"),
             &[],
             None,
+            "t",
+            &crate::service::resolve::Resolver::default(),
         )
         .expect("service");
         let request = RequestHeader::build("GET", b"/", None).expect("request");

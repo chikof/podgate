@@ -197,7 +197,10 @@ struct RevisionView<'a> {
 
 #[derive(Debug, Serialize)]
 struct ServerView<'a> {
-    url: &'a str,
+    url: Box<str>,
+    /// The address a server named by DNS currently stands for; absent for an IP literal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
     weight: u32,
     available: bool,
     /// Milliseconds until passive outlier ejection ends; absent when the server is not ejected.
@@ -399,19 +402,23 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
                 servers: app
                     .service(index, best.matched.router)
                     .map(|service| {
+                        let transport = service.transport();
                         service
                             .servers()
                             .iter()
                             .map(|server| ServerView {
-                                url: &server.url,
+                                url: server.url.clone(),
+                                address: server.host().map(|_| server.addr.to_string()),
                                 weight: server.weight,
                                 available: server.available(),
                                 ejected_for_ms: outlier::ejected_for(server).map(|left| {
                                     u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
                                 }),
-                                transport: service
-                                    .upstream(server.addr)
-                                    .and_then(|upstream| upstream.summary()),
+                                transport: transport
+                                    .filter(|transport| {
+                                        server.tls || server.h2c || transport.sets_timeouts()
+                                    })
+                                    .map(|transport| transport.summary(server)),
                             })
                             .collect()
                     })

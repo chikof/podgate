@@ -282,7 +282,7 @@ mod test {
         let table = table(ONE_APP);
         let revision = &table.app(0).expect("app").revisions()[0];
         for named in revision.services() {
-            for server in named.service.servers() {
+            for server in &named.service.servers() {
                 server
                     .state
                     .healthy

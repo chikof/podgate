@@ -123,6 +123,7 @@ pub use wake::{Wake, WakeService};
 /// admin socket cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
+    let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
     let static_roots = config.static_roots()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -131,7 +132,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_cache_tenant_max_percent(config.cache_tenant_max_percent)
             .with_upstream_policy(upstream_policy.clone())
             .with_tls_floor(config.tls_min_version)
-            .with_static_roots(static_roots),
+            .with_static_roots(static_roots)
+            .with_resolver(resolver.clone()),
     )
     .with_metrics(observe::metrics::Registry::new(
         config.metrics_series_per_tenant,
@@ -275,6 +277,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             upstream_policy.clone(),
             config.health_max_concurrent,
         ),
+    ));
+    server.add_service(background_service(
+        "dns resolver",
+        service::resolve::ResolveService::new(resolver, table.clone()),
     ));
     server.add_service(background_service(
         "admin API",

@@ -250,8 +250,7 @@ impl Sticky {
         for value in cookie_values(cx.request, &self.name) {
             let Some(tag) = decode(value) else { continue };
             let found = servers.iter().position(|server| {
-                let mut mac = key.clone();
-                mac.update(server.url.as_bytes());
+                let mac = keyed_for(key, server);
                 mac.verify_truncated_left(&tag).is_ok() && cx.allows(server) && server.weight > 0
             });
             if found.is_some() {
@@ -264,8 +263,7 @@ impl Sticky {
     /// The `Set-Cookie` value that pins to `server`, or `None` when the service is not bound or
     /// `request` already carries that cookie. `tls` adds `Secure`.
     fn header(&self, request: &RequestHeader, server: &Server, tls: bool) -> Option<String> {
-        let mut mac = self.key.as_ref()?.clone();
-        mac.update(server.url.as_bytes());
+        let mac = keyed_for(self.key.as_ref()?, server);
         let tag = mac.finalize().into_bytes();
         let value = URL_SAFE_NO_PAD.encode(tag.get(..TAG_LEN)?);
         if cookie_values(request, &self.name).any(|presented| presented == value) {
@@ -274,6 +272,21 @@ impl Sticky {
         let secure = if self.secure || tls { "; Secure" } else { "" };
         Some(format!("{}={value}{}{secure}", self.name, self.attributes))
     }
+}
+
+/// The MAC keyed for `server`: its URL, and for a server named by DNS its address too, since
+/// every address of a name has the same URL.
+fn keyed_for(key: &HmacSha256, server: &Server) -> HmacSha256 {
+    let mut mac = key.clone();
+    mac.update(server.url.as_bytes());
+    if server.host().is_some() {
+        match server.addr.ip() {
+            std::net::IpAddr::V4(ip) => mac.update(&ip.octets()),
+            std::net::IpAddr::V6(ip) => mac.update(&ip.octets()),
+        }
+        mac.update(&server.addr.port().to_be_bytes());
+    }
+    mac
 }
 
 /// The values of every cookie called `name` the request carries.
@@ -339,8 +352,8 @@ pub fn set_cookie(
     if publicly_cacheable(response) {
         return Ok(());
     }
-    let Some(server) = service
-        .servers()
+    let servers = service.servers();
+    let Some(server) = servers
         .iter()
         .find(|server| server.addr == selected.upstream)
     else {

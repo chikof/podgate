@@ -8,9 +8,12 @@
 //! - [`Podgate::push_snapshot`], [`Podgate::get`], [`Podgate::https_get`]: drive it.
 //! - [`Upstream::start`]: a backend that answers every request with a fixed body.
 //! - [`snapshot`], [`TestCert`]: build snapshot JSON and self-signed certificates.
+//! - [`dns::Dns`]: a UDP DNS server whose answers, TTLs and failures a test controls.
 
 // Each test file compiles this module on its own and uses a different subset of it.
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
+
+pub mod dns;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

@@ -46,7 +46,7 @@ use round_robin::RoundRobin;
 use uri_hash::UriHash;
 use weighted_round_robin::WeightedRoundRobin;
 
-pub(crate) use ring::RingBudget;
+pub(crate) use ring::{MAX_SERVICE_POINTS, RingBudget};
 
 /// What a balancer may look at to pick a server.
 #[derive(Debug, Clone, Copy)]

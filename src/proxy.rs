@@ -966,20 +966,28 @@ impl ProxyHttp for Gateway {
         self.check_upstream(&ctx.table, &selected)?;
         ctx.trace.upstream_starting();
         let outside = || Error::explain(InternalError, "route points outside the table");
-        let upstream = ctx
+        let service = ctx
             .table
             .app(selected.app)
             .and_then(|app| app.service(selected.revision, selected.router))
-            .and_then(|service| service.upstream(selected.upstream))
             .ok_or_else(outside)?;
-        let mut peer = upstream.http_peer(self.upstream_timeout);
+        // The servers of a name follow its DNS answers: the one picked may have just left.
+        let (mut peer, pool_key) = service
+            .with_upstream(selected.upstream, |upstream| {
+                (
+                    upstream.http_peer(self.upstream_timeout),
+                    upstream.pool_key(),
+                )
+            })
+            .ok_or_else(|| {
+                Error::explain(HTTPStatus(503), "the upstream server left its service")
+            })?;
         // Pingora's HTTP/2 client has no Upgrade: a WebSocket request asks the TLS server for
         // HTTP/1.1 even when the transport offers h2.
         if session.is_upgrade_req() && matches!(peer.options.alpn, ALPN::H2H1) {
             peer.options.alpn = ALPN::H1;
         }
-        let identity =
-            pool::Identity::of(&ctx.table, &selected, upstream.pool_key()).ok_or_else(outside)?;
+        let identity = pool::Identity::of(&ctx.table, &selected, pool_key).ok_or_else(outside)?;
         pool::observe(&mut ctx.pool, session.req_header());
         pool::isolate(&mut peer, identity, ctx.pool, session);
         Ok(Box::new(peer))

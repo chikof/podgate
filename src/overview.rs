@@ -243,7 +243,7 @@ fn summary<'a>(table: &RoutingTable, runtime: &Runtime<'a>) -> SummaryView<'a> {
         view.routers += app.routers().len();
         for (_, named) in services_of(app) {
             view.services += 1;
-            for server in named.service.servers() {
+            for server in named.service.servers().iter() {
                 if outlier::ejected_for(server).is_some() {
                     view.servers.ejected += 1;
                 } else if !server
@@ -494,12 +494,12 @@ struct ServiceView<'a> {
     health_check: bool,
     #[serde(skip_serializing_if = "is_false")]
     outlier_detection: bool,
-    servers: Vec<ServerView<'a>>,
+    servers: Vec<ServerView>,
 }
 
 #[derive(Serialize)]
-struct ServerView<'a> {
-    url: &'a str,
+struct ServerView {
+    url: Box<str>,
     weight: u32,
     /// Healthy and not ejected: whether a new request may go there.
     available: bool,
@@ -675,7 +675,7 @@ fn service_view<'a>(revision: Option<&'a str>, named: &'a service::Named) -> Ser
             .servers()
             .iter()
             .map(|server| ServerView {
-                url: &server.url,
+                url: server.url.clone(),
                 weight: server.weight,
                 available: server.available(),
                 active: server

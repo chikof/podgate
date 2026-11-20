@@ -490,6 +490,7 @@ mod test {
     use serde_json::json;
 
     use super::*;
+    use crate::service::resolve::Resolver;
 
     fn declared(value: Value) -> Declared {
         serde_json::from_value(value).expect("declared")
@@ -522,6 +523,8 @@ mod test {
                 })),
                 &[],
                 None,
+                "t",
+                &Resolver::default(),
             )
             .expect("loadbalancer"),
         }
@@ -536,6 +539,8 @@ mod test {
             &declared(json!({"name": "site", "type": "static", "root": "site"})),
             &[],
             Some(&roots),
+            "t",
+            &Resolver::default(),
         )
         .expect("static");
         drop(std::fs::remove_dir_all(dir));
@@ -550,7 +555,8 @@ mod test {
         value["name"] = json!(name);
         Named {
             name: name.into(),
-            service: Service::compile(&declared(value), &[], None).expect("mirroring"),
+            service: Service::compile(&declared(value), &[], None, "t", &Resolver::default())
+                .expect("mirroring"),
         }
     }
 
@@ -713,6 +719,8 @@ mod test {
                 })),
                 &[],
                 None,
+                "t",
+                &Resolver::default(),
             )
             .expect("h2c"),
         };
