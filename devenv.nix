@@ -19,6 +19,8 @@
     pkgs.cmake # libz-ng-sys: pingora-core forces its zlib-ng backend
     pkgs.pebble # test ACME server
     pkgs.oha # HTTP load generator
+    pkgs.caddy # proxy benchmark baseline
+    pkgs.traefik # proxy benchmark baseline
   ];
 
   # Secrets and local overrides come from the gitignored .env file. See .env.example.
