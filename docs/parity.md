@@ -101,7 +101,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Compression | `compress` (gzip, brotli, zstd) | `encode` | built (gzip 0009; gzip, brotli, zstd 0053, pure Rust, bounded; `min_bytes` not applied to unknown-length bodies) |
 | Custom error pages | `errors` | `handle_errors` | 0054 |
 | Fixed response | none | `respond`, `error`, `abort` | 0054 (`respond`) |
-| Pass TLS client certificate | `passTLSClientCert` | placeholders | 0055 (always strips forged headers) |
+| Pass TLS client certificate | `passTLSClientCert` | placeholders | built: `pass_tls_client_cert` middleware, Traefik's two headers; forged headers are always stripped |
 | gRPC-Web | `grpcWeb` | plugin | 0056 |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
 | Plugins | Yaegi (Go) plugins | Go modules | WASM filters in process; 0099 out-of-process plugins over a unix socket (no native code in podgate, any language); 0113 runs Traefik Go plugins through a Yaegi host. `dlopen` plugins are rejected |
