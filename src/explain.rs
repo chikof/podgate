@@ -19,7 +19,7 @@ use crate::pipeline;
 use crate::router::{Candidate, Matched as RouterMatch, View, path};
 use crate::service::graph;
 use crate::service::outlier;
-use crate::service::{PickCx, TransportSummary};
+use crate::service::{self, FastcgiSummary, PickCx, TransportSummary};
 use crate::table::RoutingTable;
 
 /// What a caller asks about: a request as the proxy would see it.
@@ -200,6 +200,10 @@ struct RevisionView<'a> {
     /// services in the graph, listed in `GET /v1/overview`.
     #[serde(skip_serializing_if = "Option::is_none")]
     graph: Option<graph::Described<'a>>,
+    /// For a `fastcgi` service: the upstream the operator declared under this name and the
+    /// script a directory runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fastcgi: Option<FastcgiSummary<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -432,6 +436,10 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
                     })
                     .unwrap_or_default(),
                 graph: app.describe_graph(index, best.matched.router, PickCx::new(&request)),
+                fastcgi: app
+                    .service(index, best.matched.router)
+                    .and_then(service::Service::as_fastcgi)
+                    .map(|site| site.summary()),
             })
             .collect(),
         canary: app.canary(),

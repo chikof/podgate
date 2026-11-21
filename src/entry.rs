@@ -27,9 +27,9 @@ use pingora::proxy::Session;
 use thiserror::Error;
 
 use crate::router::path::{self, Refused};
-use crate::service::StaticRoots;
 use crate::service::resolve::Resolver;
 use crate::service::upstream_policy::UpstreamPolicy;
+use crate::service::{FastcgiRoots, StaticRoots};
 use podgate_model::TlsVersion;
 
 /// The built-in plain HTTP entry point.
@@ -275,6 +275,7 @@ pub struct CompileContext {
     upstream_policy: UpstreamPolicy,
     tls_floor: TlsVersion,
     static_roots: StaticRoots,
+    fastcgi: FastcgiRoots,
     addrs: Vec<(Box<str>, SocketAddr)>,
     proxy_header: Option<Vec<Box<str>>>,
     resolver: Resolver,
@@ -303,6 +304,7 @@ impl CompileContext {
             upstream_policy: UpstreamPolicy::allow_all(),
             tls_floor: TlsVersion::V1_2,
             static_roots: StaticRoots::default(),
+            fastcgi: FastcgiRoots::default(),
             addrs: Vec::new(),
             proxy_header: None,
             resolver: Resolver::default(),
@@ -424,6 +426,20 @@ impl CompileContext {
     #[must_use]
     pub fn static_roots(&self) -> &StaticRoots {
         &self.static_roots
+    }
+
+    /// The FastCGI upstreams the operator declared, per tenant. Only the operator calls this
+    /// (`FASTCGI_FILE`); a snapshot names an upstream and never supplies an address or a root.
+    #[must_use]
+    pub fn with_fastcgi(mut self, fastcgi: FastcgiRoots) -> Self {
+        self.fastcgi = fastcgi;
+        self
+    }
+
+    /// The FastCGI upstreams the compiler resolves `fastcgi` services against.
+    #[must_use]
+    pub fn fastcgi(&self) -> &FastcgiRoots {
+        &self.fastcgi
     }
 
     /// The stores a cluster-scope `rate_limit` may name (`RATE_LIMIT_STORES_FILE`). Only the

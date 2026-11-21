@@ -24,7 +24,7 @@ mod mime;
 mod precompressed;
 mod range;
 mod reader;
-mod roots;
+pub(super) mod roots;
 mod serve;
 
 use std::collections::HashMap;

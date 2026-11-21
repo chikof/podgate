@@ -228,6 +228,7 @@ fn passive_of(service: &Service) -> Option<&Passive> {
     match service {
         Service::LoadBalancer(balancer) => balancer.passive(),
         Service::Static(_)
+        | Service::Fastcgi(_)
         | Service::Mirroring(_)
         | Service::Weighted(_)
         | Service::Failover(_) => None,

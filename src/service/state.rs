@@ -309,7 +309,7 @@ impl Registry {
                     }
                     Service::Weighted(weighted) => weighted.state_mut(),
                     Service::Failover(failover) => failover.state_mut(),
-                    Service::Static(_) | Service::Mirroring(_) => continue,
+                    Service::Static(_) | Service::Fastcgi(_) | Service::Mirroring(_) => continue,
                 };
                 // A `weighted` or `failover` service has no server: its state is its counter
                 // and its fallback hold.

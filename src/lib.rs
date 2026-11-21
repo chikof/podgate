@@ -124,7 +124,7 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `RATE_LIMIT_STORES_FILE` or
+/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `FASTCGI_FILE`, `RATE_LIMIT_STORES_FILE` or
 /// `DASHBOARD_AUTH_FILE` is invalid, a non-loopback `DASHBOARD_ADDR` has no
 /// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
 /// bound, a TLS listener
@@ -134,6 +134,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
     let static_roots = config.static_roots()?;
+    let fastcgi = config.fastcgi()?;
     let rate_limit_stores = config.rate_limit_stores()?;
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
@@ -144,6 +145,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_upstream_policy(upstream_policy.clone())
             .with_tls_floor(config.tls_min_version)
             .with_static_roots(static_roots)
+            .with_fastcgi(fastcgi)
             .with_rate_limit_stores(rate_limit_stores.clone())
             .with_resolver(resolver.clone()),
     )

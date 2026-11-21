@@ -34,7 +34,7 @@ use crate::service::graph;
 use crate::service::mirroring::{Plan as MirrorPlan, Scope as MirrorScope, Scopes as MirrorScopes};
 use crate::service::resolve::{NameBudget, Resolver};
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{self, NamedTransport, RingBudget, Service, TenantRoots, Transport};
+use crate::service::{self, NamedTransport, RingBudget, Service, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::{CertStore, Options};
 use crate::wasm as engine;
@@ -308,7 +308,10 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             snapshot.skew_secret.as_ref(),
             Limits {
                 statics: StaticCx {
-                    roots: context.static_roots().of(&app.tenant),
+                    locals: service::Locals {
+                        statics: context.static_roots().of(&app.tenant),
+                        fastcgi: context.fastcgi().of(&app.tenant),
+                    },
                     max_buffer_bytes,
                 },
                 rings: &mut rings,
@@ -883,7 +886,7 @@ pub(crate) fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<Name
 #[derive(Clone, Copy)]
 struct StaticCx<'a> {
     /// The roots the operator declared for the tenant.
-    roots: Option<&'a TenantRoots>,
+    locals: service::Locals<'a>,
     /// The tenant's `max_buffer_bytes`.
     max_buffer_bytes: u64,
 }
@@ -928,17 +931,27 @@ fn services_of(
         if rings.refused() {
             return None;
         }
-        match Service::compile(declared, transports, statics.roots, &app.tenant, resolver).and_then(
-            |mut service| {
-                service.bind_sticky(skew_secret, &app.id, &declared.name)?;
-                rings.charge(&app.tenant, service.ring_points())?;
-                names.charge(&app.tenant, &app.id, service.dns_names())?;
-                names.charge_srv(&app.tenant, &app.id, service.srv_names())?;
-                Ok(service)
-            },
-        ) {
+        match Service::compile(
+            declared,
+            transports,
+            Some(&statics.locals),
+            &app.tenant,
+            resolver,
+        )
+        .and_then(|mut service| {
+            service.bind_sticky(skew_secret, &app.id, &declared.name)?;
+            rings.charge(&app.tenant, service.ring_points())?;
+            names.charge(&app.tenant, &app.id, service.dns_names())?;
+            names.charge_srv(&app.tenant, &app.id, service.srv_names())?;
+            Ok(service)
+        }) {
             Ok(service) => {
                 if let Some(site) = service.as_static()
+                    && let Err(invalid) = site.check_budget(&app.tenant, statics.max_buffer_bytes)
+                {
+                    rejected.push(Rejected::new(app, at.as_str(), invalid));
+                }
+                if let Some(site) = service.as_fastcgi()
                     && let Err(invalid) = site.check_budget(&app.tenant, statics.max_buffer_bytes)
                 {
                     rejected.push(Rejected::new(app, at.as_str(), invalid));

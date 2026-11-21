@@ -391,6 +391,7 @@ pub(crate) fn backed(graph: &dyn Graph, node: Node, depth: usize) -> bool {
     match graph.service(node) {
         Some(Service::LoadBalancer(balancer)) => balancer.is_backed(),
         Some(Service::Static(_)) => true,
+        Some(Service::Fastcgi(_)) => true,
         Some(Service::Weighted(_)) => graph
             .links(node)
             .iter()
@@ -417,6 +418,7 @@ pub fn readiness(
     match graph.service(node) {
         Some(Service::LoadBalancer(balancer)) => balancer.readiness(cx),
         Some(Service::Static(_)) => Readiness::Ready,
+        Some(Service::Fastcgi(_)) => Readiness::Ready,
         Some(Service::Weighted(weighted)) => weighted.readiness(graph, node, cx, now, depth),
         Some(Service::Failover(failover)) => failover.readiness(graph, node, cx, now, depth),
         Some(Service::Mirroring(_)) | None => Readiness::Down,
@@ -439,6 +441,7 @@ pub fn pick(
     match graph.service(node)? {
         Service::LoadBalancer(balancer) => balancer.pick(cx),
         Service::Static(site) => Some((NO_SERVER, site.lease())),
+        Service::Fastcgi(site) => Some((NO_SERVER, site.lease())),
         Service::Weighted(weighted) => weighted.pick(graph, node, cx, now, path, depth),
         Service::Failover(failover) => failover.pick(graph, node, cx, now, path, depth),
         Service::Mirroring(_) => None,

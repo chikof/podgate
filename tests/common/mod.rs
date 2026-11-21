@@ -17,6 +17,7 @@
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
 pub mod dns;
+pub mod fcgi;
 pub mod grpc;
 pub mod pebble;
 pub mod valkey;

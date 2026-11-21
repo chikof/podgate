@@ -14,10 +14,10 @@ use crate::middleware::basic_auth::Htpasswd;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
 use crate::ratelimit_store::Stores;
-use crate::service::StaticRoots;
 use crate::service::health;
 use crate::service::resolve;
 use crate::service::upstream_policy::UpstreamPolicy;
+use crate::service::{FastcgiRoots, StaticRoots};
 use podgate_model::TlsVersion;
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
@@ -102,6 +102,7 @@ const _: () =
 /// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
+/// | `FASTCGI_FILE` | unset | JSON file with the PHP-FPM (or other FastCGI) applications `fastcgi` services may run, `{"<tenant id>": {"<name>": {"address": "unix:/run/php/acme.sock" or "127.0.0.1:9000", "root": "/absolute/dir", "max_connections": 16, "dial_timeout_secs": 3, "read_timeout_secs": 30}}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names an entry of its own tenant and never supplies an address or a root. Unset: no tenant has a FastCGI upstream. Reference: `docs/ref/svc-fastcgi.md`. |
 /// | `RATE_LIMIT_STORES_FILE` | unset | JSON file with the Redis-compatible stores cluster-scope `rate_limit` middlewares may use, `{"<store>": {"url": "redis[s]://host[:port]", "username": "...", "password_file": "...", "tls_ca_file": "...", "tenants": ["<tenant id>"], "max_connections": 16, "timeout_ms": 20}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names a store and only for the tenants its entry lists. `rediss://` needs `tls_ca_file`. Unset: no cluster-scope limit can compile. Reference: `docs/ref/ratelimit-cluster.md`. |
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 /// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
@@ -181,6 +182,9 @@ pub struct Config {
     /// File with the directories of static services, per tenant. Absent: none. Read once at
     /// startup by [`Config::static_roots`].
     pub static_roots_file: Option<PathBuf>,
+    /// File with the FastCGI applications and code roots of `fastcgi` services, per tenant.
+    /// Absent: none. Read once at startup by [`Config::fastcgi`].
+    pub fastcgi_file: Option<PathBuf>,
     /// File with the stores of cluster-scope `rate_limit` middlewares. Absent: none. Read once at
     /// startup by [`Config::rate_limit_stores`].
     pub rate_limit_stores_file: Option<PathBuf>,
@@ -226,6 +230,7 @@ impl Default for Config {
             tls_min_version: TlsVersion::V1_2,
             otel: ExportConfig::default(),
             static_roots_file: None,
+            fastcgi_file: None,
             rate_limit_stores_file: None,
             static_max_concurrent_reads: default_static_reads(),
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
@@ -319,6 +324,25 @@ impl Config {
             None => Ok(StaticRoots::default()),
             Some(path) => StaticRoots::load(path).map_err(|err| ConfigError {
                 var: "STATIC_ROOTS_FILE",
+                reason: err.to_string().into(),
+            }),
+        }
+    }
+
+    /// Loads the FastCGI upstreams: the applications and code roots named by `FASTCGI_FILE`, each
+    /// root opened as a directory handle, or none when it is unset. No connection is made.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `FASTCGI_FILE` when the file cannot be read or is malformed, or an
+    /// entry has an address that is neither `unix:/path` nor `host:port`, a root that is not an
+    /// absolute directory, or a limit out of range; the reason names the file, the tenant and the
+    /// upstream.
+    pub fn fastcgi(&self) -> Result<FastcgiRoots, ConfigError> {
+        match &self.fastcgi_file {
+            None => Ok(FastcgiRoots::default()),
+            Some(path) => FastcgiRoots::load(path).map_err(|err| ConfigError {
+                var: "FASTCGI_FILE",
                 reason: err.to_string().into(),
             }),
         }
@@ -614,6 +638,7 @@ impl Config {
         }
         config.otel = ExportConfig::from_lookup(&lookup)?;
         config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
+        config.fastcgi_file = non_empty("FASTCGI_FILE")?.map(PathBuf::from);
         config.rate_limit_stores_file = non_empty("RATE_LIMIT_STORES_FILE")?.map(PathBuf::from);
         config.dns = resolve::Settings::from_lookup(&lookup)?;
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
@@ -675,6 +700,7 @@ mod test {
             ("DNS_MAX_STALE_SECS", "0"),
             ("DNS_MAX_QUERIES_PER_SEC", "7"),
             ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
+            ("FASTCGI_FILE", "/etc/podgate/fastcgi.json"),
             ("RATE_LIMIT_STORES_FILE", "/etc/podgate/limit-stores.json"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
@@ -725,6 +751,7 @@ mod test {
                     max_queries_per_sec: NonZeroU32::new(7).expect("7 is not zero"),
                 },
                 static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
+                fastcgi_file: Some(PathBuf::from("/etc/podgate/fastcgi.json")),
                 rate_limit_stores_file: Some(PathBuf::from("/etc/podgate/limit-stores.json")),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
@@ -790,6 +817,7 @@ mod test {
             ("UPSTREAM_POOL_SIZE", "65537"),
             ("UPSTREAM_POOL_SIZE", "many"),
             ("STATIC_ROOTS_FILE", " "),
+            ("FASTCGI_FILE", " "),
             ("RATE_LIMIT_STORES_FILE", " "),
             ("CACHE_TENANT_MAX_PERCENT", "0"),
             ("CACHE_TENANT_MAX_PERCENT", "101"),

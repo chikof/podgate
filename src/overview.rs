@@ -558,6 +558,9 @@ struct ServiceView<'a> {
     health_check: bool,
     #[serde(skip_serializing_if = "is_false")]
     outlier_detection: bool,
+    /// For a `fastcgi` service: the upstream's name and the index script.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fastcgi: Option<service::FastcgiSummary<'a>>,
     servers: Vec<ServerView>,
 }
 
@@ -823,6 +826,7 @@ fn service_view<'a>(revision: Option<&'a str>, named: &'a service::Named) -> Ser
         algorithm: service.algorithm(),
         health_check: checked,
         outlier_detection: service.has_outlier_detection(),
+        fastcgi: service.as_fastcgi().map(|site| site.summary()),
         servers: service
             .servers()
             .iter()

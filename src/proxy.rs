@@ -83,7 +83,7 @@ use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
 use crate::service::extras;
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{Lease, StaticReads, mirroring, outlier, serve_static, sticky};
+use crate::service::{Lease, StaticReads, mirroring, outlier, serve_fastcgi, serve_static, sticky};
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
@@ -742,10 +742,16 @@ impl ProxyHttp for Gateway {
                     return Ok(true);
                 }
             };
-            let serves_files = ctx.table.app(selected.app).is_some_and(|app| {
-                app.static_site(selected.revision, selected.router)
-                    .is_some()
-            });
+            let (serves_static, serves_fastcgi) =
+                ctx.table.app(selected.app).map_or((false, false), |app| {
+                    (
+                        app.static_site(selected.revision, selected.router)
+                            .is_some(),
+                        app.fastcgi_site(selected.revision, selected.router)
+                            .is_some(),
+                    )
+                });
+            let serves_files = serves_static || serves_fastcgi;
             // The revision and server are chosen: a middleware may answer from its own store
             // before any slot is taken. The lease drops with the answer.
             if self
@@ -783,7 +789,12 @@ impl ProxyHttp for Gateway {
                 ctx.inflight = Some(guard);
                 if serves_files {
                     // No server to dial, no backend slot to take: answer from the directory.
-                    serve_static(self, &self.static_reads, &self.budgets, session, ctx).await?;
+                    if serves_fastcgi {
+                        serve_fastcgi(self, &self.budgets, self.upstream_timeout, session, ctx)
+                            .await?;
+                    } else {
+                        serve_static(self, &self.static_reads, &self.budgets, session, ctx).await?;
+                    }
                     return Ok(true);
                 }
                 return Ok(false);

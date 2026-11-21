@@ -169,6 +169,10 @@ pub enum AppError {
     /// and the client should retry in a second.
     #[error("static file buffers are over the tenant's budget")]
     StaticOverBudget,
+    /// A `fastcgi` service could not run the request: the application is busy, unreachable, slow
+    /// or answered nonsense. The status depends on the failure.
+    #[error("{0}")]
+    Fastcgi(crate::service::FastcgiFailure),
     /// A `rate_limit` bucket is empty: `429`, with `retry-after` the whole seconds until it holds
     /// a token (at least 1).
     #[error("rate limit exceeded")]
@@ -232,6 +236,7 @@ impl AppError {
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::HeadersTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             Self::UpstreamResponseTooLarge => StatusCode::BAD_GATEWAY,
+            Self::Fastcgi(failure) => failure.status(),
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -256,6 +261,7 @@ impl AppError {
             | Self::OidcBusy => Some(1),
             Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
             Self::WakeTimeout => Some(5),
+            Self::Fastcgi(failure) => failure.retry_after_secs(),
             _ => None,
         }
     }
@@ -284,7 +290,7 @@ impl AppError {
                 | Self::AuthBusy
                 | Self::AuthSaturated
                 | Self::OidcBusy
-        )
+        ) || matches!(self, Self::Fastcgi(failure) if failure.is_capacity_refusal())
     }
 
     /// The `reason` an access log line gives when podgate answers with this error itself. A new
@@ -301,6 +307,7 @@ impl AppError {
             | Self::FilterOverBudget
             | Self::BufferingOverBudget
             | Self::StaticOverBudget => "over_budget",
+            Self::Fastcgi(failure) => failure.log_reason(),
             Self::StaticBusy => "static_busy",
             Self::PayloadTooLarge => "payload_too_large",
             Self::ExpectationFailed => "expectation_failed",

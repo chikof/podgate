@@ -562,6 +562,17 @@ impl CompiledApp {
         self.service(revision, router)?.as_static()
     }
 
+    /// The `fastcgi` service router `router` uses in revision `revision`, or `None` when it uses
+    /// another type: the proxy runs the script through the application and never dials.
+    #[must_use]
+    pub fn fastcgi_site(
+        &self,
+        revision: usize,
+        router: usize,
+    ) -> Option<&Arc<service::FastcgiSite>> {
+        self.service(revision, router)?.as_fastcgi()
+    }
+
     /// Every server address the app can send to, in any revision, as of now.
     #[must_use]
     pub fn upstream_addrs(&self) -> Vec<SocketAddr> {

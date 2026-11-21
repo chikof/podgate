@@ -426,6 +426,9 @@ impl Mirroring {
             Service::Static(_) => Err(invalid(format!(
                 "service {name} is a static service: a copy of a request needs a server to dial, so a static service is neither mirrored nor a mirror"
             ))),
+            Service::Fastcgi(_) => Err(invalid(format!(
+                "service {name} is a fastcgi service: a copy of a request needs a server to dial, so a fastcgi service is neither mirrored nor a mirror"
+            ))),
             Service::Mirroring(_) if *named.name == *self.name => Err(Invalid::new(
                 "service_cycle",
                 format!("mirroring: service {name} mirrors to itself"),
@@ -561,7 +564,10 @@ mod test {
         let service = Service::compile(
             &declared(json!({"name": "site", "type": "static", "root": "site"})),
             &[],
-            Some(&roots),
+            Some(&crate::service::Locals {
+                statics: Some(&roots),
+                fastcgi: None,
+            }),
             "t",
             &Resolver::default(),
         )

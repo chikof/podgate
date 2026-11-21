@@ -2918,6 +2918,15 @@ spec:
                     - service
                     - fallback
                   - properties:
+                      max_request_body_bytes:
+                        minimum: 0
+                      type:
+                        enum:
+                        - fastcgi
+                    required:
+                    - type
+                    - upstream
+                  - properties:
                       health_check:
                         properties:
                           healthy_threshold:
@@ -3045,6 +3054,26 @@ spec:
                           nullable: true
                           type: string
                       type: object
+                    deny:
+                      description: Paths under the root that never run, however a request names them.
+                      items:
+                        type: string
+                      nullable: true
+                      type: array
+                    env:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Extra environment for the application: names `^[A-Z][A-Z0-9_]{0,63}$` that podgate and PHP
+                        do not already decide.
+                      nullable: true
+                      type: object
+                    extensions:
+                      description: File name endings that may run. Default `[".php"]`.
+                      items:
+                        type: string
+                      nullable: true
+                      type: array
                     fallback:
                       description: 'The service that takes them otherwise: `name` or `name@revision`.'
                       type: string
@@ -3119,10 +3148,7 @@ spec:
                       nullable: true
                       type: array
                     index:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
+                      x-kubernetes-preserve-unknown-fields: true
                     max_body_size:
                       description: |-
                         The most body bytes that are mirrored, default 1 MiB, at most 16 MiB. Larger bodies are
@@ -3135,6 +3161,11 @@ spec:
                       nullable: true
                       type: integer
                     max_file_bytes:
+                      minimum: 0
+                      nullable: true
+                      type: integer
+                    max_request_body_bytes:
+                      description: Largest request body, in bytes. Default 8 MiB.
                       minimum: 0
                       nullable: true
                       type: integer
@@ -3246,6 +3277,12 @@ spec:
                         - weight
                         type: object
                       type: array
+                    split_path_info:
+                      description: |-
+                        Splits `/app.php/extra/path` into the script `/app.php` and `PATH_INFO` `/extra/path`.
+                        Default `true`.
+                      nullable: true
+                      type: boolean
                     status_pages:
                       additionalProperties:
                         type: string
@@ -3285,6 +3322,9 @@ spec:
                       nullable: true
                       type: string
                     try_files:
+                      description: |-
+                        Path templates tried in order (`{path}` is the request path); a trailing status code
+                        (`"404"`) is answered when none runs. Default `["{path}", "{path}/<index>", "/<index>"]`.
                       items:
                         type: string
                       nullable: true
@@ -3293,10 +3333,14 @@ spec:
                       description: The kind; it decides which of the other fields apply.
                       enum:
                       - failover
+                      - fastcgi
                       - loadbalancer
                       - mirroring
                       - static
                       - weighted
+                      type: string
+                    upstream:
+                      description: The name of an upstream the operator declared for the tenant in `FASTCGI_FILE`.
                       type: string
                   required:
                   - name

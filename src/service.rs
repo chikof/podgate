@@ -15,6 +15,7 @@
 //! | `weighted` | `weighted.rs` |
 //! | `mirroring` | `mirroring.rs` |
 //! | `failover` | `failover.rs` |
+//! | `fastcgi` | `fastcgi.rs`, with its helpers in `fastcgi/` |
 //!
 //! Shared by the load balancer's helpers: the runtime state that outlives a snapshot push
 //! (`state.rs`, see [`state`]), upstream transports (`transport.rs`: the TLS settings of the
@@ -29,6 +30,7 @@
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
 
 mod failover;
+mod fastcgi;
 pub mod graph;
 pub mod health;
 pub mod lb;
@@ -52,6 +54,11 @@ use podgate_model::{Declared, SkewSecret};
 use resolve::Resolver;
 
 pub use failover::Failover;
+pub(crate) use fastcgi::serve as serve_fastcgi;
+pub use fastcgi::{
+    Failure as FastcgiFailure, FastcgiRoots, FastcgiSite, LoadError as FastcgiLoadError,
+    Summary as FastcgiSummary, TenantFastcgi,
+};
 pub use lb::PickCx;
 pub(crate) use lb::RingBudget;
 pub use loadbalancer::{LoadBalancer, Server, Servers};
@@ -76,12 +83,13 @@ pub const UNBUILT: [&str; 0] = [];
 /// Every service type `Service::compile` builds. `compile` refuses a type that is not listed here
 /// before it looks at its arms, so an arm for a new type is dead until its name is listed; the
 /// schema guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
-pub const BUILT: [&str; 5] = [
+pub const BUILT: [&str; 6] = [
     "loadbalancer",
     "static",
     "mirroring",
     "weighted",
     "failover",
+    "fastcgi",
 ];
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built type, whose
@@ -108,6 +116,8 @@ schemas! {
     "weighted" => weighted::Config,
 
     "failover" => failover::Config,
+
+    "fastcgi" => fastcgi::Config,
 }
 
 /// The `type` of an upstream transport in a snapshot and its JSON Schema.
@@ -129,6 +139,8 @@ pub enum Service {
     Weighted(Box<Weighted>),
     /// `failover`: a primary service and a fallback. Has no server of its own.
     Failover(Box<Failover>),
+    /// `fastcgi`: a script run by an operator-declared FastCGI application. Has no server.
+    Fastcgi(Arc<FastcgiSite>),
 }
 
 /// A service and the name it was declared under.
@@ -140,9 +152,21 @@ pub struct Named {
     pub service: Service,
 }
 
+/// What the operator declared for one tenant that its services may name: the directories of
+/// `static` services (`STATIC_ROOTS_FILE`) and the applications of `fastcgi` services
+/// (`FASTCGI_FILE`). A snapshot names an entry and never supplies a path or an address.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Locals<'a> {
+    /// The roots `static` services serve.
+    pub statics: Option<&'a TenantRoots>,
+    /// The upstreams `fastcgi` services run.
+    pub fastcgi: Option<&'a TenantFastcgi>,
+}
+
 impl Service {
-    /// Compiles one declared service of `tenant`. `static_roots` are the roots the operator
-    /// declared for the tenant; `resolver` holds the answers for servers named by host name.
+    /// Compiles one declared service of `tenant`. `locals` are the directories and FastCGI
+    /// upstreams the operator declared for the tenant; `resolver` holds the answers for servers
+    /// named by host name.
     ///
     /// # Errors
     ///
@@ -150,10 +174,11 @@ impl Service {
     /// type or a configuration the type refuses (a server host that is not an IP address or a
     /// valid host name included), `unknown_static_root` for a `static` service naming a root the
     /// tenant lacks.
+    /// `unknown_fastcgi_upstream` for a `fastcgi` service naming an upstream the tenant lacks.
     pub fn compile(
         declared: &Declared,
         transports: &[NamedTransport],
-        static_roots: Option<&TenantRoots>,
+        locals: Option<&Locals<'_>>,
         tenant: &str,
         resolver: &Resolver,
     ) -> Result<Self, Invalid> {
@@ -168,9 +193,8 @@ impl Service {
             )),
             "loadbalancer" => LoadBalancer::compile(declared, transports, tenant, resolver)
                 .map(|balancer| Self::LoadBalancer(Box::new(balancer))),
-            "static" => {
-                StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
-            }
+            "static" => StaticSite::compile(declared, locals.and_then(|locals| locals.statics))
+                .map(|site| Self::Static(Arc::new(site))),
             "mirroring" => {
                 Mirroring::compile(declared).map(|mirroring| Self::Mirroring(Box::new(mirroring)))
             }
@@ -180,6 +204,8 @@ impl Service {
             "failover" => {
                 Failover::compile(declared).map(|failover| Self::Failover(Box::new(failover)))
             }
+            "fastcgi" => FastcgiSite::compile(declared, locals.and_then(|locals| locals.fastcgi))
+                .map(|site| Self::Fastcgi(Arc::new(site))),
             other => Err(Invalid::new(
                 "invalid_service",
                 format!("unknown service type {other}"),
@@ -196,6 +222,7 @@ impl Service {
             Self::Mirroring(_) => "mirroring",
             Self::Weighted(_) => "weighted",
             Self::Failover(_) => "failover",
+            Self::Fastcgi(_) => "fastcgi",
         }
     }
 
@@ -205,6 +232,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.algorithm()),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
     }
 
@@ -214,6 +242,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.health_check().is_some(),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
+            Self::Fastcgi(_) => false,
         }
     }
 
@@ -223,6 +252,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.passive().is_some(),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
+            Self::Fastcgi(_) => false,
         }
     }
 
@@ -236,6 +266,7 @@ impl Service {
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => {
                 Servers::default()
             }
+            Self::Fastcgi(_) => Servers::default(),
         }
     }
 
@@ -246,6 +277,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.ring_points(),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => 0,
+            Self::Fastcgi(_) => 0,
         }
     }
 
@@ -256,6 +288,7 @@ impl Service {
             Self::LoadBalancer(balancer) => balancer.sticky(),
             Self::Weighted(weighted) => weighted.sticky(),
             Self::Static(_) | Self::Mirroring(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
     }
 
@@ -274,6 +307,7 @@ impl Service {
             Self::LoadBalancer(balancer) => balancer.bind_sticky(secret, app, service),
             Self::Weighted(weighted) => weighted.bind_sticky(secret, app, service),
             Self::Static(_) | Self::Mirroring(_) | Self::Failover(_) => Ok(()),
+            Self::Fastcgi(_) => Ok(()),
         }
     }
 
@@ -292,6 +326,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.is_backed(),
             Self::Static(_) => true,
+            Self::Fastcgi(_) => true,
             Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
         }
     }
@@ -301,6 +336,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.dns_names()),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
         .into_iter()
         .flatten()
@@ -311,6 +347,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.srv_names()),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
         .into_iter()
         .flatten()
@@ -323,6 +360,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.refresh(),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
+            Self::Fastcgi(_) => false,
         }
     }
 
@@ -339,6 +377,7 @@ impl Service {
             Self::Weighted(weighted) => weighted.children(),
             Self::Failover(failover) => failover.children(),
             Self::LoadBalancer(_) | Self::Static(_) | Self::Mirroring(_) => &[],
+            Self::Fastcgi(_) => &[],
         }
     }
 
@@ -350,6 +389,20 @@ impl Service {
             Self::LoadBalancer(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => {
                 None
             }
+            Self::Fastcgi(_) => None,
+        }
+    }
+
+    /// The compiled `fastcgi` service, or `None` for any other type.
+    #[must_use]
+    pub fn as_fastcgi(&self) -> Option<&Arc<FastcgiSite>> {
+        match self {
+            Self::Fastcgi(site) => Some(site),
+            Self::LoadBalancer(_)
+            | Self::Static(_)
+            | Self::Mirroring(_)
+            | Self::Weighted(_)
+            | Self::Failover(_) => None,
         }
     }
 
@@ -359,6 +412,7 @@ impl Service {
         match self {
             Self::Mirroring(mirroring) => Some(mirroring),
             Self::LoadBalancer(_) | Self::Static(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
     }
 
@@ -369,6 +423,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.transport()),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
     }
 
@@ -383,6 +438,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.with_upstream(addr, f),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+            Self::Fastcgi(_) => None,
         }
     }
 
@@ -401,6 +457,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.skips_tls_verification(),
             Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
+            Self::Fastcgi(_) => false,
         }
     }
 
@@ -417,6 +474,7 @@ impl Service {
                 )
             }),
             Self::Static(_) => Some("is a static service, which answers no gRPC".to_owned()),
+            Self::Fastcgi(_) => Some("is a fastcgi service, which answers no gRPC".to_owned()),
             Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
@@ -430,6 +488,7 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
             Self::Static(site) => Some((NO_SERVER, site.lease())),
+            Self::Fastcgi(site) => Some((NO_SERVER, site.lease())),
             // The table never routes a request to a mirroring service: it routes to its main.
             Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }

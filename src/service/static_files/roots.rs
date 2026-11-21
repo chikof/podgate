@@ -164,7 +164,7 @@ impl fmt::Debug for Root {
 
 /// What kind of file an open path turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     /// A regular file.
     File,
     /// A directory.
@@ -173,7 +173,7 @@ pub(super) enum Kind {
 
 /// A file or directory opened inside a root.
 #[derive(Debug)]
-pub(super) struct Opened {
+pub(crate) struct Opened {
     /// The open file. Reads go through `read_at`, so it keeps no position.
     pub file: File,
     /// Regular file or directory; anything else is never returned.
@@ -186,7 +186,7 @@ pub(super) struct Opened {
 
 /// Why nothing was opened.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum OpenError {
+pub(crate) enum OpenError {
     /// Nothing is served at the path: it does not exist, leaves the root, loops, is not a regular
     /// file or directory, or is not readable. The caller cannot tell which, and neither can the
     /// client.
@@ -199,14 +199,14 @@ pub(super) enum OpenError {
 
 /// A request path made safe for a root: segments that are plain names.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RelPath {
+pub(crate) struct RelPath {
     rel: String,
     trailing_slash: bool,
 }
 
 /// Why a path is not served.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum Refused {
+pub(crate) enum Refused {
     /// The path does not start with `/`.
     #[error("the path is not absolute")]
     NotAbsolute,
@@ -261,7 +261,7 @@ impl RelPath {
     ///
     /// [`Refused`] for a path that is not absolute, has a `.` or `..` segment (after decoding),
     /// a backslash or NUL (raw or decoded), a decoded `/`, a hidden name or a broken escape.
-    pub(super) fn parse(raw: &str) -> Result<Self, Refused> {
+    pub(crate) fn parse(raw: &str) -> Result<Self, Refused> {
         if !raw.starts_with('/') {
             return Err(Refused::NotAbsolute);
         }
@@ -293,7 +293,7 @@ impl RelPath {
 
     /// The path of `name` inside this path; `None` when `name` is not a plain name.
     #[must_use]
-    pub(super) fn join(&self, name: &str) -> Option<Self> {
+    pub(crate) fn join(&self, name: &str) -> Option<Self> {
         if name.is_empty()
             || matches!(name, "." | "..")
             || name.contains(['\\', '/', '\0'])
@@ -339,7 +339,7 @@ impl RelPath {
 
     /// The relative path, for messages.
     #[must_use]
-    pub(super) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.rel
     }
 }
@@ -384,7 +384,7 @@ impl Root {
     ///
     /// [`OpenError::Missing`] as above, [`OpenError::Exhausted`] when the process has no file
     /// descriptor or memory left.
-    pub(super) fn open_path(&self, path: &RelPath) -> Result<Opened, OpenError> {
+    pub(crate) fn open_path(&self, path: &RelPath) -> Result<Opened, OpenError> {
         let mut options = OpenOptions::new();
         options.read(true).custom_flags(NONBLOCK);
         let file = self

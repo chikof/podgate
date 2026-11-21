@@ -22,6 +22,7 @@
     pkgs.valkey # test Redis-compatible store
     pkgs.caddy # proxy benchmark baseline
     pkgs.traefik # proxy benchmark baseline
+    pkgs.php # a real php-fpm for the fastcgi service smoke test
   ];
 
   # Secrets and local overrides come from the gitignored .env file. See .env.example.
