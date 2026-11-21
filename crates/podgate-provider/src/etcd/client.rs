@@ -25,12 +25,10 @@ use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use http::{Request, StatusCode, Uri};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
-use hyper_rustls::{ConfigBuilderExt as _, HttpsConnector, HttpsConnectorBuilder};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client as Hyper;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use thiserror::Error;
@@ -38,6 +36,7 @@ use thiserror::Error;
 use super::auth::{Auth, Credentials};
 use crate::acme::Secret;
 use crate::kv::MAX_KEYS_PER_PREFIX;
+use crate::tls_client::{TlsPem, tls_config};
 
 /// The longest an ordinary request, from connect to the last byte of its answer, may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -118,14 +117,6 @@ impl ClientError {
 
 type Http = Hyper<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
-/// The PEM of the TLS settings, read from the files by the source.
-#[derive(Default)]
-pub(super) struct TlsPem {
-    pub(super) ca: Option<Vec<u8>>,
-    pub(super) cert: Option<Vec<u8>>,
-    pub(super) key: Option<Vec<u8>>,
-}
-
 struct Shared {
     /// `scheme://authority` of each endpoint, without a trailing slash.
     endpoints: Box<[Box<str>]>,
@@ -162,49 +153,6 @@ fn range_end(prefix: &[u8]) -> Vec<u8> {
     }
     // A prefix of nothing but 0xff bytes: "every key from here", which etcd spells `\0`.
     vec![0]
-}
-
-fn tls_config(pem: TlsPem) -> Result<rustls::ClientConfig, String> {
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|err| format!("TLS: {err}"))?;
-    let builder = match pem.ca {
-        Some(ca) => {
-            let mut roots = rustls::RootCertStore::empty();
-            for cert in CertificateDer::pem_slice_iter(&ca) {
-                let cert = cert.map_err(|err| format!("tls.ca_file: {err}"))?;
-                roots
-                    .add(cert)
-                    .map_err(|err| format!("tls.ca_file: {err}"))?;
-            }
-            if roots.is_empty() {
-                return Err("tls.ca_file: holds no certificate".to_owned());
-            }
-            builder.with_root_certificates(roots)
-        }
-        None => builder
-            .with_native_roots()
-            .map_err(|err| format!("cannot load the platform's root certificates ({err})"))?,
-    };
-    match (pem.cert, pem.key) {
-        (Some(cert), Some(key)) => {
-            let chain = CertificateDer::pem_slice_iter(&cert)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| format!("tls.cert_file: {err}"))?;
-            if chain.is_empty() {
-                return Err("tls.cert_file: holds no certificate".to_owned());
-            }
-            // The error of a bad key names the file, never its content.
-            let key = PrivateKeyDer::from_pem_slice(&key)
-                .map_err(|_| "tls.key_file: holds no private key".to_owned())?;
-            builder
-                .with_client_auth_cert(chain, key)
-                .map_err(|err| format!("tls.cert_file and tls.key_file: {err}"))
-        }
-        _ => Ok(builder.with_no_client_auth()),
-    }
 }
 
 /// The text of an error answer, cut short.

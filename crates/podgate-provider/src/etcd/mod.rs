@@ -57,9 +57,10 @@ use crate::config::SourceConfig;
 use crate::kv::{self, Mapping, RawPrefix};
 use crate::policy::UpstreamPolicy;
 use crate::source::{Source, State, Update, UpdateBody};
+use crate::tls_client::TlsPem;
 
 use auth::Credentials;
-use client::{Change, Client, TlsPem};
+use client::{Change, Client};
 use watch::Msg;
 
 const DEFAULT_RESYNC_SECS: u64 = 60;

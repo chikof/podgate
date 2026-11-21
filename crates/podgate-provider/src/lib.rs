@@ -48,6 +48,7 @@ pub mod push;
 pub mod quarantine;
 pub mod source;
 mod tags;
+mod tls_client;
 pub mod traefik;
 pub mod traefik_file;
 pub mod trust;
