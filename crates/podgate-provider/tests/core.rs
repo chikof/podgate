@@ -1904,7 +1904,7 @@ async fn check_asks_podgate_to_validate() {
 
 #[tokio::test]
 async fn a_source_kind_that_is_not_built_is_an_error() {
-    let text = "admin_socket = \"/nonexistent/admin.sock\"\n[[source]]\nkind = \"consul\"\nname = \"local\"\n";
+    let text = "admin_socket = \"/nonexistent/admin.sock\"\n[[source]]\nkind = \"not-a-source\"\nname = \"local\"\n";
     let path = write_config("unbuilt", text);
     let output = provider("print", path.clone()).await;
     assert!(!output.status.success());
