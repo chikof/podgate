@@ -14,9 +14,6 @@ use crate::source::{Origin, SourceApp, TenantClaim};
 use super::model::{Container, ContainerDefinition, Task, TaskDefinition, arn_name, unix_secs};
 use super::{Settings, TenantSource};
 
-/// The most characters of an app id (`<cluster>.<app>`).
-const MAX_ID: usize = 63;
-
 /// The task tag that names a tenant under `tenant_from = "tag"`.
 const TENANT_TAG: &str = "podgate.tenant";
 
@@ -123,16 +120,6 @@ fn container_serves(definition: &ContainerDefinition, container: &Container) -> 
     container.last_status.as_deref() == Some("RUNNING")
         && (definition.health_check.is_none()
             || container.health_status.as_deref() == Some("HEALTHY"))
-}
-
-/// A name valid as the parts of an id. AWS names are letters, digits, `-` and `_`; anything else
-/// in an answer is not trusted.
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_ID
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// The service a task belongs to, or its task definition family.
@@ -329,12 +316,8 @@ fn candidate(
             .ok_or("the task has no service or task definition family to name the app")?
             .to_owned(),
     };
-    let id: Box<str> = format!("{cluster}.{name}").into();
-    if !valid_id(&id) {
-        return Err(format!(
-            "app id {id:?}: must be 1 to {MAX_ID} letters, digits, `-`, `_` or `.`"
-        ));
-    }
+    let id =
+        labels::identifier("app", &format!("{cluster}.{name}")).map_err(|why| why.to_string())?;
 
     let port = match labels.port {
         Some(port) => port,
