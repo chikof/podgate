@@ -26,12 +26,18 @@
 //!   (Pingora has already sent the head by then).
 //!
 //! `Upgrade` and `CONNECT` requests are exempt: a WebSocket is not a body.
+//!
+//! A gRPC call (`application/grpc*`, gRPC-Web included) is never held, in either direction: its
+//! request and response are streams that run together for as long as the call lives, so a held
+//! request would wait for a body that a bidirectional call only ends after the response, and a
+//! held response would withhold every message and lose the trailers it ends with. The request
+//! limit still counts the stream.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, EXPECT, TRANSFER_ENCODING};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, EXPECT, TRANSFER_ENCODING};
 use pingora::Error;
 use pingora::ErrorType::{HTTPStatus, InternalError};
 use pingora::http::{Method, RequestHeader, StatusCode};
@@ -115,6 +121,8 @@ pub struct Buffering {
 pub struct State {
     /// `Upgrade` and `CONNECT`: no limit applies.
     exempt: bool,
+    /// A gRPC call: nothing is held, the limit still counts.
+    stream: bool,
     /// The charge for the request body held by `buffer_request`, until the request ends.
     request_charge: Option<BufferGuard>,
     /// The response being held.
@@ -206,6 +214,21 @@ fn exempt(session: &Session) -> bool {
     session.is_upgrade_req() || session.req_header().method == Method::CONNECT
 }
 
+/// A gRPC or gRPC-Web call: `application/grpc`, `application/grpc+proto`,
+/// `application/grpc-web-text+proto`, parameters ignored.
+fn is_grpc(request: &RequestHeader) -> bool {
+    const GRPC: &[u8] = b"application/grpc";
+    request.headers.get(CONTENT_TYPE).is_some_and(|value| {
+        let value = value.as_bytes();
+        value
+            .get(..GRPC.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(GRPC))
+            && value
+                .get(GRPC.len())
+                .is_none_or(|next| matches!(next, b'+' | b'-' | b';' | b' '))
+    })
+}
+
 /// Whether the response to `request` can carry a body at all.
 fn has_body(request: &RequestHeader, status: StatusCode) -> bool {
     request.method != Method::HEAD
@@ -293,6 +316,7 @@ impl Kind for Buffering {
             state.exempt = true;
             return Ok(Flow::Continue);
         }
+        state.stream = is_grpc(cx.session.req_header());
         let Some(max) = self.config.max_request_body_bytes else {
             return Ok(Flow::Continue);
         };
@@ -306,7 +330,7 @@ impl Kind for Buffering {
             respond::write_error(cx.session, &refusal).await?;
             return Ok(Flow::Respond);
         }
-        if !self.config.buffer_request || cx.session.is_body_empty() {
+        if !self.config.buffer_request || state.stream || cx.session.is_body_empty() {
             return Ok(Flow::Continue);
         }
         self.hold_request(cx, state, max, declared).await
@@ -323,7 +347,7 @@ impl Kind for Buffering {
         let Some(max) = self.config.max_response_body_bytes else {
             return Ok(());
         };
-        if state.exempt || !has_body(cx.request, cx.response.status) {
+        if state.exempt || state.stream || !has_body(cx.request, cx.response.status) {
             return Ok(());
         }
         let declared = declared_length(&cx.response.headers);
@@ -533,5 +557,38 @@ mod test {
         assert_eq!(declared_length(&headers), Some(12));
         headers.insert(TRANSFER_ENCODING, "chunked".parse().expect("value"));
         assert_eq!(declared_length(&headers), None);
+    }
+
+    #[test]
+    fn grpc_and_grpc_web_calls_are_streams_and_other_types_are_not() {
+        let request = |content_type: Option<&str>| {
+            let mut request = RequestHeader::build("POST", b"/svc/Method", None).expect("request");
+            if let Some(value) = content_type {
+                request
+                    .insert_header("content-type", value)
+                    .expect("content type");
+            }
+            request
+        };
+        for grpc in [
+            "application/grpc",
+            "Application/GRPC",
+            "application/grpc+proto",
+            "application/grpc; charset=utf-8",
+            "application/grpc-web",
+            "application/grpc-web+proto",
+            "application/grpc-web-text",
+        ] {
+            assert!(is_grpc(&request(Some(grpc))), "{grpc}");
+        }
+        for other in [
+            "application/grpcx",
+            "application/grp",
+            "application/json",
+            "",
+        ] {
+            assert!(!is_grpc(&request(Some(other))), "{other}");
+        }
+        assert!(!is_grpc(&request(None)));
     }
 }

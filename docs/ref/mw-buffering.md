@@ -51,6 +51,8 @@ The charge for a held response is its `Content-Length` before the head goes out 
 
 `Upgrade` requests and `CONNECT` are exempt from every limit in both directions: a WebSocket is not a body.
 
+A gRPC call (`Content-Type` `application/grpc`, `application/grpc+...`, or gRPC-Web `application/grpc-web...`) is never held, whatever `buffer_request` and `buffer_response` say. Its request and response are streams that run together: a held request would wait for a body that a bidirectional or client-streaming call only ends after the response, and a held response would withhold every message and lose the trailers it ends with. The request limit (`max_request_body_bytes`) still counts the stream, so it caps the whole call, not each message; `max_response_body_bytes` needs `buffer_response` and so does not apply. `tests/grpc.rs` `grpc_not_compressed_or_buffered`.
+
 ## Plan
 
 Removing the stage, removing a limit or raising it lists `request_body_limit_loosened` or `response_body_limit_loosened` in `posture_changes` of `POST /v1/snapshot/plan`.
