@@ -1259,6 +1259,8 @@ spec:
                       - required:
                         - alpn
                       - required:
+                        - cel
+                      - required:
                         - all
                       - required:
                         - any
@@ -1298,6 +1300,8 @@ spec:
                               - sni_regexp
                             - required:
                               - alpn
+                            - required:
+                              - cel
                             - required:
                               - all
                             - required:
@@ -1339,6 +1343,8 @@ spec:
                                   - required:
                                     - alpn
                                   - required:
+                                    - cel
+                                  - required:
                                     - all
                                   - required:
                                     - any
@@ -1360,6 +1366,9 @@ spec:
                                         x-kubernetes-preserve-unknown-fields: true
                                       minItems: 1
                                       type: array
+                                    cel:
+                                      description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                      x-kubernetes-preserve-unknown-fields: true
                                     client_ip:
                                       description: An address or CIDR block, or a list of them.
                                       x-kubernetes-preserve-unknown-fields: true
@@ -1475,6 +1484,8 @@ spec:
                                   - required:
                                     - alpn
                                   - required:
+                                    - cel
+                                  - required:
                                     - all
                                   - required:
                                     - any
@@ -1496,6 +1507,9 @@ spec:
                                         x-kubernetes-preserve-unknown-fields: true
                                       minItems: 1
                                       type: array
+                                    cel:
+                                      description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                      x-kubernetes-preserve-unknown-fields: true
                                     client_ip:
                                       description: An address or CIDR block, or a list of them.
                                       x-kubernetes-preserve-unknown-fields: true
@@ -1574,6 +1588,9 @@ spec:
                                   type: object
                                 minItems: 1
                                 type: array
+                              cel:
+                                description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                x-kubernetes-preserve-unknown-fields: true
                               client_ip:
                                 description: An address or CIDR block, or a list of them.
                                 x-kubernetes-preserve-unknown-fields: true
@@ -1641,6 +1658,8 @@ spec:
                                 - required:
                                   - alpn
                                 - required:
+                                  - cel
+                                - required:
                                   - all
                                 - required:
                                   - any
@@ -1662,6 +1681,9 @@ spec:
                                       x-kubernetes-preserve-unknown-fields: true
                                     minItems: 1
                                     type: array
+                                  cel:
+                                    description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                    x-kubernetes-preserve-unknown-fields: true
                                   client_ip:
                                     description: An address or CIDR block, or a list of them.
                                     x-kubernetes-preserve-unknown-fields: true
@@ -1816,6 +1838,8 @@ spec:
                             - required:
                               - alpn
                             - required:
+                              - cel
+                            - required:
                               - all
                             - required:
                               - any
@@ -1856,6 +1880,8 @@ spec:
                                   - required:
                                     - alpn
                                   - required:
+                                    - cel
+                                  - required:
                                     - all
                                   - required:
                                     - any
@@ -1877,6 +1903,9 @@ spec:
                                         x-kubernetes-preserve-unknown-fields: true
                                       minItems: 1
                                       type: array
+                                    cel:
+                                      description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                      x-kubernetes-preserve-unknown-fields: true
                                     client_ip:
                                       description: An address or CIDR block, or a list of them.
                                       x-kubernetes-preserve-unknown-fields: true
@@ -1992,6 +2021,8 @@ spec:
                                   - required:
                                     - alpn
                                   - required:
+                                    - cel
+                                  - required:
                                     - all
                                   - required:
                                     - any
@@ -2013,6 +2044,9 @@ spec:
                                         x-kubernetes-preserve-unknown-fields: true
                                       minItems: 1
                                       type: array
+                                    cel:
+                                      description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                      x-kubernetes-preserve-unknown-fields: true
                                     client_ip:
                                       description: An address or CIDR block, or a list of them.
                                       x-kubernetes-preserve-unknown-fields: true
@@ -2091,6 +2125,9 @@ spec:
                                   type: object
                                 minItems: 1
                                 type: array
+                              cel:
+                                description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                x-kubernetes-preserve-unknown-fields: true
                               client_ip:
                                 description: An address or CIDR block, or a list of them.
                                 x-kubernetes-preserve-unknown-fields: true
@@ -2158,6 +2195,8 @@ spec:
                                 - required:
                                   - alpn
                                 - required:
+                                  - cel
+                                - required:
                                   - all
                                 - required:
                                   - any
@@ -2179,6 +2218,9 @@ spec:
                                       x-kubernetes-preserve-unknown-fields: true
                                     minItems: 1
                                     type: array
+                                  cel:
+                                    description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                    x-kubernetes-preserve-unknown-fields: true
                                   client_ip:
                                     description: An address or CIDR block, or a list of them.
                                     x-kubernetes-preserve-unknown-fields: true
@@ -2296,6 +2338,9 @@ spec:
                             type: object
                           minItems: 1
                           type: array
+                        cel:
+                          description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                          x-kubernetes-preserve-unknown-fields: true
                         client_ip:
                           description: An address or CIDR block, or a list of them.
                           x-kubernetes-preserve-unknown-fields: true
@@ -2363,6 +2408,8 @@ spec:
                           - required:
                             - alpn
                           - required:
+                            - cel
+                          - required:
                             - all
                           - required:
                             - any
@@ -2403,6 +2450,8 @@ spec:
                                 - required:
                                   - alpn
                                 - required:
+                                  - cel
+                                - required:
                                   - all
                                 - required:
                                   - any
@@ -2424,6 +2473,9 @@ spec:
                                       x-kubernetes-preserve-unknown-fields: true
                                     minItems: 1
                                     type: array
+                                  cel:
+                                    description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                    x-kubernetes-preserve-unknown-fields: true
                                   client_ip:
                                     description: An address or CIDR block, or a list of them.
                                     x-kubernetes-preserve-unknown-fields: true
@@ -2539,6 +2591,8 @@ spec:
                                 - required:
                                   - alpn
                                 - required:
+                                  - cel
+                                - required:
                                   - all
                                 - required:
                                   - any
@@ -2560,6 +2614,9 @@ spec:
                                       x-kubernetes-preserve-unknown-fields: true
                                     minItems: 1
                                     type: array
+                                  cel:
+                                    description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                    x-kubernetes-preserve-unknown-fields: true
                                   client_ip:
                                     description: An address or CIDR block, or a list of them.
                                     x-kubernetes-preserve-unknown-fields: true
@@ -2638,6 +2695,9 @@ spec:
                                 type: object
                               minItems: 1
                               type: array
+                            cel:
+                              description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                              x-kubernetes-preserve-unknown-fields: true
                             client_ip:
                               description: An address or CIDR block, or a list of them.
                               x-kubernetes-preserve-unknown-fields: true
@@ -2705,6 +2765,8 @@ spec:
                               - required:
                                 - alpn
                               - required:
+                                - cel
+                              - required:
                                 - all
                               - required:
                                 - any
@@ -2726,6 +2788,9 @@ spec:
                                     x-kubernetes-preserve-unknown-fields: true
                                   minItems: 1
                                   type: array
+                                cel:
+                                  description: The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).
+                                  x-kubernetes-preserve-unknown-fields: true
                                 client_ip:
                                   description: An address or CIDR block, or a list of them.
                                   x-kubernetes-preserve-unknown-fields: true

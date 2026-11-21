@@ -1001,6 +1001,9 @@
           "$ref": "#/$defs/matcher.alpn"
         },
         {
+          "$ref": "#/$defs/matcher.cel"
+        },
+        {
           "$ref": "#/$defs/matcher.all"
         },
         {
@@ -1069,6 +1072,45 @@
       },
       "required": [
         "any"
+      ],
+      "type": "object"
+    },
+    "matcher.cel": {
+      "additionalProperties": false,
+      "description": "A CEL expression over the request matches (HTTP routers only). Claims no host, counts as one constraint, and an evaluation error is a non-match.",
+      "properties": {
+        "cel": {
+          "description": "The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).",
+          "oneOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "expression": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "max_cost": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "expression"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "cel"
       ],
       "type": "object"
     },
@@ -4962,6 +5004,7 @@
       "all": "#/$defs/matcher.all",
       "alpn": "#/$defs/matcher.alpn",
       "any": "#/$defs/matcher.any",
+      "cel": "#/$defs/matcher.cel",
       "client_ip": "#/$defs/matcher.client_ip",
       "header": "#/$defs/matcher.header",
       "header_regexp": "#/$defs/matcher.header_regexp",
