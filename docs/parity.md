@@ -14,7 +14,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Several named listeners | `entryPoints.<n>.address` | listener addresses, `bind` | built (`ENTRY_POINTS`, process config; `PROXY_ADDR` and `PROXY_TLS_ADDR` stay as the `web` and `websecure` shorthand) |
 | Per-router entry point list | `entryPoints` on a router | site address | built (unbound names rejected as `unknown_entry_point`, `tcp` and `udp` ones as `entry_point_protocol`) |
 | Per-tenant entry point access | none | none | built (`EntryPointPolicy.tenants`, `entry_point_forbidden`) |
-| TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | `udp` built; `tcp` 0058 (a `tcp` entry point still stops startup) |
+| TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | Built: `udp`, `tcp` |
 | `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | built: X-Forwarded-For, -Proto, -Host, -Port and X-Real-IP by default (Traefik's set minus -Server, which is `forwarded.server: true`); `forwarded.rfc7239` adds `Forwarded`; forged inbound values of untrusted peers are removed |
 | PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | built: strict, no fallback; `docs/ref/proxy-protocol.md` |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | built: `redirect {to, permanent}`, `302`/`301` for `GET` and `307`/`308` for other methods, as Traefik, default not permanent |
@@ -137,8 +137,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | 0058, 0059 |
-| TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | 0058, 0061 |
+| TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | `ClientIP` built; SNI and ALPN 0059 |
+| TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | Load balancing with half-close, idle timeout and connect failover built; proxy protocol out and termination delay 0061 |
 | TCP middlewares | `inFlightConn`, `ipAllowList` | none | 0061 |
 | TCP health checks | `healthCheck` (v3) | `layer4` passive | 0095 (connect, send and expect, TLS) |
 | UDP routers and services | `udp.*` | `layer4` | built (sessions, idle timeout, bounded table, tenant buffer charge, eviction of one-datagram sessions, optional reply byte ratio) |
