@@ -17,7 +17,7 @@ Syntax: `name=address/protocol[;proxy_protocol]`, entries comma separated.
 | `protocol` | `http`: plain HTTP/1.1. `https`: TLS termination, HTTP/2 and HTTP/1.1, certificates from the snapshot chosen by SNI. `tcp`, `udp`: raw listeners. |
 | `;proxy_protocol` | Every connection starts with a PROXY protocol header from a peer the snapshot's `entry_points[].proxy_protocol` trusts; anything else is closed. `http` and `https` entry points only. See `docs/ref/proxy-protocol.md`. |
 
-`tcp` and `udp` are parsed and then refused at startup with an error naming the entry point, because the listeners that serve them are not built yet.
+`tcp` is parsed and then refused at startup with an error naming the entry point, because its listener is not built yet. A `udp` entry point is served (`docs/ref/l4-udp.md`) and cannot take `;proxy_protocol`.
 
 `PROXY_ADDR` and `PROXY_TLS_ADDR` are the shorthand for `web=<addr>/http` and `websecure=<addr>/https`. With neither variable nor `ENTRY_POINTS` set, the process has `web=127.0.0.1:8080/http`. Setting `ENTRY_POINTS` together with `PROXY_ADDR` or `PROXY_TLS_ADDR` stops startup with an error that names both.
 
