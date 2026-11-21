@@ -649,11 +649,6 @@ fn app_json(
     annotations: &Annotations,
 ) -> Result<App, String> {
     let meta = &ingress.metadata;
-    let mode = match mode {
-        TlsMode::Acme => "acme",
-        TlsMode::OnDemand => "on_demand",
-        TlsMode::Internal => "internal",
-    };
     serde_json::from_value(json!({
         // The core replaces `tenant` and `declared_by`; they only have to exist.
         "id": format!("{}.{}", meta.namespace(), meta.name),

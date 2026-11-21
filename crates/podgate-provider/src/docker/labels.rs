@@ -991,7 +991,7 @@ pub fn assemble(id: &str, members: &[Member<'_>]) -> Result<Assembled, Rejection
         "id": id,
         "tenant": tenant,
         "declared_by": "docker",
-        "tls": { "mode": tls_name(definition.tls) },
+        "tls": { "mode": definition.tls },
         "routers": to_value("routers", &definition.routers)?,
         "middlewares": to_value("middlewares", &definition.middlewares)?,
         "transports": to_value("transports", &definition.transports)?,
@@ -1037,14 +1037,6 @@ fn state_name(state: RevisionState) -> &'static str {
         RevisionState::Serving => "serving",
         RevisionState::Retiring => "retiring",
         RevisionState::Draining => "draining",
-    }
-}
-
-fn tls_name(mode: TlsMode) -> &'static str {
-    match mode {
-        TlsMode::Acme => "acme",
-        TlsMode::OnDemand => "on_demand",
-        TlsMode::Internal => "internal",
     }
 }
 
