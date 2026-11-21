@@ -2,7 +2,7 @@
 //!
 //! A `loadbalancer` server `http://app.internal:8080` is a *name*. The balancer never dials the
 //! name: [`Resolver`] turns it into IP addresses off the request path, and the balancer holds
-//! those addresses as ordinary servers (see [`super::loadbalancer`]). The connection dials the
+//! those addresses as ordinary servers (see `loadbalancer.rs`). The connection dials the
 //! address; the name is only the TLS SNI and the `Host` a health probe sends. Because no name is
 //! ever resolved at connect time, a resolver cannot answer differently between the check and the
 //! connection: that is the defence against DNS rebinding, and the policy check at connect time
@@ -19,7 +19,7 @@
 //! - [`ResolveService`]: the background service. After every swap and every change of an answer
 //!   it reconciles the tasks with the names the live table uses, and tells each service to take
 //!   the new addresses ([`super::Service::refresh`]).
-//! - [`NameBudget`]: how many distinct names an app (64) and a tenant (256) may use, checked by
+//! - `NameBudget`: how many distinct names an app (64) and a tenant (256) may use, checked by
 //!   the compiler.
 //!
 //! # The upstream address policy
