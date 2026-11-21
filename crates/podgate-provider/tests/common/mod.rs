@@ -7,6 +7,7 @@
 // Each test file compiles this module on its own and uses a different subset of it.
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
+pub mod broker;
 pub mod daemon;
 pub mod pebble;
 

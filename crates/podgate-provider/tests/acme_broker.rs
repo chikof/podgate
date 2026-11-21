@@ -8,7 +8,6 @@
 
 mod common;
 
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,65 +22,10 @@ use podgate_provider::trust::{HostPattern, Trust};
 use podgate_provider::{Config, UpstreamPolicy};
 use serde_json::{Value, json};
 
-const UP: &str = "http://10.0.0.5:8080";
-const CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
-const KEY_BODY: &str = "KEYMATERIAL-9f3c1b7a";
-
-/// A PKCS#8-shaped PEM carrying `KEY_BODY`: the broker checks the armor, never the content.
-fn key_pem(tag: &str) -> String {
-    let armor = |edge: &str| format!("-----{edge} {} KEY-----", "PRIVATE");
-    format!("{}\n{KEY_BODY}-{tag}\n{}\n", armor("BEGIN"), armor("END"))
-}
-
-/// A fresh state directory path under the temp dir (not created).
-fn state_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pgp-acme-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-const TENANTS: &str = r#"
-[[tenant]]
-id = "acme"
-hosts = ["acme.test", "*.acme.test"]
-
-[[tenant]]
-id = "globex"
-hosts = ["globex.test", "*.globex.test"]
-"#;
-
-/// Provider configuration after the `admin_socket` line: quick debounce, the tenants, and an
-/// `[acme]` section for `dir`. `acme_extra` goes inside the section.
-fn broker_toml(dir: &Path, acme_extra: &str, on_demand: &str) -> String {
-    format!(
-        r#"debounce_ms = 20
-max_delay_ms = 100
-resync_secs = 60
-{TENANTS}
-[acme]
-enabled = true
-state_dir = {dir:?}
-directory_url = "https://ca.test/dir"
-issuer_node = "n1"
-contact = ["mailto:ops@acme.test"]
-{acme_extra}
-[acme.on_demand]
-{on_demand}
-"#
-    )
-}
-
-fn issued(hosts: &[&str], tag: &str) -> Value {
-    json!({ "kind": "certificate_issued", "hosts": hosts, "cert_pem": CERT_PEM, "key_pem": key_pem(tag) })
-}
-
-fn http_challenge(token: &str) -> Value {
-    json!({ "kind": "acme_challenge", "type": "http-01", "token": token, "key_authorization": format!("{token}.thumb") })
-}
-
-fn requested(host: &str) -> Value {
-    json!({ "kind": "certificate_requested", "host": host })
-}
+use common::broker::{
+    KEY_BODY, TENANTS, UP, broker_toml, http_challenge, issued, read_json, requested, start,
+    state_dir, wait_cursor,
+};
 
 fn acme_of(put: &common::Put) -> &Value {
     &put.body["acme"]
@@ -140,23 +84,6 @@ fn mode_of(path: &Path) -> u32 {
         .permissions()
         .mode()
         & 0o777
-}
-
-/// Starts a broker over a fake admin socket with the `local` source serving `hosts` of `acme`.
-fn start(dir: &Path, hosts: &[&str], acme_extra: &str, on_demand: &str) -> Harness {
-    let h = Harness::start(&broker_toml(dir, acme_extra, on_demand), &["local"]);
-    h.source("local").apps(
-        hosts
-            .iter()
-            .enumerate()
-            .map(|(at, host)| app("local", &format!("app{at}"), &[*host], UP).mapped("acme"))
-            .collect(),
-    );
-    h
-}
-
-fn read_json(path: &Path) -> Value {
-    serde_json::from_slice(&std::fs::read(path).expect("read")).expect("JSON")
 }
 
 // ---- the broker over the fake admin socket ---------------------------------------------------
@@ -522,22 +449,6 @@ fn on_demand_harness(dir: &Path, limits: &str) -> Harness {
     h
 }
 
-async fn wait_cursor(dir: &Path, after: u64) {
-    let start = Instant::now();
-    while read_json_opt(&dir.join("cursor.json")).is_none_or(|c| c["after"].as_u64() < Some(after))
-    {
-        assert!(
-            start.elapsed() < common::DEADLINE,
-            "the cursor did not reach {after}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-fn read_json_opt(path: &Path) -> Option<Value> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-}
-
 #[tokio::test]
 async fn on_demand_approved_for_owning_tenant() {
     let dir = state_dir("od-ok");
@@ -727,119 +638,6 @@ fn on_demand_trust_rule_and_rate_window() {
         approver.decide("z.acme.test", &claims, hour + 1),
         Decision::Approved { .. }
     ));
-}
-
-// ---- keys and logs --------------------------------------------------------------------------
-
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-#[tokio::test]
-async fn broker_keys_never_logged() {
-    let capture = Capture::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .finish(),
-    );
-    let dir = state_dir("logs");
-    let mut h = start(&dir, &["a.acme.test"], "", "");
-    // A certificate, then events with a key where it must not be, then a certificate whose key
-    // is not a key: every error names a field and never repeats the value.
-    h.admin.emit(issued(&["a.acme.test"], "real"));
-    h.admin.emit(json!({ "kind": "certificate_issued", "hosts": ["a.acme.test"], "cert_pem": 7, "key_pem": key_pem("wrongtype") }));
-    h.admin.emit(json!({ "kind": "certificate_issued", "hosts": ["a.acme.test"], "cert_pem": CERT_PEM, "key_pem": format!("{KEY_BODY}-notakey") }));
-    let marker = h.admin.emit(requested("nobody.acme.test"));
-    wait_cursor(&dir, marker).await;
-    let status = h.wait_status("a push", |s| s.pushes > 0).await;
-    let account_key = std::fs::read_to_string(dir.join("account.key")).expect("account key");
-    let account_body = account_key.lines().nth(1).expect("key body").to_owned();
-    let shown = format!("{status:?}");
-    let stopped = h.stop().await;
-    assert!(stopped.is_ok());
-
-    // `print` of a configured broker shows the snapshot with every key redacted.
-    let config_path =
-        std::env::temp_dir().join(format!("pgp-acme-print-{}.toml", std::process::id()));
-    std::fs::write(
-        &config_path,
-        format!(
-            "admin_socket = \"/nonexistent/admin.sock\"\n{}",
-            broker_toml(&dir, "", "")
-        ),
-    )
-    .expect("config");
-    let output = tokio::task::spawn_blocking({
-        let config_path = config_path.clone();
-        move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_podgate-provider"))
-                .args(["print", "--config"])
-                .arg(config_path)
-                .env("RUST_LOG", "trace")
-                .output()
-                .expect("run print")
-        }
-    })
-    .await
-    .expect("print ran");
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(output.status.success(), "{stderr}");
-    assert!(stdout.contains("\"issuer_node\":\"n1\""), "{stdout}");
-    assert!(stdout.contains("[redacted]"), "{stdout}");
-
-    let logs = String::from_utf8_lossy(&capture.0.lock().expect("lock")).into_owned();
-    assert!(
-        logs.contains("certificate stored"),
-        "the broker logged what it did: {logs}"
-    );
-    let offline = podgate_provider::acme::offline_view(
-        Config::parse(&format!(
-            "admin_socket = \"/x.sock\"\n{}",
-            broker_toml(&dir, "", "")
-        ))
-        .expect("config")
-        .acme
-        .as_ref()
-        .expect("acme"),
-    )
-    .expect("offline view");
-    for (what, text) in [
-        ("the log", &logs),
-        ("print stdout", &stdout),
-        ("print stderr", &stderr),
-        ("the status", &shown),
-        ("the view", &format!("{offline:?}")),
-    ] {
-        assert!(!text.contains(KEY_BODY), "{what} shows a key: {text}");
-        assert!(
-            !text.contains(&account_body),
-            "{what} shows the account key: {text}"
-        );
-    }
-    let _ = std::fs::remove_file(config_path);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- follower --------------------------------------------------------------------------------
