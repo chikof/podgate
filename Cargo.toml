@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -151,3 +152,8 @@ panic = "abort"
 # takes about a second, enough for tests running under load to hit the admin request timeout.
 [profile.dev.package.pingora-ketama]
 opt-level = 3
+
+# Pingora 0.9.1 ends an upgraded tunnel when the 101 is read before the request's end-of-body task.
+# The copy differs from the registry crate by that one ordering fix. Change 0114; drop it once Pingora ships the fix.
+[patch.crates-io]
+pingora-proxy = { path = "vendor/pingora-proxy" }

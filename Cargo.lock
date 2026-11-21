@@ -2786,8 +2786,6 @@ dependencies = [
 [[package]]
 name = "pingora-proxy"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e3d5670490740405ecc8c6f75c3fcbce4d24f7adaffb355ca44550e7918e358"
 dependencies = [
  "async-trait",
  "bytes",

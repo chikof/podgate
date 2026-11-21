@@ -40,9 +40,6 @@ pub const PONG: u8 = 0xa;
 /// The `Sec-WebSocket-Key` of RFC 6455 section 1.3, used by every upgrade here.
 pub const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
-/// How long the echo upstream takes to answer an upgrade; see `tunnel`.
-const UPGRADE_LATENCY: Duration = Duration::from_millis(50);
-
 /// The masking key of every frame [`Tunnel::send`] sends.
 const MASK: [u8; 4] = [0x37, 0xfa, 0x21, 0x3d];
 
@@ -469,12 +466,6 @@ async fn tunnel(mut stream: TcpStream, head: &str, leftover: Vec<u8>, log: &Log)
          Sec-WebSocket-Accept: {}\r\nX-Upstream: echo\r\n{protocol}\r\n",
         accept_key(&key)
     );
-    // An upstream that answers within microseconds of the request head races Pingora 0.9.1's
-    // upstream duplex loop (`pingora-proxy/src/proxy_h1.rs:268,326-333`, the `read_response_task`
-    // and `rx.recv()` arms of `proxy_1to1`): when the `101` is read before the downstream's end-of-body task, that
-    // task ends the "upgraded" request and the tunnel is closed. A real upstream takes
-    // longer than the proxy's poll; this one waits, so tests measure podgate and not that race.
-    tokio::time::sleep(UPGRADE_LATENCY).await;
     if stream.write_all(reply.as_bytes()).await.is_err() {
         return;
     }

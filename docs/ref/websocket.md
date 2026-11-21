@@ -108,23 +108,20 @@ The chain sees the upgrade request first and the `101` response last, like any r
   node before sending SIGTERM; a longer grace needs a larger `REQUEST_TIMEOUT_SECS`, which also
   lengthens the default idle timeout above.
 
-## Known limitation: an upstream that answers at once
+## Upstreams that answer at once
 
-Pingora 0.9.1 can close a tunnel whose `101` arrives within microseconds of the request head.
-The upstream half of its HTTP/1 proxy loop (`pingora-proxy/src/proxy_h1.rs:268` and `326-333`)
-polls "read the response" and "next task from the downstream" in one `select!`. The downstream
-queues an end-of-body task for the upgrade request (a `GET` has no body) right after the head
-was sent. Normally the loop takes that task first and, on the `101`, reopens the request side
-(`request_done = false`). If it reads the `101` first, the end-of-body task arrives on an
-upgraded request and ends it (`if request_done && was_upgraded { response_done = true }`): the
-tunnel is closed, with the first client frames unread. It showed as about 12% of runs of
-`ws_basic_auth_refuses_upgrade` against an echo that answered in under 100 microseconds, and
-the proxy log reads `upstream closed true` right after `ok upgrade handshake`.
+Pingora 0.9.1 closes a tunnel at random when the upstream's `101` arrives within microseconds of
+the request head. The upstream half of its HTTP/1 proxy loop
+(`pingora-proxy/src/proxy_h1.rs:266-268`) polls "read the response" and "next task from the
+downstream" in one `select!`. The downstream queues an end-of-body task for the upgrade request
+(a `GET` has no body) before that loop starts. If the loop took that task first, the `101` reopened
+the request side. If it read the `101` first, the end-of-body task then arrived on an upgraded
+request and ended it: the tunnel closed with the first client frames unread, and the proxy log read
+`upstream closed true` right after `ok upgrade handshake`. A local echo server lost about 10% of
+tunnels.
 
-A real application takes far longer than the proxy's next poll to accept a WebSocket, so the
-tests' echo upstream waits 50 ms before it writes the `101` (`UPGRADE_LATENCY` in
-`tests/common/ws.rs`) and measures podgate, not that race. podgate has no hook that can order
-those two events: the end-of-body task is queued by Pingora before any `ProxyHttp` callback that
-sees it can delay it, and the response is read by the loop itself. The fix is in Pingora; until
-then a tunnel to an upstream that upgrades instantly (a local test server) may be dropped at
-the start, and the client reconnects.
+podgate carries the fix in a vendored `pingora-proxy` (`vendor/pingora-proxy`, wired with
+`[patch.crates-io]`): only an `UpgradedBody` task or a closed pipe ends an upgraded connection, and
+the plain end-of-body task queued before the `101` no longer does. The WebSocket tests' echo
+upstream answers the upgrade immediately and is stressed 200 times without a lost tunnel. Spec
+0114 holds the upstream issue text; drop the vendored copy once Pingora releases the fix.
