@@ -72,6 +72,7 @@ pub mod pipeline;
 pub mod plan;
 pub mod pool;
 pub mod proxy;
+pub mod ratelimit_store;
 pub mod respond;
 pub mod revert;
 pub mod route;
@@ -121,15 +122,17 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE` or `DASHBOARD_AUTH_FILE` is invalid, a
-/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, a `udp` entry point sets
-/// `proxy_protocol`, a UDP socket cannot be bound, a TLS listener
+/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `RATE_LIMIT_STORES_FILE` or
+/// `DASHBOARD_AUTH_FILE` is invalid, a non-loopback `DASHBOARD_ADDR` has no
+/// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
+/// bound, a TLS listener
 /// cannot be configured, the admin socket or the dashboard address cannot be bound, or an
 /// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
     let static_roots = config.static_roots()?;
+    let rate_limit_stores = config.rate_limit_stores()?;
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -139,6 +142,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_upstream_policy(upstream_policy.clone())
             .with_tls_floor(config.tls_min_version)
             .with_static_roots(static_roots)
+            .with_rate_limit_stores(rate_limit_stores.clone())
             .with_resolver(resolver.clone()),
     )
     .with_metrics(observe::metrics::Registry::new(
@@ -178,6 +182,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let failures = Failures::new();
     let gateway = Gateway::new(table.clone(), inflight.clone(), timeout)
         .with_budgets(budgets.clone())
+        .with_rate_limit_stores(rate_limit_stores.clone())
         .with_cache(cache.clone())
         .with_backends(backends.clone())
         .with_failures(failures.clone())

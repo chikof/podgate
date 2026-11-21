@@ -187,6 +187,7 @@ pub struct Gateway {
     node: Option<HeaderValue>,
     cache: Cache,
     auth_client: middleware::forward_auth::Client,
+    rate_limit_stores: crate::ratelimit_store::Stores,
 }
 
 impl Gateway {
@@ -213,6 +214,7 @@ impl Gateway {
             access_log: None,
             page_fetcher: errors::fetch::Fetcher::default(),
             auth_client: middleware::forward_auth::Client::new(upstream_timeout),
+            rate_limit_stores: crate::ratelimit_store::Stores::default(),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
             node: None,
@@ -276,6 +278,14 @@ impl Gateway {
     #[must_use]
     pub fn with_basic_auth(mut self, pool: middleware::basic_auth::Pool) -> Self {
         self.basic_auth = pool;
+        self
+    }
+
+    /// Counts cluster-scope `rate_limit` requests in `stores`, the shared stores of
+    /// `RATE_LIMIT_STORES_FILE`.
+    #[must_use]
+    pub fn with_rate_limit_stores(mut self, stores: crate::ratelimit_store::Stores) -> Self {
+        self.rate_limit_stores = stores;
         self
     }
 
@@ -397,6 +407,7 @@ impl Gateway {
             events: &self.events,
             hashing: &self.basic_auth,
             auth: &self.auth_client,
+            stores: &self.rate_limit_stores,
             policy: &self.upstream_policy,
             body_held: &mut ctx.body_held,
             reason: &mut ctx.access.reason,

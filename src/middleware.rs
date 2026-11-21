@@ -110,6 +110,8 @@ pub struct RequestCx<'a> {
     pub hashing: &'a basic_auth::Pool,
     /// Dials the auth service of a `forward_auth` stage.
     pub auth: &'a forward_auth::Client,
+    /// The shared stores of cluster-scope `rate_limit` middlewares.
+    pub stores: &'a crate::ratelimit_store::Stores,
     /// The operator's rule for the addresses the proxy may dial.
     pub policy: &'a UpstreamPolicy,
     /// Set by a hook that read the whole request body into the session's replay buffer

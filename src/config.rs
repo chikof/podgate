@@ -12,6 +12,7 @@ use crate::entry::{self, EntryPoint};
 use crate::middleware::basic_auth::Htpasswd;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
+use crate::ratelimit_store::Stores;
 use crate::service::StaticRoots;
 use crate::service::health;
 use crate::service::resolve;
@@ -95,6 +96,7 @@ const _: () =
 /// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
+/// | `RATE_LIMIT_STORES_FILE` | unset | JSON file with the Redis-compatible stores cluster-scope `rate_limit` middlewares may use, `{"<store>": {"url": "redis[s]://host[:port]", "username": "...", "password_file": "...", "tls_ca_file": "...", "tenants": ["<tenant id>"], "max_connections": 16, "timeout_ms": 20}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names a store and only for the tenants its entry lists. `rediss://` needs `tls_ca_file`. Unset: no cluster-scope limit can compile. Reference: `docs/ref/ratelimit-cluster.md`. |
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 /// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
 /// | `UPSTREAM_POOL_SIZE` | `128` | Idle upstream connections kept for reuse, per worker thread (one thread per core): Pingora keeps one LRU for the whole process, so the pool holds this times the thread count and evicts the least recently used past it. 1..=65536. A transport's `max_idle_per_host` is refused for the same reason. |
@@ -167,6 +169,9 @@ pub struct Config {
     /// File with the directories of static services, per tenant. Absent: none. Read once at
     /// startup by [`Config::static_roots`].
     pub static_roots_file: Option<PathBuf>,
+    /// File with the stores of cluster-scope `rate_limit` middlewares. Absent: none. Read once at
+    /// startup by [`Config::rate_limit_stores`].
+    pub rate_limit_stores_file: Option<PathBuf>,
     /// File-system operations static services run at once, across all tenants.
     pub static_max_concurrent_reads: NonZeroUsize,
     /// Percent of a tenant's `max_buffer_bytes` its response cache may hold at most
@@ -207,6 +212,7 @@ impl Default for Config {
             tls_min_version: TlsVersion::V1_2,
             otel: ExportConfig::default(),
             static_roots_file: None,
+            rate_limit_stores_file: None,
             static_max_concurrent_reads: default_static_reads(),
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
             upstream_pool_size: DEFAULT_UPSTREAM_POOL,
@@ -299,6 +305,23 @@ impl Config {
             Some(path) => StaticRoots::load(path).map_err(|err| ConfigError {
                 var: "STATIC_ROOTS_FILE",
                 reason: err.to_string().into(),
+            }),
+        }
+    }
+
+    /// Loads the cluster rate limit stores: the file named by `RATE_LIMIT_STORES_FILE`, or none
+    /// when it is unset. No store is contacted.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `RATE_LIMIT_STORES_FILE` when the file or a file it names (a password
+    /// or CA file) cannot be read, or an entry is invalid; the reason never quotes a credential.
+    pub fn rate_limit_stores(&self) -> Result<Stores, ConfigError> {
+        match &self.rate_limit_stores_file {
+            None => Ok(Stores::default()),
+            Some(path) => Stores::load(path).map_err(|err| ConfigError {
+                var: "RATE_LIMIT_STORES_FILE",
+                reason: format!("{}: {err}", path.display()).into(),
             }),
         }
     }
@@ -576,6 +599,7 @@ impl Config {
         }
         config.otel = ExportConfig::from_lookup(&lookup)?;
         config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
+        config.rate_limit_stores_file = non_empty("RATE_LIMIT_STORES_FILE")?.map(PathBuf::from);
         config.dns = resolve::Settings::from_lookup(&lookup)?;
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
@@ -635,6 +659,7 @@ mod test {
             ("DNS_MAX_STALE_SECS", "0"),
             ("DNS_MAX_QUERIES_PER_SEC", "7"),
             ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
+            ("RATE_LIMIT_STORES_FILE", "/etc/podgate/limit-stores.json"),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
@@ -678,6 +703,7 @@ mod test {
                     max_queries_per_sec: NonZeroU32::new(7).expect("7 is not zero"),
                 },
                 static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
+                rate_limit_stores_file: Some(PathBuf::from("/etc/podgate/limit-stores.json")),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
@@ -734,6 +760,7 @@ mod test {
             ("UPSTREAM_POOL_SIZE", "65537"),
             ("UPSTREAM_POOL_SIZE", "many"),
             ("STATIC_ROOTS_FILE", " "),
+            ("RATE_LIMIT_STORES_FILE", " "),
             ("CACHE_TENANT_MAX_PERCENT", "0"),
             ("CACHE_TENANT_MAX_PERCENT", "101"),
             ("CACHE_TENANT_MAX_PERCENT", "half"),

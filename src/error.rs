@@ -151,6 +151,10 @@ pub enum AppError {
     /// retry in a second. Declarations that can never fit are refused when the snapshot applies.
     #[error("rate limiter memory is over the tenant's budget")]
     LimiterBusy,
+    /// A cluster-scope `rate_limit` with `on_store_error: "deny"` cannot reach its store: `503`,
+    /// retry in a second.
+    #[error("rate limiter unavailable")]
+    RateLimiterUnavailable,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -184,6 +188,7 @@ impl AppError {
             | Self::AuthSaturated
             | Self::JwtUnavailable
             | Self::LimiterBusy
+            | Self::RateLimiterUnavailable
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -202,6 +207,7 @@ impl AppError {
             Self::Overloaded
             | Self::TooManyInFlight
             | Self::LimiterBusy
+            | Self::RateLimiterUnavailable
             | Self::Saturated
             | Self::StaticBusy
             | Self::StaticOverBudget
@@ -231,6 +237,7 @@ impl AppError {
                 | Self::RateLimited { .. }
                 | Self::TooManyInFlight
                 | Self::LimiterBusy
+                | Self::RateLimiterUnavailable
                 | Self::Saturated
                 | Self::StaticBusy
                 | Self::StaticOverBudget
@@ -274,6 +281,7 @@ impl AppError {
             Self::RateLimited { .. } => "rate_limited",
             Self::TooManyInFlight => "in_flight_limit",
             Self::LimiterBusy => "limiter_busy",
+            Self::RateLimiterUnavailable => "rate_limit_store_unavailable",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::WriterOwned { .. } => "writer_owned",
@@ -433,5 +441,15 @@ mod test {
         for err in [limited, AppError::TooManyInFlight, AppError::LimiterBusy] {
             assert!(err.is_capacity_refusal(), "{err:?}");
         }
+    }
+
+    #[test]
+    fn rate_limiter_unavailable_is_a_503_capacity_refusal_with_retry_after() {
+        let err = AppError::RateLimiterUnavailable;
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.retry_after_secs(), Some(1));
+        assert_eq!(err.body(), json!({"error": "rate limiter unavailable"}));
+        assert_eq!(err.log_reason(), "rate_limit_store_unavailable");
+        assert!(err.is_capacity_refusal());
     }
 }

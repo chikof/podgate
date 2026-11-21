@@ -307,6 +307,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         &stage_lists,
         context.upstream_policy(),
     ));
+    rejected.extend(middleware::rate_limit::check_snapshot(
+        snapshot,
+        &stage_lists,
+        context.rate_limit_stores(),
+    ));
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }

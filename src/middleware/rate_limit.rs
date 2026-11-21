@@ -17,7 +17,8 @@
 //!   configured.
 //! - Per-source state is bounded; see `src/middleware/limits.rs`. Sources that find the table full share
 //!   one overflow bucket with the same rate and burst.
-//! - Limits are per node.
+//! - Limits are per node unless `scope` is `"cluster"`: then a shared store counts one limit for
+//!   every node (`cluster.rs`, `docs/ref/ratelimit-cluster.md`).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -31,6 +32,11 @@ use crate::compile::Invalid;
 use crate::error::AppError;
 use crate::table::CompiledApp;
 use podgate_model::Declared;
+
+mod cluster;
+
+pub(crate) use cluster::check_snapshot;
+use cluster::{Cluster, FallbackConfig, OnStoreError, Scope};
 
 /// Largest `average`: at a period of one second a token takes 100 ns, so rounding the time per
 /// token up to a nanosecond moves the rate by at most one percent.
@@ -49,6 +55,11 @@ pub mod kind {
     pub const LOOSENED: &str = "rate_limit_loosened";
     /// Requests are counted per another source, which can let a client leave its bucket.
     pub const SOURCE_CHANGED: &str = "rate_limit_source_changed";
+    /// A cluster-scope limit that admits requests when its store fails: while the store is down
+    /// only the local fallback limits them.
+    pub const CLUSTER_FAIL_OPEN: &str = "rate_limit_cluster_fail_open";
+    /// A cluster-wide limit became a per-node one: a client can use every node's share.
+    pub const SCOPE_NODE: &str = "rate_limit_scope_node";
 }
 
 /// The configuration of a `rate_limit` middleware.
@@ -62,6 +73,16 @@ pub(super) struct Config {
     source: SourceConfig,
     #[serde(default)]
     max_sources: Option<u32>,
+    #[serde(default)]
+    scope: Option<Scope>,
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    on_store_error: Option<OnStoreError>,
+    #[serde(default)]
+    local_fallback: Option<FallbackConfig>,
+    #[serde(default)]
+    store_timeout_ms: Option<u16>,
 }
 
 /// The bucket arithmetic, in nanoseconds on a caller-supplied clock.
@@ -108,10 +129,32 @@ pub struct RateLimit {
     source: Source,
     fingerprint: u64,
     runtime: Arc<Limiter>,
+    cluster: Option<Cluster>,
 }
 
 fn invalid(message: impl std::fmt::Display) -> Invalid {
     Invalid::new("invalid_middleware", format!("rate_limit: {message}"))
+}
+
+/// Whether the source `key` may pass a bucket of `rate` in `table` at `now` (nanoseconds on its
+/// limiter's clock), or the nanoseconds until it may.
+fn check_in(rate: Rate, table: &SourceTable, key: u64, now: u64) -> Result<(), u64> {
+    let outcome = table.with(
+        key,
+        |tat| tat <= now,
+        |tat| rate.take(*tat, now).map(|next| *tat = next),
+    );
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
+    table.count_overflow();
+    table
+        .overflow()
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |tat| {
+            rate.take(tat, now).ok()
+        })
+        .map(drop)
+        .map_err(|tat| rate.take(tat, now).err().unwrap_or(rate.interval_ns))
 }
 
 impl RateLimit {
@@ -119,30 +162,24 @@ impl RateLimit {
         self.max_sources
     }
 
+    /// Tables of sources the middleware holds: one, and a second for the local fallback of a
+    /// cluster-scope limit that fails open.
+    pub(super) fn tables(&self) -> u64 {
+        1 + u64::from(self.cluster.as_ref().is_some_and(Cluster::fails_open))
+    }
+
     pub(super) fn stats(&self) -> super::limits::Stats {
-        self.runtime.stats()
+        let stats = self.runtime.stats();
+        match self.cluster.as_ref().and_then(Cluster::fallback_stats) {
+            Some(fallback) => stats.plus(fallback),
+            None => stats,
+        }
     }
 
     /// Whether the source `key` may pass at `now` (nanoseconds on the limiter's clock), or
     /// the nanoseconds until it may.
     fn check(&self, table: &SourceTable, key: u64, now: u64) -> Result<(), u64> {
-        let rate = self.rate;
-        let outcome = table.with(
-            key,
-            |tat| tat <= now,
-            |tat| rate.take(*tat, now).map(|next| *tat = next),
-        );
-        if let Some(outcome) = outcome {
-            return outcome;
-        }
-        table.count_overflow();
-        table
-            .overflow()
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |tat| {
-                rate.take(tat, now).ok()
-            })
-            .map(drop)
-            .map_err(|tat| rate.take(tat, now).err().unwrap_or(rate.interval_ns))
+        check_in(self.rate, table, key, now)
     }
 
     /// Whether `new` lets more requests through than `self`.
@@ -151,13 +188,19 @@ impl RateLimit {
         // average/period compared as a cross product: new.average / new.period > old.average / old.period.
         per_second(new.average, self.period_secs) > per_second(self.average, new.period_secs)
             || new.burst > self.burst
+            || match (&self.cluster, &new.cluster) {
+                (Some(old), Some(new_cluster)) => {
+                    old.fallback_loosened_by(self.period_secs, new_cluster, new.period_secs)
+                }
+                _ => false,
+            }
     }
 }
 
 impl Kind for RateLimit {
     type State = ();
 
-    fn compile(declared: &Declared, _cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
+    fn compile(declared: &Declared, cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
         let config: Config =
             serde_json::from_value(Value::Object(declared.config.clone())).map_err(invalid)?;
         if config.average == 0 {
@@ -184,6 +227,15 @@ impl Kind for RateLimit {
             return Err(invalid(format!("`max_sources` must be 1 to {MAX_SOURCES}")));
         }
         let source = Source::compile(&config.source).map_err(invalid)?;
+        let fingerprint = state::fingerprint(declared);
+        let cluster = Cluster::compile(
+            &config,
+            &declared.name,
+            fingerprint,
+            cx.app,
+            period_secs,
+            max_sources,
+        )?;
         Ok(Self {
             average: config.average,
             period_secs,
@@ -192,20 +244,29 @@ impl Kind for RateLimit {
             rate,
             source_config: config.source,
             source,
-            fingerprint: state::fingerprint(declared),
+            fingerprint,
             runtime: Arc::new(Limiter::new(max_sources)),
+            cluster,
         })
     }
 
     async fn request(&self, cx: &mut RequestCx<'_>, _state: &mut ()) -> pingora::Result<Flow> {
-        let refusal = match self.runtime.table(cx.tenant) {
+        let ready = self.runtime.table(cx.tenant).filter(|_| {
+            self.cluster
+                .as_ref()
+                .is_none_or(|cluster| cluster.allocate(cx.tenant))
+        });
+        let refusal = match ready {
             None => Some(AppError::LimiterBusy),
             Some(table) => {
                 let key =
                     self.source
                         .key(self.runtime.hasher(), cx.session.req_header(), cx.forwarded);
                 match self.check(table, key, self.runtime.now_ns()) {
-                    Ok(()) => None,
+                    Ok(()) => match &self.cluster {
+                        Some(cluster) => cluster.admit(self, cx).await.err(),
+                        None => None,
+                    },
                     Err(wait_ns) => Some(AppError::RateLimited {
                         retry_after_secs: u32::try_from(wait_ns.div_ceil(NANOS).max(1))
                             .unwrap_or(u32::MAX),
@@ -223,7 +284,8 @@ impl Kind for RateLimit {
     }
 
     /// Dropping the middleware stops limiting; a higher rate or a bigger burst lets more
-    /// through; another source puts requests in other buckets.
+    /// through; another source puts requests in other buckets; a cluster limit that starts
+    /// failing open, or becomes a per-node one, lets a client past the cluster-wide count.
     fn posture(&self, new: Option<&Self>) -> Vec<&'static str> {
         let Some(new) = new else {
             return vec![kind::REMOVED];
@@ -235,18 +297,32 @@ impl Kind for RateLimit {
         if self.source_config != new.source_config {
             kinds.push(kind::SOURCE_CHANGED);
         }
+        if self.cluster.is_some() && new.cluster.is_none() {
+            kinds.push(kind::SCOPE_NODE);
+        }
+        let fails_open = |limit: &Self| limit.cluster.as_ref().is_some_and(Cluster::fails_open);
+        if fails_open(new) && !fails_open(self) {
+            kinds.push(kind::CLUSTER_FAIL_OPEN);
+        }
         kinds
     }
 
     fn describe(&self) -> Value {
-        json!({
+        let mut shown = json!({
+            "scope": "node",
             "average": self.average,
             "period_secs": self.period_secs,
             "burst": self.burst,
             "source": self.source_config.describe(),
             "max_sources": self.max_sources,
-            "table_bytes": SourceTable::bytes(self.max_sources),
-        })
+            "table_bytes": SourceTable::bytes(self.max_sources).saturating_mul(self.tables()),
+        });
+        if let (Some(cluster), Some(object)) = (&self.cluster, shown.as_object_mut())
+            && let Some(extra) = cluster.describe().as_object()
+        {
+            object.extend(extra.clone());
+        }
+        shown
     }
 }
 
@@ -255,13 +331,25 @@ impl Kind for RateLimit {
 /// leaves a middleware's declaration as it was keeps its buckets; a middleware whose
 /// declaration changed starts with empty ones.
 #[derive(Debug, Default)]
-pub(crate) struct Registry(state::Registry<Limiter>);
+pub(crate) struct Registry(state::Registry<Limiter>, state::Registry<Limiter>);
 
 impl Registry {
-    /// See [`state::Registry::settle`].
+    /// See [`state::Registry::settle`]. The second registry keeps the local fallback limiter of
+    /// cluster-scope limits that fail open.
     pub(crate) fn settle(&self, apps: &mut [CompiledApp]) {
         self.0.settle(apps, |stage| match stage {
             Stage::RateLimit(limit) => Some((limit.fingerprint, &mut limit.runtime)),
+            _ => None,
+        });
+        self.1.settle(apps, |stage| match stage {
+            Stage::RateLimit(limit) => {
+                let fingerprint = limit.fingerprint;
+                limit
+                    .cluster
+                    .as_mut()?
+                    .fallback_runtime()
+                    .map(|runtime| (fingerprint, runtime))
+            }
             _ => None,
         });
     }

@@ -189,6 +189,48 @@ impl Source {
         }
     }
 
+    /// Calls `f` with the bytes that identify the source of `request`: the same on every node
+    /// and every run (a tag for the family of address, then the subnet; the header or host
+    /// value, or `-` when it is absent), so a hash of them can name the source across nodes.
+    pub(super) fn with_material<R>(
+        &self,
+        request: &RequestHeader,
+        view: &ForwardedView,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> R {
+        match self {
+            Self::Ip {
+                strategy,
+                subnet_bits,
+            } => {
+                let addr = subnet_of(normalize(ClientIp::resolve(view, strategy)), *subnet_bits);
+                let mut bytes = [0_u8; 17];
+                let len = match addr {
+                    IpAddr::V4(v4) => {
+                        bytes[0] = 4;
+                        bytes[1..5].copy_from_slice(&v4.octets());
+                        5
+                    }
+                    IpAddr::V6(v6) => {
+                        bytes[0] = 6;
+                        bytes[1..].copy_from_slice(&v6.octets());
+                        17
+                    }
+                };
+                f(&bytes[..len])
+            }
+            Self::Header(name) => f(request
+                .headers
+                .get(name)
+                .map_or(ABSENT, HeaderValue::as_bytes)),
+            Self::Host => {
+                let own = request_host(request);
+                let host = view.host.as_deref().or(own.as_deref());
+                f(host.map_or(ABSENT, str::as_bytes))
+            }
+        }
+    }
+
     /// The key of the source `request` comes from. Never zero: zero marks an empty entry.
     pub(super) fn key(
         &self,
@@ -196,27 +238,8 @@ impl Source {
         request: &RequestHeader,
         view: &ForwardedView,
     ) -> u64 {
-        let hash = match self {
-            Self::Ip {
-                strategy,
-                subnet_bits,
-            } => hasher.hash_one(subnet_of(
-                normalize(ClientIp::resolve(view, strategy)),
-                *subnet_bits,
-            )),
-            Self::Header(name) => hasher.hash_one(
-                request
-                    .headers
-                    .get(name)
-                    .map_or(ABSENT, HeaderValue::as_bytes),
-            ),
-            Self::Host => {
-                let own = request_host(request);
-                let host = view.host.as_deref().or(own.as_deref());
-                hasher.hash_one(host.map_or(ABSENT, str::as_bytes))
-            }
-        };
-        hash.max(1)
+        self.with_material(request, view, |material| hasher.hash_one(material))
+            .max(1)
     }
 }
 
@@ -411,6 +434,17 @@ pub(super) struct Stats {
     bytes: u64,
 }
 
+impl Stats {
+    /// The sum of two limiters' reports: a cluster-scope limit has a second, local one.
+    pub(super) fn plus(self, other: Self) -> Self {
+        Self {
+            overflow: self.overflow + other.overflow,
+            rejected: self.rejected + other.rejected,
+            bytes: self.bytes + other.bytes,
+        }
+    }
+}
+
 /// Rejects the apps whose limiter tables, added up per tenant, do not fit the tenant's declared
 /// `max_buffer_bytes`. `stages` holds the compiled middlewares of each app of `snapshot`, in
 /// order. A table is charged on first use, but fitting is checked for every declared one, so a
@@ -428,12 +462,17 @@ pub(crate) fn over_budget(snapshot: &Snapshot, stages: &[&[Named]]) -> Vec<Rejec
             continue;
         };
         for named in *stages {
-            let (kind, max_sources) = match &named.stage {
-                Stage::RateLimit(limit) => ("rate_limit", limit.max_sources()),
-                Stage::InFlightReq(limit) => ("in_flight_req", limit.max_sources()),
+            let (kind, max_sources, tables) = match &named.stage {
+                Stage::RateLimit(limit) => ("rate_limit", limit.max_sources(), limit.tables()),
+                Stage::InFlightReq(limit) => ("in_flight_req", limit.max_sources(), 1),
                 _ => continue,
             };
-            let bytes = SourceTable::bytes(max_sources);
+            let bytes = SourceTable::bytes(max_sources).saturating_mul(tables);
+            let note = if tables > 1 {
+                ", counting the second table of its local fallback"
+            } else {
+                ""
+            };
             let total = used.entry(&app.tenant).or_insert(0);
             *total = total.saturating_add(bytes);
             if *total > budget {
@@ -443,7 +482,7 @@ pub(crate) fn over_budget(snapshot: &Snapshot, stages: &[&[Named]]) -> Vec<Rejec
                     Invalid::new(
                         "invalid_middleware",
                         format!(
-                            "{kind}: its table of {max_sources} sources takes {bytes} bytes, and with the other limiters of tenant {} that is {total} bytes, over the tenant's max_buffer_bytes of {budget}; lower max_sources or raise the budget",
+                            "{kind}: its table of {max_sources} sources takes {bytes} bytes{note}, and with the other limiters of tenant {} that is {total} bytes, over the tenant's max_buffer_bytes of {budget}; lower max_sources or raise the budget",
                             app.tenant
                         ),
                     )

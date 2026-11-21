@@ -239,6 +239,7 @@ pub struct CompileContext {
     addrs: Vec<(Box<str>, SocketAddr)>,
     proxy_header: Option<Vec<Box<str>>>,
     resolver: Resolver,
+    rate_limit_stores: crate::ratelimit_store::Stores,
 }
 
 impl Default for CompileContext {
@@ -266,6 +267,7 @@ impl CompileContext {
             addrs: Vec::new(),
             proxy_header: None,
             resolver: Resolver::default(),
+            rate_limit_stores: crate::ratelimit_store::Stores::default(),
         }
     }
 
@@ -383,6 +385,20 @@ impl CompileContext {
     #[must_use]
     pub fn static_roots(&self) -> &StaticRoots {
         &self.static_roots
+    }
+
+    /// The stores a cluster-scope `rate_limit` may name (`RATE_LIMIT_STORES_FILE`). Only the
+    /// operator calls this; a snapshot names a store by label and never supplies an address.
+    #[must_use]
+    pub fn with_rate_limit_stores(mut self, stores: crate::ratelimit_store::Stores) -> Self {
+        self.rate_limit_stores = stores;
+        self
+    }
+
+    /// The stores the compiler checks cluster-scope `rate_limit` middlewares against.
+    #[must_use]
+    pub fn rate_limit_stores(&self) -> &crate::ratelimit_store::Stores {
+        &self.rate_limit_stores
     }
 
     /// Resolves servers named by host name from `resolver`'s answers. `run` installs the
