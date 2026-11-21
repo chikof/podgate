@@ -56,11 +56,9 @@ use http::uri::PathAndQuery;
 use http::{Request, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
-use hyper_rustls::ConfigBuilderExt as _;
 use hyper_util::rt::TokioIo;
 use podgate_model::App;
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls_pki_types::ServerName;
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -78,6 +76,7 @@ use crate::push::Backoff;
 use crate::source::{
     Origin, Source, SourceApp, SourceCertificate, State, TenantClaim, Update, UpdateBody,
 };
+use crate::tls_client::{TlsPem, tls_config};
 use crate::traefik_file::{self, Syntax};
 
 /// The shortest `poll_secs`.
@@ -324,54 +323,9 @@ fn read(key: &str, path: &std::path::Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|err| format!("{key}: cannot read {}: {err}", path.display()))
 }
 
-#[derive(Default)]
-struct TlsPem {
-    ca: Option<Vec<u8>>,
-    cert: Option<Vec<u8>>,
-    key: Option<Vec<u8>>,
-}
-
-fn tls_config(pem: TlsPem) -> Result<rustls::ClientConfig, String> {
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|err| format!("TLS: {err}"))?;
-    let builder = match pem.ca {
-        Some(ca) => {
-            let mut roots = rustls::RootCertStore::empty();
-            for cert in CertificateDer::pem_slice_iter(&ca) {
-                let cert = cert.map_err(|err| format!("tls.ca_file: {err}"))?;
-                roots
-                    .add(cert)
-                    .map_err(|err| format!("tls.ca_file: {err}"))?;
-            }
-            if roots.is_empty() {
-                return Err("tls.ca_file: holds no certificate".to_owned());
-            }
-            builder.with_root_certificates(roots)
-        }
-        None => builder
-            .with_native_roots()
-            .map_err(|err| format!("cannot load the platform's root certificates ({err})"))?,
-    };
-    let mut config = match (pem.cert, pem.key) {
-        (Some(cert), Some(key)) => {
-            let chain = CertificateDer::pem_slice_iter(&cert)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| format!("tls.cert_file: {err}"))?;
-            if chain.is_empty() {
-                return Err("tls.cert_file: holds no certificate".to_owned());
-            }
-            // The error of a bad key names the file, never its content.
-            let key = PrivateKeyDer::from_pem_slice(&key)
-                .map_err(|_| "tls.key_file: holds no private key".to_owned())?;
-            builder
-                .with_client_auth_cert(chain, key)
-                .map_err(|err| format!("tls.cert_file and tls.key_file: {err}"))?
-        }
-        _ => builder.with_no_client_auth(),
-    };
+/// The TLS configuration of the client: the shared one, offering HTTP/1.1 only.
+fn http1_tls(pem: TlsPem) -> Result<rustls::ClientConfig, String> {
+    let mut config = tls_config(pem)?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }
@@ -469,7 +423,7 @@ impl HttpSource {
         let connector = match raw.tls {
             None => target
                 .https
-                .then(|| tls_config(TlsPem::default()))
+                .then(|| http1_tls(TlsPem::default()))
                 .transpose()
                 .map_err(invalid)?,
             Some(tls) => {
@@ -491,7 +445,7 @@ impl HttpSource {
                         *slot = Some(read(key, &path).map_err(invalid)?);
                     }
                 }
-                Some(tls_config(pem).map_err(invalid)?)
+                Some(http1_tls(pem).map_err(invalid)?)
             }
         }
         .map(|config| TlsConnector::from(Arc::new(config)));
@@ -716,7 +670,8 @@ impl HttpSource {
         let mut target = self.target.clone();
         let mut hops = 0;
         loop {
-            let Exchange { response, _driver } = self.exchange(&target, validators).await?;
+            let Exchange { response, _driver } =
+                Box::pin(self.exchange(&target, validators)).await?;
             let status = response.status();
             if status == StatusCode::NOT_MODIFIED {
                 return if validators.is_some_and(|validators| !validators.is_empty()) {

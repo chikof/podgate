@@ -314,7 +314,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     shared: Arc<Shared>,
     client_cert: bool,
 ) {
-    let Some(head) = read_head(&mut stream).await else {
+    let Some(head) = Box::pin(read_head(&mut stream)).await else {
         return;
     };
     let mut lines = head.split("\r\n");
