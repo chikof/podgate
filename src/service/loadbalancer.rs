@@ -435,7 +435,7 @@ impl LoadBalancer {
                 )
             })
             .collect();
-        let probed = Balancer::compile(config.algorithm.as_ref(), &probe)?;
+        let probed = Arc::new(Balancer::compile(config.algorithm.as_ref(), &probe)?);
         let named = entries
             .iter()
             .any(|entry| matches!(entry.target, Target::Name { .. } | Target::Srv { .. }));
@@ -444,7 +444,7 @@ impl LoadBalancer {
             weight_use: probed.weight_use(),
             live: ArcSwap::from_pointee(Live {
                 servers: Box::default(),
-                balancer: Arc::new(probed),
+                balancer: Arc::clone(&probed),
             }),
             entries,
             algorithm: config.algorithm,
@@ -459,6 +459,15 @@ impl LoadBalancer {
             passive,
             sticky,
         };
+        if !named {
+            // Every address is literal, so the probe list is the server list and its ring is the
+            // real one: building it again costs as much as the first time (ketama dominates).
+            balancer.live = ArcSwap::from_pointee(Live {
+                servers: probe.into(),
+                balancer: probed,
+            });
+            return Ok(balancer);
+        }
         // Whatever the names have resolved to so far. When the algorithm cannot take those
         // addresses (a ring heavier than the cap), the names stay unresolved: the answer of a
         // resolver must not decide whether a snapshot compiles.

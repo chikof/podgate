@@ -145,3 +145,9 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Ketama's ring build is nearly all of a hash service's compile time and runs 25 times slower
+# unoptimized: with the dev profile's defaults a push of 4 million ring points (the snapshot cap)
+# takes about a second, enough for tests running under load to hit the admin request timeout.
+[profile.dev.package.pingora-ketama]
+opt-level = 3

@@ -50,6 +50,18 @@ The consequence is a deliberate choice: the same key maps to the same server on 
 
 A ring point is 8 bytes. A ring is built per compiled service and per revision that declares it, so the compile pass charges every hash service as it builds it: at most 256 weight units per service (40 960 points, 320 KiB, and about twice that while it is built), 1 048 576 points (8 MiB) per tenant over all its apps and revisions, and 4 194 304 points (32 MiB) per snapshot. The first service over a cap is `invalid_service` naming the tenant, the points asked and the cap, and the rest of the snapshot is not built, so a push cannot make the proxy build rings without end. The caps are compile-time only; they are not charged to `max_buffer_bytes`, which counts per-request buffers and not the routing table.
 
+## What a push costs
+
+Compiling a hash service is almost entirely ketama building its ring (`Continuum::new`: hashing and sorting the points); the rest of the compile (parse, routers, services, tables) is about a tenth of a release push. Measured on the largest snapshot the caps allow (4 tenants, 25 hash services each of 256 weight units, 4 096 000 points, a 17 KB body; median of 5 `PUT /v1/snapshot` pushes, with the machine's other cargo jobs held off by the build lock and a load average of 0.6 to 7.6 from other work):
+
+| Build | `PUT /v1/snapshot` | `RoutingTable::compile` | 100 ketama rings alone |
+|---|---|---|---|
+| release | 48 ms (max 63) | 46 ms | 41 ms |
+| debug, `opt-level = 3` for `pingora-ketama` | 147 ms (max 179) | 134 ms | 131 ms |
+| debug, defaults | 1 031 ms (max 1 032) | 1 016 ms | 1 003 ms |
+
+Before a hash service of literal addresses was built once (it was built twice, the first time only to learn its weights), these were 85 ms (max 92) in release and 2 129 ms (max 2 188) in debug. A release push at the cap is 1% of the 5 s test timeout and 0.2% of the default `REQUEST_TIMEOUT_SECS` of 30, so the caps stand. Pushes compile on the blocking pool and wait there, so a slow compile never stalls the admin runtime, only its own request. A service whose servers are named by DNS still builds two rings (a stand-in for the cap check and the resolved one).
+
 ## What a pick costs and when it fails
 
 A pick reads atomics only. A ring pick walks to the first allowed point; the first refused point asks once whether any server could take the request, so a service whose servers are all down answers `503` without walking the ring. A retry (`PickCx.excluded`) skips the servers it already tried.
