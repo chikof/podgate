@@ -7,7 +7,7 @@ A `loadbalancer` server `url` may carry a host name instead of an IP address. po
   "servers": [ { "url": "http://10.0.0.5:8080" }, { "url": "http://app.internal:8080" } ] }
 ```
 
-`http://app.internal:8080` expands into one server per address the name resolves to (`10.0.0.6:8080`, `10.0.0.7:8080`), each with the weight of the entry, and the algorithm is rebuilt over the expanded list whenever the answer changes. Requests in flight keep the servers they chose from.
+`http://app.internal:8080` (also `https://` and `h2c://`) expands into one server per address the name resolves to (`10.0.0.6:8080`, `10.0.0.7:8080`), each with the weight of the entry, and the algorithm is rebuilt over the expanded list whenever the answer changes. Requests in flight keep the servers they chose from.
 
 ## Settings
 
@@ -30,6 +30,10 @@ Operator settings (`docs/architecture.md ## Configuration`), never part of a sna
 - **Limits.** At most 64 distinct names per app and 256 per tenant (more is `invalid_service`, naming the count), at most 32 addresses per name (the rest are ignored), at most 32 lookups in flight, and `DNS_MAX_QUERIES_PER_SEC` lookups a second for the node. A name that is not a syntactically valid host name (labels of letters, digits, `-` and `_`, at most 63 bytes each, 253 in all) is `invalid_service`.
 - **A name that has not resolved** (never, or not since the stale time ran out) is a server without an address. The compile does not fail. Requests get `503`, and the app is not asleep: a `scale_to_zero` app is not woken by it, only an app with no server at all is.
 - **Compile never resolves.** Whether a snapshot is accepted does not depend on what a resolver answers. Where an algorithm cannot take the addresses a name returns (a hash ring heavier than its cap), the answer is not used and the previous servers stay.
+
+## Schemes
+
+`http://`, `https://` and `h2c://` servers may be named. Each address of the name is a server of the same scheme: proxied requests build their peer for the checked address as for any server (ALPN `h2` for `h2c://`, the transport's timeouts and pool key), the name only becomes the SNI of a TLS server. A `health_check` on a service with an `h2c://` server is refused as for an IP literal.
 
 ## Rebinding and the address policy
 

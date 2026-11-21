@@ -800,3 +800,70 @@ async fn dns_named_hash_service_charged_for_largest_ring() {
         .collect();
     push(&podgate, &snapshot(3, &literal)).await;
 }
+/// A cleartext HTTP/2 backend on `127.0.0.1` that answers every stream `h2c-ok` with `x-proto: h2`.
+async fn h2c_backend() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind backend");
+    let port = listener.local_addr().expect("backend address").port();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(mut connection) = h2::server::handshake(tcp).await else {
+                    return;
+                };
+                while let Some(Ok((_, mut respond))) = connection.accept().await {
+                    let response = http::Response::builder()
+                        .status(200)
+                        .header("content-length", "6")
+                        .header("x-proto", "h2")
+                        .body(())
+                        .expect("response");
+                    if let Ok(mut send) = respond.send_response(response, false) {
+                        drop(send.send_data(bytes::Bytes::from_static(b"h2c-ok"), true));
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn dns_named_h2c_server_is_reached_over_h2c() {
+    let port = h2c_backend().await;
+    let dns = Dns::start().await;
+    dns.set("grpc.internal", &["127.0.0.1"], 30);
+    let podgate = start(&resolver_env(&dns), &[]).await;
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[named_app(
+                "a",
+                "a.test",
+                &[format!("h2c://grpc.internal:{port}")],
+            )],
+        ),
+    )
+    .await;
+
+    eventually(
+        "the proxied request reaches the h2c backend",
+        10,
+        async || {
+            let response = podgate.get("a.test", "/").await;
+            response.status == 200
+                && response.body == "h2c-ok"
+                && response.header("x-proto") == Some("h2")
+        },
+    )
+    .await;
+
+    // A health probe speaks HTTP/1.1, which an h2c server cannot answer: refused at compile.
+    let mut probed = named_app("a", "a.test", &[format!("h2c://grpc.internal:{port}")]);
+    probed["revisions"][0]["services"][0]["health_check"] =
+        json!({ "path": "/healthz", "interval_secs": 1, "timeout_secs": 1 });
+    let rejected = podgate.push_snapshot(&snapshot(2, &[probed])).await;
+    assert!(rejection(&rejected).contains("service_not_built"));
+}
