@@ -3,7 +3,6 @@
 //! Which instances count, which address is their server, which tenant they belong to: the
 //! decisions that are Consul's. The tags themselves are read by [`crate::docker::labels`].
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::docker::labels::{self, Labels, Member};
@@ -45,18 +44,11 @@ struct Candidate<'a> {
 
 /// Builds the apps of `services`.
 ///
-/// `first_seen` remembers when each app was first seen, so an older app keeps its place in a
-/// conflict across passes; it keeps only the apps of this pass. Consul has no creation time, so
-/// an app's age is the time this source first saw it, `now` (unix seconds).
-pub(super) fn build(
-    source: &str,
-    settings: &Settings,
-    services: &[Service<'_>],
-    first_seen: &mut BTreeMap<Box<str>, u64>,
-    now: u64,
-) -> Built {
+/// Consul has no creation time (`CreateIndex` is a raft index, not a time), so every app has
+/// `first_seen` `0`. A host conflict between two Consul apps then falls back to source and
+/// object name, which do not change when the provider restarts.
+pub(super) fn build(source: &str, settings: &Settings, services: &[Service<'_>]) -> Built {
     let mut built = Built::default();
-    let mut seen = BTreeMap::new();
     for service in services {
         let wanted: Vec<&Instance> = service
             .instances
@@ -116,19 +108,16 @@ pub(super) fn build(
                 &why.to_string(),
             ));
         }
-        let first = *first_seen.get(&app).unwrap_or(&now);
-        seen.insert(app.clone(), first);
         built.apps.push(SourceApp {
             origin: Origin {
                 source: source.into(),
                 object: app,
-                first_seen: first,
+                first_seen: 0,
             },
             tenant: assembled.claim,
             app: assembled.app,
         });
     }
-    *first_seen = seen;
     built
 }
 

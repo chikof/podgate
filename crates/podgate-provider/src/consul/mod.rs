@@ -580,12 +580,6 @@ fn errors_text(errors: &BTreeMap<Box<str>, Vec<String>>) -> Vec<String> {
         .collect()
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 impl ConsulSource {
     fn watch_catalog(&self, scope: &Scope, shared: &Arc<Shared>) -> Abort {
         let client = Arc::new(self.client.clone());
@@ -631,7 +625,6 @@ impl ConsulSource {
         &self,
         shared: &Arc<Shared>,
         watchers: &mut BTreeMap<Key, Abort>,
-        first_seen: &mut BTreeMap<Box<str>, u64>,
         ready: &mut bool,
     ) -> Option<Sent> {
         let mut views = shared.lock();
@@ -723,13 +716,7 @@ impl ConsulSource {
         }
         *ready = true;
 
-        let mut built = apps::build(
-            &self.name,
-            &self.settings,
-            &services,
-            first_seen,
-            unix_now(),
-        );
+        let mut built = apps::build(&self.name, &self.settings, &services);
         built.reports.extend(notes.into_iter().map(Into::into));
         built
             .reports
@@ -768,14 +755,12 @@ impl Source for ConsulSource {
             .map(|scope| self.watch_catalog(scope, &shared))
             .collect();
         let mut watchers: BTreeMap<Key, Abort> = BTreeMap::new();
-        let mut first_seen = BTreeMap::new();
         let mut ready = false;
         let mut sent: Option<Sent> = None;
         loop {
             shared.wake.notified().await;
             tokio::time::sleep(EVENT_QUIET).await;
-            let Some(observed) = self.observe(&shared, &mut watchers, &mut first_seen, &mut ready)
-            else {
+            let Some(observed) = self.observe(&shared, &mut watchers, &mut ready) else {
                 continue;
             };
             if sent.as_ref() == Some(&observed) {

@@ -88,7 +88,7 @@ Loopback, link-local and the metadata addresses stay denied by the built-in list
 - One service in one datacenter, namespace and partition is one app, `<source name>-<service name>` in the snapshot. The app has one revision `default` unless `podgate.revision` and `podgate.revision.state` say otherwise (`docs/ref/provider-docker.md ## Containers, apps and revisions`): the instances of a service may carry different revisions, which is how a rolling deploy shows.
 - The instances of one revision must agree on their routing; the oldest by `Service.CreateIndex` is the reference, and one that differs is left out and reported. A bad tag on the new instances of a rollout therefore leaves the old ones serving.
 - At most 256 instances of a service are used, the first by address order; the rest are reported.
-- An app's `first_seen` is the time this source first saw it, kept while the app exists. Consul has no creation time, and a raft index cannot be compared with another source's time, so a restart of the provider makes its Consul apps newer than the objects of other sources: an older file or Docker app wins a host conflict.
+- An app's `first_seen` is `0`: Consul has no creation time (`CreateIndex` is a raft index, not a time). A host conflict between two Consul apps is decided by object name, which is stable across provider restarts; the source keeps no first-seen map. A Consul app counts as the oldest in a conflict with another source's object, the contract's value for "the backend does not know" (`docs/ref/provider.md`).
 - A service whose name cannot be an app id (1 to 63 letters, digits, `-`, `_` or `.`, with its partition and namespace) is reported.
 
 ## Tenants

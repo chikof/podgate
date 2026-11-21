@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use common::consul::{FakeConsul, Svc};
 use common::{DEADLINE, config};
 use podgate_provider::consul::ConsulSource;
+use podgate_provider::quarantine;
 use podgate_provider::source::{Source, SourceApp, State, Update, UpdateBody};
 use podgate_provider::{Config, Merged, Merger, UpstreamPolicy};
 use serde_json::{Value, json};
@@ -252,11 +253,7 @@ async fn consul_services_to_apps() {
     let state = watcher.wait_ids(&["web"]).await;
     let app = app_of(&state, "web");
     assert_eq!(&*app.origin.object, "web");
-    assert!(
-        app.origin.first_seen > 1_700_000_000,
-        "Consul has no creation time: the age is when the source first saw the app ({})",
-        app.origin.first_seen
-    );
+    assert_eq!(app.origin.first_seen, 0, "Consul has no creation time");
     assert_eq!(app.tenant.mapped.as_deref(), Some("default"));
     assert_eq!(app.tenant.label, None);
     let mut json = app_json(&state, "web");
@@ -432,6 +429,42 @@ async fn consul_address_must_be_an_ip() {
         "{}",
         watcher.report()
     );
+}
+
+#[tokio::test]
+async fn consul_host_conflict_winner_survives_restart() {
+    // Two services claim one host: podgate's compiler reports `host_conflict`, and the provider
+    // keeps the older object. Consul has no creation time, so neither is older: which one
+    // stays must not depend on which was registered, or seen, first.
+    let config = |url: &str| consul_config(url, TENANTS, "tenant = \"acme\"");
+    let mut losers = Vec::new();
+    for order in [["alpha", "beta"], ["beta", "alpha"]] {
+        let consul = FakeConsul::start().await;
+        for (n, name) in order.iter().enumerate() {
+            let ip = format!("10.4.0.{}", n + 1);
+            consul.register(web(name, name, &ip, "shared.acme.test"));
+        }
+        let config = config(&consul.url());
+        // A fresh source each time, like a restarted provider.
+        let mut watcher = Watcher::start(&config);
+        let state = watcher.wait_ids(&["alpha", "beta"]).await;
+        assert!(state.apps.iter().all(|app| app.origin.first_seen == 0));
+        let merged = merge(&config, UpstreamPolicy::builtin(), state);
+        let named: Vec<&str> = merged
+            .included()
+            .iter()
+            .map(|included| &*included.declared_by)
+            .collect();
+        let culprits = quarantine::attribute(&merged, &[common::conflict("host_conflict", &named)]);
+        losers.push(
+            culprits
+                .iter()
+                .map(|culprit| culprit.object.object.object.to_string())
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(losers[0], ["beta"], "ties fall back to the object name");
+    assert_eq!(losers[0], losers[1], "the same app stays after a restart");
 }
 
 #[tokio::test]
