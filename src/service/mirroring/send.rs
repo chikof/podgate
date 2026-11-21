@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use super::run::{Dropped, MARKER, Sent, dropped, sent};
-use crate::budget::TenantSlot;
+use crate::budget::BackgroundSlot;
 use crate::fairq::Permit;
 use crate::service::Lease;
 use crate::service::upstream_policy::UpstreamPolicy;
@@ -96,9 +96,9 @@ impl Copy {
     }
 }
 
-/// What one copy holds while it runs: its place, its tenant slot, its server and its limiter
+/// What one copy holds while it runs: its place, its tenant place, its server and its limiter
 /// slot. All are given back when the task ends.
-pub(super) type Hold = (GlobalSlot, TenantSlot, Lease, Permit);
+pub(super) type Hold = (GlobalSlot, BackgroundSlot, Lease, Permit);
 
 /// One copy of a request, for one mirror.
 pub(super) struct Job {
@@ -291,7 +291,10 @@ mod test {
                 .await
                 .expect("answer");
             let body: [u8; 5] = seen[end..end + 5].try_into().expect("five bytes");
-            (String::from_utf8(seen[..end].to_vec()).expect("utf-8"), body)
+            (
+                String::from_utf8(seen[..end].to_vec()).expect("utf-8"),
+                body,
+            )
         });
         let request = copy("POST", &[("host", "a.test")], &[b"ab", b"cde"]);
         talk(&mut near, &request)
@@ -353,7 +356,7 @@ mod test {
             tenant: "t".into(),
             _hold: (
                 GlobalSlot::take().expect("a place"),
-                tenant.admit().expect("a slot"),
+                tenant.admit_background().expect("a slot"),
                 lease,
                 limiter.try_admit(&table, addr).expect("a permit"),
             ),

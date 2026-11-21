@@ -12,7 +12,8 @@
 //! never queued, at the first of these that says no:
 //!
 //! 1. the process runs [`MAX_IN_FLIGHT`] copies already;
-//! 2. the tenant has used three quarters of `max_inflight` ([`TenantBudget::admit_background`]);
+//! 2. the tenant has used three quarters of `max_inflight`, or runs a quarter of it in copies
+//!    already ([`TenantBudget::admit_background`]; a copy is never counted as an in-flight request);
 //! 3. the service has no server to take the copy;
 //! 4. the server's concurrency limit is reached or someone waits for it
 //!    ([`Backends::try_admit`]).
@@ -692,8 +693,14 @@ mod test {
         while let Some(slot) = tenant.admit_background() {
             held.push(slot);
         }
-        // max_inflight is 10: ceiling 10 - 10 / 4 = 8.
-        assert_eq!(held.len(), 8);
-        assert!(tenant.admit().is_some(), "real requests still get in");
+        // max_inflight is 10: at most 10 / 4 = 2 copies, and none once 8 requests run.
+        assert_eq!(held.len(), 2);
+        let real: Vec<_> = std::iter::from_fn(|| tenant.admit()).collect();
+        assert_eq!(real.len(), 10, "copies never take a real request's place");
+        drop(held);
+        assert!(
+            tenant.admit_background().is_none(),
+            "busy: no copy above three quarters"
+        );
     }
 }

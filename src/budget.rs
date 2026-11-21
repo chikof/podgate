@@ -29,6 +29,7 @@ pub struct TenantBudget {
     max_inflight: AtomicU32,
     max_buffer_bytes: AtomicU64,
     inflight: AtomicU32,
+    background: AtomicU32,
     buffered: AtomicU64,
     peak_buffered: AtomicU64,
     rejected: AtomicU64,
@@ -43,6 +44,7 @@ impl TenantBudget {
             max_inflight: AtomicU32::new(limits.max_inflight),
             max_buffer_bytes: AtomicU64::new(limits.max_buffer_bytes),
             inflight: AtomicU32::new(0),
+            background: AtomicU32::new(0),
             buffered: AtomicU64::new(0),
             peak_buffered: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
@@ -78,20 +80,23 @@ impl TenantBudget {
         })
     }
 
-    /// Takes an in-flight slot for background work (a mirrored copy of a request, see
-    /// [`crate::service`]'s `mirroring`) only while the tenant keeps a quarter of
-    /// `max_inflight` free for real requests, so background work is shed before any real request
-    /// is refused. A refusal is not counted as a rejected request.
+    /// Takes a place for background work (a mirrored copy of a request, see
+    /// [`crate::service::mirroring`]), which is never counted as an in-flight request, so it can
+    /// not make a real request wait or fail. It is granted only while the tenant has used less than
+    /// three quarters of `max_inflight` and runs fewer than a quarter of it (at least one) already.
     #[must_use]
-    pub fn admit_background(self: &Arc<Self>) -> Option<TenantSlot> {
+    pub fn admit_background(self: &Arc<Self>) -> Option<BackgroundSlot> {
         let limit = self.max_inflight.load(Ordering::Relaxed);
-        let ceiling = limit - limit / 4;
-        self.inflight
+        if self.inflight.load(Ordering::Relaxed) >= limit - limit / 4 {
+            return None;
+        }
+        let cap = (limit / 4).max(1);
+        self.background
             .try_update(Ordering::AcqRel, Ordering::Acquire, |now| {
-                (now < ceiling).then_some(now + 1)
+                (now < cap).then_some(now + 1)
             })
             .ok()?;
-        Some(TenantSlot {
+        Some(BackgroundSlot {
             tenant: Arc::clone(self),
         })
     }
@@ -192,6 +197,18 @@ impl TenantSlot {
 impl Drop for TenantSlot {
     fn drop(&mut self) {
         self.tenant.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// One place of a tenant's background work. Dropping it frees the place.
+#[derive(Debug)]
+pub struct BackgroundSlot {
+    tenant: Arc<TenantBudget>,
+}
+
+impl Drop for BackgroundSlot {
+    fn drop(&mut self) {
+        self.tenant.background.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

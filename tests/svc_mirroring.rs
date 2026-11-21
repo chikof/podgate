@@ -269,7 +269,9 @@ async fn raw(podgate: &Podgate, request: &[u8]) -> (u16, String) {
 /// The status of a websocket-style request the upstream answers with a plain `200`. The
 /// connection is not read to its end: an upgrade request keeps it open.
 async fn upgrade_status(podgate: &Podgate, path: &str) -> u16 {
-    let mut stream = TcpStream::connect(podgate.proxy_addr).await.expect("connect");
+    let mut stream = TcpStream::connect(podgate.proxy_addr)
+        .await
+        .expect("connect");
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: a.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
     );

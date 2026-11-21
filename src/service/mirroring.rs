@@ -16,8 +16,8 @@
 //! has no use. The names are resolved when the snapshot compiles (`unknown_service`), per
 //! revision, into a [`Plan`] the table keeps next to the route.
 //!
-//! What a mirror may cost is bounded: see [`run`] (admission, sampling, the body copy) and
-//! [`send`] (the one HTTP/1.1 exchange). `percent` takes decimals down to `0.0001`; `0` mirrors
+//! What a mirror may cost is bounded: see `run` (admission, sampling, the body copy) and
+//! `send` (the one HTTP/1.1 exchange). `percent` takes decimals down to `0.0001`; `0` mirrors
 //! nothing and `100` mirrors everything.
 
 mod run;
@@ -110,7 +110,7 @@ struct MirrorTo {
     share: u32,
 }
 
-/// A compiled `mirroring` service. It names services; [`Self::resolve`] turns the names into a
+/// A compiled `mirroring` service. It names services; `resolve` turns the names into a
 /// [`Plan`] for each revision.
 #[derive(Debug)]
 pub struct Mirroring {
@@ -363,6 +363,15 @@ impl Mirroring {
                 )));
             };
             self.check_kind(scopes, revision, service, &mirror.name)?;
+            if scopes
+                .get(revision, service)
+                .is_some_and(|named| named.service.servers().iter().any(|server| server.h2c))
+            {
+                return Err(invalid(format!(
+                    "service {} has an h2c:// server: a copy is HTTP/1.1, so it cannot be a mirror",
+                    mirror.name
+                )));
+            }
             targets.push(Target {
                 label: label.into(),
                 revision,
@@ -619,6 +628,32 @@ mod test {
         let no_service = json!({"mirrors": [{"service": "only2@r1", "percent": 5}]});
         assert_eq!(err(no_service, 0), "unknown_service");
         assert_eq!(err(json!({"service": "gone"}), 0), "unknown_service");
+    }
+
+    #[test]
+    fn mirror_config_refuses_an_h2c_mirror() {
+        let h2c = Named {
+            name: "shadow".into(),
+            service: Service::compile(
+                &declared(json!({
+                    "name": "shadow", "type": "loadbalancer",
+                    "servers": [{"url": "h2c://10.0.0.1:80"}],
+                })),
+                &[],
+                None,
+            )
+            .expect("h2c"),
+        };
+        let shared = [lb("web"), h2c];
+        let revisions = [Scope {
+            id: "r1",
+            draining: false,
+            own: &[],
+        }];
+        let scopes = scopes(&shared, &revisions);
+        let err = mirror(json!({})).resolve(&scopes, 0).expect_err("refused");
+        assert_eq!(err.code, "invalid_service");
+        assert!(err.message.contains("h2c"), "{}", err.message);
     }
 
     #[test]

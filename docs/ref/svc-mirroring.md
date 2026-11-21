@@ -19,7 +19,7 @@ exactly as if the router had named `service`.
 | Field | Meaning |
 |---|---|
 | `service` | The service that answers: a `loadbalancer` of the revision the request picked, else of the app. |
-| `mirrors[].service` | Where a copy goes: a `loadbalancer` of the same app, `name` (in the revision the request picked, else the app) or `name@revision` (in that revision, else the app). One to eight entries. |
+| `mirrors[].service` | Where a copy goes: a `loadbalancer` of the same app, `name` (in the revision the request picked, else the app) or `name@revision` (in that revision, else the app), with no `h2c://` server (a copy is HTTP/1.1). One to eight entries. |
 | `mirrors[].percent` | The share of requests copied, `0` to `100`, with up to four decimals (`0.1` is one in a thousand). `0` copies nothing and `100` copies everything, exactly. Each mirror is sampled on its own. |
 | `mirror_body` | Send the request body to the mirrors too. Default `false`: the copy has the method, path and headers, and an empty body. |
 | `max_body_size` | The most body bytes copied, default 1 MiB (Traefik's default is unlimited), at most 16 MiB. Larger bodies are not mirrored. Needs `mirror_body`. |
@@ -48,8 +48,9 @@ A mirror may only consume what real traffic leaves unused. A copy is **shed**, c
 queued, at the first of these that says no:
 
 1. The process already runs 256 copies.
-2. The tenant has used three quarters of its `max_inflight` (a copy holds an in-flight slot while
-   it runs, so real requests keep the last quarter). Refusing a copy is not a rejected request.
+2. The tenant has used three quarters of its `max_inflight`, or already runs a quarter of it
+   (at least one) in copies. A copy is never counted as an in-flight request, so it cannot make a
+   real request wait or fail; refusing a copy is not a rejected request.
 3. The mirror's service has no available server.
 4. The server's adaptive concurrency limit is reached, or someone already
    waits for it. A copy never queues behind real requests.
