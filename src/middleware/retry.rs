@@ -34,7 +34,7 @@
 //! # How an attempt moves on
 //!
 //! [`on_upstream_error`] runs in Pingora's `fail_to_connect` and `error_while_proxy` callbacks.
-//! It asks the chain ([`middleware::run_upstream_error`]), then picks the next server in the
+//! It asks the chain ([`super::run_upstream_error`]), then picks the next server in the
 //! request's revision and service, excluding the servers already tried
 //! ([`crate::route::reselect`], which goes through [`crate::service::PickCx::allows`]), and
 //! checks it against the upstream address policy. Only when all of that holds does it count the

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use common::{Podgate, app, middleware, revision_on, snapshot, with_chain};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::sleep;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::time::{sleep, timeout};
 
 /// How a backend treats the requests it reads.
 #[derive(Clone, Copy)]
@@ -82,7 +82,7 @@ impl Backend {
 
 /// Reads one request: its head, and its body when it has a length or is chunked.
 async fn read_request(stream: &mut TcpStream, seen: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let mut chunk = [0_u8; 4096];
+    let mut chunk = [0_u8; 1024];
     let end = loop {
         if let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
             break end + 4;
@@ -801,5 +801,79 @@ async fn retry_attempts_in_access_log() {
     assert_eq!(
         (&lines[0]["host"], &lines[0]["retry_attempts"]),
         (&json!("a.test"), &json!(1))
+    );
+}
+
+/// A listener whose accept queue is full, so a connect to it hangs until the dial timeout. The
+/// listener and the filler connections must live as long as the test.
+async fn blackhole() -> (SocketAddr, TcpListener, Vec<TcpStream>) {
+    let socket = TcpSocket::new_v4().expect("socket");
+    socket
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("bind");
+    let listener = socket.listen(1).expect("listen");
+    let addr = listener.local_addr().expect("addr");
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        match timeout(Duration::from_millis(300), TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => held.push(stream),
+            _ => return (addr, listener, held),
+        }
+    }
+    panic!("the accept queue never filled");
+}
+
+/// `pushed` with every service using a transport with `fields` (`dial_timeout_secs`, ...).
+fn with_transport(mut pushed: Value, fields: &Value) -> Value {
+    let mut declared = json!({ "name": "t", "type": "servers_transport" });
+    if let (Some(object), Some(extra)) = (declared.as_object_mut(), fields.as_object()) {
+        object.extend(extra.clone());
+    }
+    pushed["apps"][0]["transports"] = json!([declared]);
+    pushed["apps"][0]["revisions"][0]["services"][0]["transport"] = json!("t");
+    pushed
+}
+
+#[tokio::test]
+async fn retry_dial_timeout_retried_read_timeout_not() {
+    let podgate = Podgate::start().await;
+    let chain = [retry(&json!({"attempts": 2, "initial_interval_ms": 1}))];
+    let good = Backend::good().await;
+
+    // A dial that times out sent nothing, so another server takes the request.
+    let (hung, _listener, _held) = blackhole().await;
+    let pushed = with_transport(
+        guarded(1, &[hung, good.addr], &chain, 100),
+        &json!({"dial_timeout_secs": 1}),
+    );
+    push(&podgate, &pushed).await;
+    let started = Instant::now();
+    let response = podgate.get("a.test", "/").await;
+    assert_eq!(
+        (response.status, response.body.as_str()),
+        (200, "good"),
+        "{response:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "the dial timed out first"
+    );
+    assert_eq!(good.hits(), 1);
+
+    // A response that never comes may have been caused by the request: a `504`, no retry.
+    let silent = Backend::start("silent", Mode::Slow(Duration::from_secs(60))).await;
+    let pushed = with_transport(
+        guarded(2, &[silent.addr, good.addr], &chain, 100),
+        &json!({"read_timeout_secs": 1}),
+    );
+    push(&podgate, &pushed).await;
+    let before = good.hits();
+    let response = podgate.get("a.test", "/").await;
+    assert_eq!(response.status, 504, "{response:?}");
+    assert_eq!(silent.hits(), 1);
+    assert_eq!(
+        good.hits(),
+        before,
+        "the request was not sent to another server"
     );
 }

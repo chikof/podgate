@@ -26,10 +26,10 @@ Pingora marks an attempt retryable only when no response byte arrived. `retry` n
 
 | Failure | Retried when |
 |---|---|
-| Connect: refused, unreachable, handshake failed | Any method, as long as no part of the body was streamed to a server. Nothing was sent. |
+| Connect: refused, unreachable, dial timeout, TLS handshake failed or timed out | Any method, as long as no part of the body was streamed to a server. Nothing was sent. |
 | Reused connection: a pooled connection died before a response byte | The method is in `methods` **and** the whole body can be sent again: the request has no body, or the `buffering` middleware holds it (`buffer_request`, at most 64 KiB). A streamed body is never replayed. |
 
-A connection that is fresh and fails after the request was written is not retried at all: the server may have acted on it. A failure after the response started is not retried either.
+A connection that is fresh and fails after the request was written is not retried at all: the server may have acted on it. A failure after the response started is not retried either. A read or write timeout (`read_timeout_secs` of the transport) is a `504` and is never retried: the request may have reached the upstream. A dial or handshake timeout (`dial_timeout_secs`) is a connect error and is retried, as long as the backoff fits the request deadline.
 
 A request with no `retry` in its chain keeps Pingora's own rule: an idempotent request is retried on the same server when a reused connection died. A `retry` stage replaces that rule for its routes.
 

@@ -524,6 +524,7 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"trip_when": {"network_error_ratio": 0.3}}),
         ),
         ("buffering", json!({"max_request_body_bytes": 1024})),
+        ("retry", json!({"attempts": 3})),
         (
             "pass_tls_client_cert",
             json!({"pem": true, "info": {"subject": {"common_name": true}}}),
