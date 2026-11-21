@@ -16,7 +16,7 @@
 //!
 //! The source learns which services exist and which tags they carry from a blocking query on
 //! `/v1/catalog/services`, and takes the servers of every service it cares about from a blocking
-//! query on `/v1/health/service/<name>?passing=true`. Both are `GET`s ([`client`]). A server is
+//! query on `/v1/health/service/<name>?passing=true`. Both are `GET`s (`client.rs`). A server is
 //! the instance's own address and port, never an address a tag spells out. The tags are read by
 //! [`crate::docker::labels`] (which reads `traefik.*` tags through [`crate::traefik`]), written
 //! `key=value`.

@@ -1002,9 +1002,8 @@ async fn consul_traefik_tags_translate() {
         !report.contains("service hidden"),
         "traefik.enable=false hides: {report}"
     );
-    assert_eq!(
-        consul.health_paths().contains("/v1/health/service/hidden"),
-        false,
+    assert!(
+        !consul.health_paths().contains("/v1/health/service/hidden"),
         "a hidden service is not even read"
     );
 
