@@ -53,6 +53,7 @@ pub mod forward_auth;
 pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
+pub mod jwt_auth;
 pub(crate) mod limits;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
@@ -113,6 +114,8 @@ pub struct RequestCx<'a> {
     /// Set by a hook that read the whole request body into the session's replay buffer
     /// (`buffering`), so a second server can be sent the same body (`retry`).
     pub body_held: &'a mut bool,
+    /// Where a hook notes why it refuses the request, for the access log's `reason`.
+    pub reason: &'a mut Option<&'static str>,
 }
 
 /// The stages of the chain that come before the one running a routed hook, with their per-request
@@ -746,6 +749,8 @@ kinds! {
 
     "forward_auth" => ForwardAuth(forward_auth::ForwardAuth),
 
+    "jwt_auth" => JwtAuth(jwt_auth::JwtAuth),
+
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => RateLimit(rate_limit::RateLimit),
@@ -810,6 +815,8 @@ schemas! {
     "digest_auth" => digest_auth::Config,
 
     "forward_auth" => forward_auth::Config,
+
+    "jwt_auth" => jwt_auth::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 
@@ -955,10 +962,11 @@ pub async fn run_routed(
     state: &mut State,
 ) -> pingora::Result<Flow> {
     cx.pages = page_statuses(stages, chain, cx.session.req_header());
-    cx.credentialed = state
-        .stages
-        .iter()
-        .any(|stage| matches!(stage, StageState::ForwardAuth(auth) if auth.identified()));
+    cx.credentialed = state.stages.iter().any(|stage| match stage {
+        StageState::ForwardAuth(auth) => auth.identified(),
+        StageState::JwtAuth(auth) => auth.verified(),
+        _ => false,
+    });
     cx.original = state.original.take();
     let mut flow = Flow::Continue;
     for (position, index) in chain.iter().enumerate() {

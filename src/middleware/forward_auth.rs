@@ -163,7 +163,7 @@ fn invalid(message: impl std::fmt::Display) -> Invalid {
 /// The headers a middleware never sends to the auth service, never copies from its answer and
 /// never lets `response_headers` name: those that frame the message or belong to the connection,
 /// and the forwarding set podgate writes itself.
-fn reserved(name: &HeaderName) -> bool {
+pub(super) fn reserved(name: &HeaderName) -> bool {
     let name = name.as_str();
     headers::FORBIDDEN.contains(&name)
         || name.starts_with("proxy-")

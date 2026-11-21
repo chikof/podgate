@@ -37,13 +37,13 @@ const MAX_HEADERS: usize = 100;
 
 /// What the auth service answered.
 #[derive(Debug)]
-pub(super) struct Answer {
+pub(in crate::middleware) struct Answer {
     /// The status, `200..=599`.
-    pub(super) status: u16,
+    pub(in crate::middleware) status: u16,
     /// Every header of the answer.
-    pub(super) headers: HeaderMap,
+    pub(in crate::middleware) headers: HeaderMap,
     /// The body, at most the cap.
-    pub(super) body: Vec<u8>,
+    pub(in crate::middleware) body: Vec<u8>,
 }
 
 /// Dials auth services. Cheap to clone; clones share the connector.
@@ -79,7 +79,7 @@ impl Client {
     ///
     /// A [`Failure`]: the policy refuses the address (nothing is dialled), the connection or the
     /// timeout fails, or the answer is over `max_body` or not one this client accepts.
-    pub(super) async fn call(
+    pub(in crate::middleware) async fn call(
         &self,
         mut peer: HttpPeer,
         policy: &UpstreamPolicy,

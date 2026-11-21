@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use common::{
     Podgate, TestCa, TestCert, Upstream, app, revision, revision_on, router, serving, snapshot,
     with_middleware,
@@ -485,6 +485,15 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     ]);
     let auth_key = plant("forward-auth-key");
     plants.push(auth_key.clone());
+    let (jwt_secret, jwt_query) = (
+        plant("jwt-hmac-secret-padded-to-32-bytes"),
+        plant("jwks-uri-key"),
+    );
+    plants.extend([
+        jwt_secret.clone(),
+        jwt_query.clone(),
+        URL_SAFE_NO_PAD.encode(&jwt_secret),
+    ]);
 
     let kinds = vec![
         (
@@ -546,6 +555,13 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         (
             "forward_auth",
             json!({"address": format!("http://10.0.0.9:9091/verify?key={auth_key}"), "response_headers": ["x-user"]}),
+        ),
+        (
+            "jwt_auth",
+            json!({"algorithms": ["HS256", "ES256"],
+                   "keys": {"keys": [{"kty": "oct", "kid": "shared", "k": URL_SAFE_NO_PAD.encode(&jwt_secret)}]},
+                   "jwks_uri": format!("https://10.0.0.8:8443/jwks?key={jwt_query}"),
+                   "issuer": "https://idp.test", "forward_claims": {"sub": "x-user-sub"}}),
         ),
         (
             "respond",

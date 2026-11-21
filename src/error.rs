@@ -108,6 +108,22 @@ pub enum AppError {
     /// on.
     #[error("auth service unavailable")]
     AuthSaturated,
+    /// A `jwt_auth` stage found no valid token: `401` with a `WWW-Authenticate` challenge. The body
+    /// never says which check failed; `reason` is for the access log.
+    #[error("unauthorized")]
+    JwtUnauthorized {
+        /// The check that failed, as `Failure::code` of `jwt_auth` names it.
+        reason: &'static str,
+    },
+    /// A `jwt_auth` stage verified the token and its `required_claims` do not match: `403`.
+    #[error("forbidden")]
+    JwtForbidden {
+        /// The reason for the access log.
+        reason: &'static str,
+    },
+    /// A `jwt_auth` stage has no keys (its JWKS cannot be fetched and nothing is cached): `503`.
+    #[error("authentication unavailable")]
+    JwtUnavailable,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -147,7 +163,8 @@ impl AppError {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Misdirected | Self::TlsPolicy => StatusCode::MISDIRECTED_REQUEST,
-            Self::ClientCertRequired => StatusCode::FORBIDDEN,
+            Self::ClientCertRequired | Self::JwtForbidden { .. } => StatusCode::FORBIDDEN,
+            Self::JwtUnauthorized { .. } => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::WriterOwned { .. } => StatusCode::CONFLICT,
@@ -165,6 +182,7 @@ impl AppError {
             | Self::AuthBusy
             | Self::AuthUnavailable
             | Self::AuthSaturated
+            | Self::JwtUnavailable
             | Self::LimiterBusy
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
@@ -251,6 +269,8 @@ impl AppError {
             Self::AuthUnavailable => "auth_unavailable",
             Self::AuthSaturated => "auth_saturated",
             Self::AuthOverBudget => "auth_over_budget",
+            Self::JwtUnauthorized { reason } | Self::JwtForbidden { reason } => reason,
+            Self::JwtUnavailable => "jwks_unavailable",
             Self::RateLimited { .. } => "rate_limited",
             Self::TooManyInFlight => "in_flight_limit",
             Self::LimiterBusy => "limiter_busy",

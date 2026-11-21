@@ -779,6 +779,12 @@ pub fn with_buffering(mut app: Value, config: Value) -> Value {
     app
 }
 
+/// `app` with one `jwt_auth` middleware `jwt`, `config` holding its fields, in the app's
+/// `default_chain`.
+pub fn with_jwt_auth(app: Value, config: Value) -> Value {
+    with_middleware(app, "jwt", "jwt_auth", config)
+}
+
 /// `app` with one `forward_auth` middleware `auth` asking `http://<auth>/verify`; `extra` holds
 /// the other fields of its configuration (an object, or `null` for none).
 pub fn with_forward_auth(app: Value, auth: SocketAddr, extra: &Value) -> Value {
