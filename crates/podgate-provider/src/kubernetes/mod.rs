@@ -26,6 +26,7 @@
 //! - [`crd`]: the `PodgateRoute` and `PodgateMiddleware` custom resources and the generator of
 //!   their CRD manifests.
 //! - [`tenancy`]: the tenant of an Ingress or a route.
+//! - [`gateway`]: Gateway, HTTPRoute and GRPCRoute (`gateway_api = true`).
 //!
 //! The source keeps one [`client::Store`] per kind and namespace scope. Every change to any of
 //! them, after a short settle time that merges a burst, recomputes the whole state and sends it
@@ -40,6 +41,7 @@
 pub mod client;
 pub mod crd;
 pub mod endpoints;
+pub mod gateway;
 pub mod ingress;
 pub mod tenancy;
 
@@ -91,6 +93,9 @@ struct Settings {
     allow_external_name: bool,
     #[serde(default)]
     crds: bool,
+    gateway_api: bool,
+    gateway_class: Option<String>,
+    listener_entry_points: Option<BTreeMap<String, String>>,
 }
 
 /// The Kubernetes source.
@@ -106,6 +111,7 @@ pub struct KubernetesSource {
     tenancy: Tenancy,
     allow_external_name: bool,
     crds: bool,
+    gateway: Option<gateway::Options>,
 }
 
 impl KubernetesSource {
@@ -172,6 +178,18 @@ impl KubernetesSource {
             settings.default_tenant.map(Into::into),
         )
         .map_err(invalid)?;
+        let gateway = if settings.gateway_api {
+            Some(
+                gateway::Options::new(settings.gateway_class, settings.listener_entry_points)
+                    .map_err(invalid)?,
+            )
+        } else if settings.gateway_class.is_some() || settings.listener_entry_points.is_some() {
+            return Err(invalid(
+                "gateway_class and listener_entry_points need gateway_api = true".to_owned(),
+            ));
+        } else {
+            None
+        };
         Ok(Self {
             name: source.name.clone(),
             client,
@@ -182,6 +200,7 @@ impl KubernetesSource {
             tenancy,
             allow_external_name: settings.allow_external_name,
             crds: settings.crds,
+            gateway,
         })
     }
 
@@ -207,6 +226,7 @@ enum Change {
     Slice(Event<EndpointSlice>),
     Secret(Event<Secret>),
     Crd(crd::CrdChange),
+    Gateway(gateway::Change),
 }
 
 struct Tagged {
@@ -221,18 +241,20 @@ struct Cache {
     slices: Vec<Store<EndpointSlice>>,
     secrets: Vec<Store<Secret>>,
     crd: crd::Cache,
+    gateway: Option<gateway::Cache>,
     /// What each watcher last reported as wrong, by kind and scope.
     outages: BTreeMap<(&'static str, usize), Box<str>>,
 }
 
 impl Cache {
-    fn new(scopes: usize, crds: bool) -> Self {
+    fn new(scopes: usize, crds: bool, with_gateway: bool) -> Self {
         Self {
             ingresses: stores(scopes),
             services: stores(scopes),
             slices: stores(scopes),
             secrets: stores(scopes),
             crd: crd::Cache::new(crds, scopes),
+            gateway: with_gateway.then(|| gateway::Cache::new(scopes)),
             outages: BTreeMap::new(),
         }
     }
@@ -251,6 +273,11 @@ impl Cache {
                 track(&mut self.outages, &mut self.secrets[scope], scope, event)
             }
             Change::Crd(change) => self.crd.apply(&mut self.outages, scope, change),
+            Change::Gateway(change) => {
+                if let Some(gateway) = &mut self.gateway {
+                    gateway.apply(&mut self.outages, scope, change);
+                }
+            }
         }
     }
 
@@ -260,6 +287,7 @@ impl Cache {
             && self.slices.iter().all(Store::is_synced)
             && self.secrets.iter().all(Store::is_synced)
             && self.crd.synced()
+            && self.gateway.as_ref().is_none_or(gateway::Cache::synced)
     }
 }
 
@@ -328,9 +356,12 @@ impl Source for KubernetesSource {
             watch::<Secret>(&mut tasks, &client, secrets, scope, &tx, Change::Secret);
             crd::watch(self.crds, &mut tasks, &client, &query(), scope, &tx);
         }
+        if self.gateway.is_some() {
+            gateway::watch_all(&mut tasks, &client, &self.scopes, &tx);
+        }
         drop(tx);
 
-        let mut cluster = Cache::new(self.scopes.len(), self.crds);
+        let mut cluster = Cache::new(self.scopes.len(), self.crds, self.gateway.is_some());
         let mut publisher = Publisher::default();
         while let Some(first) = rx.recv().await {
             cluster.apply(first);
@@ -470,6 +501,12 @@ fn build(source: &KubernetesSource, cluster: &Cache) -> Built {
         }
     }
     crd::build(&cluster.crd, &context, &mut apps, &mut rejected);
+    if let (Some(options), Some(gateway)) = (&source.gateway, &cluster.gateway) {
+        let translated = gateway::translate(gateway, options, &context);
+        apps.extend(translated.apps);
+        certificates.extend(translated.certificates);
+        rejected.extend(translated.notes);
+    }
     apps.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     certificates.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     Built {

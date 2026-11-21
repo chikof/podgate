@@ -2995,6 +2995,7 @@ dependencies = [
  "podgate-model",
  "podgate-rule",
  "rcgen",
+ "regex",
  "rustls",
  "rustls-pki-types",
  "serde",

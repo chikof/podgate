@@ -27,6 +27,8 @@ pub struct Tenancy {
     trust: Trust,
     namespaces: BTreeMap<Box<str>, Box<str>>,
     default_tenant: Option<Box<str>>,
+    /// Entry point to the one tenant that may attach routers to it.
+    exclusive: BTreeMap<Box<str>, Box<str>>,
 }
 
 /// What the tenant rules decided about the routers of one Ingress.
@@ -63,12 +65,73 @@ impl Tenancy {
                 format!("default_tenant: tenant {tenant:?} is not in the configuration")
             })?;
         }
+        let exclusive = config
+            .tenants
+            .iter()
+            .chain([&config.default_tenant])
+            .flat_map(|tenant| {
+                tenant
+                    .exclusive_entry_points
+                    .iter()
+                    .map(|entry| (entry.clone(), tenant.id.clone()))
+            })
+            .collect();
         Ok(Self {
             source: source.into(),
             trust,
             namespaces,
             default_tenant,
+            exclusive,
         })
+    }
+
+    /// Whether objects of namespaces `a` and `b` belong to one tenant. A reference across
+    /// namespaces is only ever allowed inside one tenant, whatever a `ReferenceGrant` says.
+    #[must_use]
+    pub fn same_tenant(&self, a: &str, b: &str) -> bool {
+        self.claim(a, None).mapped == self.claim(b, None).mapped
+    }
+
+    /// Whether the tenant of `claim` may attach routers to `entry_points`: an entry point that
+    /// the operator made exclusive to another tenant is refused.
+    ///
+    /// # Errors
+    ///
+    /// `entry_point_forbidden`, naming the entry point and its tenant, or the [`Problem`] of an
+    /// unknown tenant.
+    pub fn check_entry_points(
+        &self,
+        claim: &TenantClaim,
+        entry_points: &[Box<str>],
+    ) -> Result<(), Problem> {
+        let tenant = self.trust.resolve(&self.source, claim)?;
+        for entry in entry_points {
+            if let Some(owner) = self.exclusive.get(entry)
+                && *owner != tenant.tenant.id
+            {
+                return Err(Problem::new(
+                    "entry_point_forbidden",
+                    format!(
+                        "entry point {entry} is exclusive to tenant {owner}, not to {}",
+                        tenant.tenant.id
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the tenant of `claim` may claim every one of `hosts`.
+    ///
+    /// # Errors
+    ///
+    /// `foreign_host_claim` for the first host outside what the tenant may claim, or the
+    /// [`Problem`] of an unknown tenant.
+    pub fn check_hosts(&self, claim: &TenantClaim, hosts: &[HostPattern]) -> Result<(), Problem> {
+        let tenant = self.trust.resolve(&self.source, claim)?;
+        hosts
+            .iter()
+            .try_for_each(|host| self.trust.check_host(tenant, host))
     }
 
     /// Whose an Ingress in `namespace` is, given its `podgate.io/tenant` annotation.
