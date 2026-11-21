@@ -13,7 +13,7 @@
 //! - [`push`]: the admin socket client, the debounce and the retry delays.
 //! - [`quarantine`]: leaving out the objects podgate rejects, found by `declared_by` or by
 //!   bisection.
-//! - [`file`]: the source that reads YAML, TOML and JSON files and watches them.
+//! - [`mod@file`]: the source that reads YAML, TOML and JSON files and watches them.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //!
 //! The reference is `docs/ref/provider.md`.
