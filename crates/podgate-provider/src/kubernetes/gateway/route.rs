@@ -94,6 +94,9 @@ pub struct Draft {
     pub middlewares: Vec<Declared>,
     /// The services, by name.
     pub services: BTreeMap<Box<str>, Service>,
+    /// The `tcp` or `udp` section of a `TLSRoute`, `TCPRoute` or `UDPRoute`, whose `routers` are
+    /// stand-ins that only carry the host and entry point claims through the tenant rules.
+    pub l4: Option<super::l4::Payload>,
 }
 
 fn declared(value: Value) -> Result<Declared, Rejection> {

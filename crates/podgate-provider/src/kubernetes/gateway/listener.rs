@@ -1,11 +1,12 @@
-//! Gateways and listeners: which routes may attach where, and the certificates of `HTTPS`
-//! listeners.
+//! Gateways and listeners: which routes may attach where, and the certificates of `HTTPS` and
+//! terminating `TLS` listeners.
 //!
 //! A Gateway of the configured class produces nothing by itself. Its listeners bound what routes
 //! can do: a route attaches to a listener when
 //!
 //! - its `parentRefs` name the Gateway (and the listener, by `sectionName` or `port`);
-//! - the listener's protocol is `HTTP` or `HTTPS` and its port has an entry point
+//! - the listener's protocol carries the route's kind (`HTTP` and `HTTPS`: `HTTPRoute` and
+//!   `GRPCRoute`; `TLS`, `TCP` and `UDP`: the L4 routes, `l4`) and its port has an entry point
 //!   (`listener_entry_points`);
 //! - `allowedRoutes` lets the route's kind and namespace in (`Same`, `All`, or a label
 //!   `Selector`);
@@ -21,6 +22,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 
 use super::backend::{Grants, cross_namespace};
+use super::l4;
 use super::types::{GROUP, Gateway, Listener, ObjectReference, ParentRef, SelectorRequirement};
 use super::{Kind, Rejection, reject};
 use crate::kubernetes::client::ObjectMeta;
@@ -40,6 +42,8 @@ pub struct Attachment {
     pub entry_point: Box<str>,
     /// The host names the route serves on this listener; `None` is every host.
     pub hosts: Option<Vec<HostPattern>>,
+    /// Whether the listener forwards TLS untouched (a `TLS` listener in mode `Passthrough`).
+    pub passthrough: bool,
 }
 
 /// What became of one `parentRefs` entry; `0074` writes it into the route's status.
@@ -73,7 +77,7 @@ pub struct Attached {
 
 /// What attaching needs to know about the route.
 pub struct RouteInfo<'a> {
-    /// `HTTPRoute` or `GRPCRoute`.
+    /// The kind of the route.
     pub kind: Kind,
     /// The route's namespace.
     pub namespace: &'a str,
@@ -95,6 +99,8 @@ pub struct Gateways<'a> {
     /// The listeners that conflict with another listener of their Gateway, by Gateway key and
     /// listener name. They are refused: their port is not served for them.
     conflicts: BTreeMap<(String, String), Rejection>,
+    /// The entry points that carry HTTP routes: no TLS, TCP or UDP listener may use one.
+    http_entries: BTreeSet<Box<str>>,
 }
 
 impl<'a> Gateways<'a> {
@@ -124,12 +130,14 @@ impl<'a> Gateways<'a> {
                     .map(move |(name, why)| ((key.clone(), name.to_owned()), why))
             })
             .collect();
+        let http_entries = l4::http_entry_points(gateways.values().copied(), entry_points);
         Self {
             gateways,
             labels,
             entry_points,
             tenancy,
             conflicts,
+            http_entries,
         }
     }
 
@@ -221,6 +229,12 @@ impl<'a> Gateways<'a> {
                 ),
             ));
         }
+        if let Some(why) = l4::mismatch(route.kind, &listener.protocol) {
+            return Err(reject(
+                "NotAllowedByListeners",
+                format!("listener {name} of Gateway {key}: {why}"),
+            ));
+        }
         let entry_point = self.usable(listener).map_err(|why| {
             reject(
                 "NotAllowedByListeners",
@@ -255,6 +269,7 @@ impl<'a> Gateways<'a> {
             listener: name.as_str().into(),
             entry_point,
             hosts,
+            passthrough: l4::passthrough(listener),
         })
     }
 
@@ -265,7 +280,7 @@ impl<'a> Gateways<'a> {
         self.conflicts.get(&(gateway.to_owned(), name.to_owned()))
     }
 
-    /// The entry point of a listener that can carry HTTP routes, or why not:
+    /// The entry point of a listener that can carry routes, or why not:
     /// `UnsupportedProtocol` or `PortUnavailable`, the Gateway API's reasons of a listener's
     /// `Accepted` condition.
     ///
@@ -288,16 +303,18 @@ impl<'a> Gateways<'a> {
                     ));
                 }
             }
+            "TLS" | "TCP" | "UDP" => {}
             other => {
                 return Err(reject(
                     "UnsupportedProtocol",
                     format!(
-                        "the protocol {other:?} carries no HTTP route (only HTTP and HTTPS do)"
+                        "the protocol {other:?} is not served (HTTP, HTTPS, TLS, TCP and UDP are)"
                     ),
                 ));
             }
         }
-        self.entry_points
+        let entry_point = self
+            .entry_points
             .get(&listener.port)
             .cloned()
             .ok_or_else(|| {
@@ -308,7 +325,9 @@ impl<'a> Gateways<'a> {
                         listener.port
                     ),
                 )
-            })
+            })?;
+        l4::check(listener, &entry_point, &self.http_entries)?;
+        Ok(entry_point)
     }
 
     fn allowed(
@@ -500,7 +519,7 @@ pub fn certificates(
         let Some(tls) = listener
             .tls
             .as_ref()
-            .filter(|tls| listener.protocol == "HTTPS" && !tls.certificate_refs.is_empty())
+            .filter(|tls| l4::terminates(listener) && !tls.certificate_refs.is_empty())
         else {
             continue;
         };
@@ -660,7 +679,7 @@ impl Gateways<'_> {
             .map(|listener| {
                 let mut certificates = Vec::new();
                 let mut resolved_refs = kinds_supported(listener);
-                if listener.protocol == "HTTPS"
+                if l4::terminates(listener)
                     && let Some(tls) = &listener.tls
                 {
                     for (index, reference) in tls.certificate_refs.iter().enumerate() {
@@ -670,13 +689,14 @@ impl Gateways<'_> {
                         }
                     }
                 }
-                let supported_kinds = if matches!(listener.protocol.as_str(), "HTTP" | "HTTPS") {
+                let supported_kinds = {
                     let listed = listener
                         .allowed_routes
                         .as_ref()
                         .map(|allowed| &allowed.kinds);
-                    ["HTTPRoute", "GRPCRoute"]
-                        .into_iter()
+                    l4::supported_kinds(&listener.protocol)
+                        .iter()
+                        .copied()
                         .filter(|kind| {
                             listed.is_none_or(|kinds| {
                                 kinds.is_empty()
@@ -687,8 +707,6 @@ impl Gateways<'_> {
                             })
                         })
                         .collect()
-                } else {
-                    Vec::new()
                 };
                 ListenerReport {
                     name: listener.name.clone(),
@@ -716,12 +734,14 @@ fn kinds_supported(listener: &Listener) -> Result<(), Rejection> {
     };
     for kind in &allowed.kinds {
         let group = kind.group.as_deref().unwrap_or(GROUP);
-        if group != GROUP || !matches!(kind.kind.as_str(), "HTTPRoute" | "GRPCRoute") {
+        if group != GROUP || !l4::supported_kinds(&listener.protocol).contains(&kind.kind.as_str())
+        {
             return Err(reject(
                 "InvalidRouteKinds",
                 format!(
-                    "allowedRoutes.kinds names {} (group {group:?}); only HTTPRoute and GRPCRoute are served",
-                    kind.kind
+                    "allowedRoutes.kinds names {} (group {group:?}); only {} are served",
+                    kind.kind,
+                    l4::supported_kinds(&listener.protocol).join(" and ")
                 ),
             ));
         }

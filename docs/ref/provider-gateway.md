@@ -163,4 +163,4 @@ The Lease rule can be a `Role` in the Lease's namespace (`lease_namespace`) with
 
 ## Not built
 
-`TLSRoute`, `TCPRoute` and `UDPRoute`; `ExtensionRef` and the podgate objects; `BackendTLSPolicy`; the Gateway API's `500` for a single unresolvable backend of a weighted set.
+`ExtensionRef` and the podgate objects; `BackendTLSPolicy`; the Gateway API's `500` for a single unresolvable backend of a weighted set. `TLSRoute`, `TCPRoute` and `UDPRoute` are in `docs/ref/provider-gateway-l4.md`.

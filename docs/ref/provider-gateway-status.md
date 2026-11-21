@@ -107,4 +107,4 @@ Nothing else is leader-only: every replica watches, translates and pushes for it
 
 ## Not built
 
-The Ingress status address; `TLSRoute`, `TCPRoute` and `UDPRoute` status; status conditions `PartiallyInvalid` and the `Gateway.status.addresses`; `BackendTLSPolicy` status; a Lease released at shutdown.
+The Ingress status address; status conditions `PartiallyInvalid` and the `Gateway.status.addresses`; `BackendTLSPolicy` status; a Lease released at shutdown.

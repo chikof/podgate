@@ -182,6 +182,18 @@ impl Resource for Secret {
     }
 }
 
+/// How a backend is reached: HTTP backends are `scheme://address`, stream backends (Gateway API
+/// `TCPRoute`, `TLSRoute` and `UDPRoute`) are `address` alone, from a port of their protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    /// HTTP requests over a TCP port, with the scheme the port's `appProtocol` says.
+    Http,
+    /// A TCP stream, whatever the `appProtocol`.
+    Tcp,
+    /// UDP datagrams to a UDP port.
+    Udp,
+}
+
 /// A backend port as an Ingress names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortRef {
@@ -256,12 +268,29 @@ impl<'a> ServiceIndex<'a> {
         name: &str,
         port: &PortRef,
     ) -> Result<Vec<Box<str>>, String> {
+        self.addresses(namespace, name, port, Wire::Http)
+    }
+
+    /// [`Self::servers`] for a backend of the given [`Wire`]: a stream backend returns plain
+    /// `address:port` entries from a TCP (or, for UDP, a UDP) port, and an `ExternalName` Service
+    /// is a host name that only a TCP stream can use.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::servers`], with the port's protocol checked against `wire`.
+    pub fn addresses(
+        &self,
+        namespace: &str,
+        name: &str,
+        port: &PortRef,
+        wire: Wire,
+    ) -> Result<Vec<Box<str>>, String> {
         let service = self
             .services
             .get(&(namespace, name))
             .ok_or_else(|| format!("Service {namespace}/{name} does not exist"))?;
         if service.spec.kind.as_deref() == Some("ExternalName") {
-            return self.external(service, namespace, name, port);
+            return self.external(service, namespace, name, port, wire);
         }
         let service_port = service
             .spec
@@ -272,17 +301,21 @@ impl<'a> ServiceIndex<'a> {
                 PortRef::Name(wanted) => candidate.name.as_deref() == Some(&**wanted),
             })
             .ok_or_else(|| format!("Service {namespace}/{name} has no port {port}"))?;
+        let protocol = if wire == Wire::Udp { "UDP" } else { "TCP" };
         if service_port
             .protocol
             .as_deref()
-            .is_some_and(|protocol| protocol != "TCP")
+            .is_some_and(|found| found != protocol)
         {
             return Err(format!(
-                "port {port} of Service {namespace}/{name} is not TCP"
+                "port {port} of Service {namespace}/{name} is not {protocol}"
             ));
         }
-        let scheme = scheme_of(service_port.app_protocol.as_deref())
-            .ok_or_else(|| format!("port {port} of Service {namespace}/{name} has the appProtocol {:?}, which is not supported (http and kubernetes.io/h2c are)", service_port.app_protocol.as_deref().unwrap_or("")))?;
+        let scheme = match wire {
+            Wire::Http => Some(scheme_of(service_port.app_protocol.as_deref())
+                .ok_or_else(|| format!("port {port} of Service {namespace}/{name} has the appProtocol {:?}, which is not supported (http and kubernetes.io/h2c are)", service_port.app_protocol.as_deref().unwrap_or("")))?),
+            Wire::Tcp | Wire::Udp => None,
+        };
         let slices: Vec<&EndpointSlice> = self
             .slices
             .get(&(namespace, name))
@@ -299,7 +332,7 @@ impl<'a> ServiceIndex<'a> {
         let wanted = service_port.name.as_deref().unwrap_or("");
         let mut servers = BTreeSet::new();
         for slice in slices {
-            let Some(target) = slice_port(slice, wanted) else {
+            let Some(target) = slice_port(slice, wanted, protocol) else {
                 continue;
             };
             if !matches!(slice.address_type.as_deref(), Some("IPv4" | "IPv6")) {
@@ -315,8 +348,11 @@ impl<'a> ServiceIndex<'a> {
                 }
                 for address in &endpoint.addresses {
                     if let Ok(ip) = address.parse::<IpAddr>() {
-                        servers
-                            .insert(format!("{scheme}://{}", SocketAddr::new(ip, target)).into());
+                        let address = SocketAddr::new(ip, target);
+                        servers.insert(match scheme {
+                            Some(scheme) => format!("{scheme}://{address}").into(),
+                            None => address.to_string().into(),
+                        });
                     }
                 }
             }
@@ -330,7 +366,13 @@ impl<'a> ServiceIndex<'a> {
         namespace: &str,
         name: &str,
         port: &PortRef,
+        wire: Wire,
     ) -> Result<Vec<Box<str>>, String> {
+        if wire == Wire::Udp {
+            return Err(format!(
+                "Service {namespace}/{name} is an ExternalName Service, and podgate's UDP servers are IP literals only"
+            ));
+        }
         if !self.allow_external_name {
             return Err(format!(
                 "Service {namespace}/{name} is an ExternalName Service: its target is a DNS name its owner picks; set allow_external_name to serve it"
@@ -355,7 +397,10 @@ impl<'a> ServiceIndex<'a> {
                 "Service {namespace}/{name} has an externalName that is not a host name"
             ));
         }
-        Ok(vec![format!("http://{target}:{number}").into()])
+        Ok(vec![match wire {
+            Wire::Http => format!("http://{target}:{number}").into(),
+            Wire::Tcp | Wire::Udp => format!("{target}:{number}").into(),
+        }])
     }
 }
 
@@ -376,8 +421,8 @@ fn scheme_of(app_protocol: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// The container port of the slice's TCP port called `name`.
-fn slice_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
+/// The container port of the slice's `protocol` port called `name`.
+fn slice_port(slice: &EndpointSlice, name: &str, protocol: &str) -> Option<u16> {
     slice
         .ports
         .iter()
@@ -386,7 +431,7 @@ fn slice_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
                 && port
                     .protocol
                     .as_deref()
-                    .is_none_or(|protocol| protocol == "TCP")
+                    .is_none_or(|found| found == protocol)
         })
         .and_then(|port| port.port)
 }

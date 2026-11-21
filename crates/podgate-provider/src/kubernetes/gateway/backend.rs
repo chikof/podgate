@@ -3,7 +3,7 @@
 
 use super::types::{BackendRef, GROUP, ReferenceGrant};
 use super::{Kind, Rejection, reject};
-use crate::kubernetes::endpoints::{PortRef, ServiceIndex};
+use crate::kubernetes::endpoints::{PortRef, ServiceIndex, Wire};
 use crate::kubernetes::tenancy::Tenancy;
 
 /// The `ReferenceGrant`s of the cluster, by the namespace they sit in (the target's).
@@ -128,6 +128,33 @@ impl Backends<'_> {
         backend: &BackendRef,
         grpc: bool,
     ) -> Result<Resolved, Rejection> {
+        self.resolve_with(kind, namespace, backend, Wire::Http, grpc)
+    }
+
+    /// [`Self::resolve`] for the backend of a `TCPRoute`, `TLSRoute` or `UDPRoute`: the servers
+    /// are plain `address:port` entries of a Service port of `wire`'s protocol.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resolve`].
+    pub fn resolve_stream(
+        &self,
+        kind: Kind,
+        namespace: &str,
+        backend: &BackendRef,
+        wire: Wire,
+    ) -> Result<Resolved, Rejection> {
+        self.resolve_with(kind, namespace, backend, wire, false)
+    }
+
+    fn resolve_with(
+        &self,
+        kind: Kind,
+        namespace: &str,
+        backend: &BackendRef,
+        wire: Wire,
+        grpc: bool,
+    ) -> Result<Resolved, Rejection> {
         let group = backend.group.as_deref().unwrap_or("");
         let target = backend.kind.as_deref().unwrap_or("Service");
         if !group.is_empty() || target != "Service" {
@@ -174,7 +201,12 @@ impl Backends<'_> {
         .map_err(|why| reject("RefNotPermitted", why))?;
         let mut servers = self
             .index
-            .servers(service_namespace, &backend.name, &PortRef::Number(port))
+            .addresses(
+                service_namespace,
+                &backend.name,
+                &PortRef::Number(port),
+                wire,
+            )
             .map_err(|why| reject("BackendNotFound", why))?;
         if grpc {
             for server in &mut servers {

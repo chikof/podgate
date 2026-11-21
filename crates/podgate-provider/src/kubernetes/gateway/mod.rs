@@ -1,4 +1,5 @@
-//! The Gateway API half of the Kubernetes source: `Gateway`, `HTTPRoute` and `GRPCRoute`.
+//! The Gateway API half of the Kubernetes source: `Gateway`, `HTTPRoute`, `GRPCRoute` and the
+//! experimental `TLSRoute`, `TCPRoute` and `UDPRoute`.
 //!
 //! ```toml
 //! [[source]]
@@ -14,6 +15,8 @@
 //! - [`types`]: the objects, as serde structs of the fields the translation reads.
 //! - [`listener`]: which routes attach to which listeners (`allowedRoutes`, host names,
 //!   entry points) and the certificates of `HTTPS` listeners.
+//! - [`tlsroute`], [`tcproute`], [`udproute`], [`l4`]: the experimental L4 routes, as `tcp` and
+//!   `udp` routers (`docs/ref/provider-gateway-l4.md`).
 //! - [`httproute`], [`grpcroute`]: a rule's matches as podgate matcher leaves.
 //! - [`filters`]: filters as middlewares and mirrors.
 //! - [`backend`]: `backendRefs` as services, with `ReferenceGrant`s and the tenant rule.
@@ -30,11 +33,15 @@ pub mod backend;
 pub mod filters;
 pub mod grpcroute;
 pub mod httproute;
+pub mod l4;
 pub mod listener;
 pub mod precedence;
 pub mod route;
 pub mod status;
+pub mod tcproute;
+pub mod tlsroute;
 pub mod types;
+pub mod udproute;
 pub mod writer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,9 +56,12 @@ use tracing::debug;
 use self::backend::{Backends, Grants};
 use self::listener::{Attachment, Certs, GatewayReport, Gateways, ParentReport, RouteInfo};
 use self::precedence::{Candidate, priorities};
+use self::tcproute::TcpRoute;
+use self::tlsroute::TlsRoute;
 use self::types::{
     CONTROLLER, Gateway, GatewayClass, GrpcRoute, HttpRoute, Namespace, ReferenceGrant,
 };
+use self::udproute::UdpRoute;
 use super::client::{ApiClient, Event, ObjectMeta, Query, Resource, Store};
 use super::ingress::{Cluster, REVISION};
 use super::{Tagged, track, watch};
@@ -68,6 +78,12 @@ pub enum Kind {
     Http,
     /// A `GRPCRoute`.
     Grpc,
+    /// A `TLSRoute`.
+    Tls,
+    /// A `TCPRoute`.
+    Tcp,
+    /// A `UDPRoute`.
+    Udp,
 }
 
 impl Kind {
@@ -77,6 +93,9 @@ impl Kind {
         match self {
             Self::Http => "HTTPRoute",
             Self::Grpc => "GRPCRoute",
+            Self::Tls => "TLSRoute",
+            Self::Tcp => "TCPRoute",
+            Self::Udp => "UDPRoute",
         }
     }
 
@@ -86,6 +105,9 @@ impl Kind {
         match self {
             Self::Http => "httproute_",
             Self::Grpc => "grpcroute_",
+            Self::Tls => "tlsroute_",
+            Self::Tcp => "tcproute_",
+            Self::Udp => "udproute_",
         }
     }
 }
@@ -176,6 +198,12 @@ pub enum Change {
     Grpc(Event<GrpcRoute>),
     /// A `ReferenceGrant`.
     Grant(Event<ReferenceGrant>),
+    /// A `TLSRoute`.
+    Tls(Event<TlsRoute>),
+    /// A `TCPRoute`.
+    Tcp(Event<TcpRoute>),
+    /// A `UDPRoute`.
+    Udp(Event<UdpRoute>),
 }
 
 /// Everything the source has read of the Gateway API: one store per kind, and per namespace
@@ -187,6 +215,9 @@ pub struct Cache {
     http: Vec<Store<HttpRoute>>,
     grpc: Vec<Store<GrpcRoute>>,
     grants: Vec<Store<ReferenceGrant>>,
+    tls: Vec<Store<TlsRoute>>,
+    tcp: Vec<Store<TcpRoute>>,
+    udp: Vec<Store<UdpRoute>>,
 }
 
 fn stores<R: Resource>(scopes: usize) -> Vec<Store<R>> {
@@ -204,6 +235,9 @@ impl Cache {
             http: stores(scopes),
             grpc: stores(scopes),
             grants: stores(scopes),
+            tls: stores(scopes),
+            tcp: stores(scopes),
+            udp: stores(scopes),
         }
     }
 
@@ -221,6 +255,9 @@ impl Cache {
             Change::Http(event) => track(outages, &mut self.http[scope], scope, event),
             Change::Grpc(event) => track(outages, &mut self.grpc[scope], scope, event),
             Change::Grant(event) => track(outages, &mut self.grants[scope], scope, event),
+            Change::Tls(event) => track(outages, &mut self.tls[scope], scope, event),
+            Change::Tcp(event) => track(outages, &mut self.tcp[scope], scope, event),
+            Change::Udp(event) => track(outages, &mut self.udp[scope], scope, event),
         }
     }
 
@@ -233,6 +270,9 @@ impl Cache {
             && self.http.iter().all(Store::is_synced)
             && self.grpc.iter().all(Store::is_synced)
             && self.grants.iter().all(Store::is_synced)
+            && self.tls.iter().all(Store::is_synced)
+            && self.tcp.iter().all(Store::is_synced)
+            && self.udp.iter().all(Store::is_synced)
     }
 }
 
@@ -267,13 +307,22 @@ pub(super) fn watch_all(
         watch::<ReferenceGrant>(tasks, client, query(), scope, tx, |event| {
             super::Change::Gateway(Change::Grant(event))
         });
+        l4::watch_optional::<TlsRoute>(tasks, client, query(), scope, tx, |event| {
+            super::Change::Gateway(Change::Tls(event))
+        });
+        l4::watch_optional::<TcpRoute>(tasks, client, query(), scope, tx, |event| {
+            super::Change::Gateway(Change::Tcp(event))
+        });
+        l4::watch_optional::<UdpRoute>(tasks, client, query(), scope, tx, |event| {
+            super::Change::Gateway(Change::Udp(event))
+        });
     }
 }
 
 /// What became of one route that names a Gateway of ours.
 #[derive(Debug)]
 pub struct RouteReport {
-    /// `HTTPRoute` or `GRPCRoute`.
+    /// The kind of the route.
     pub kind: Kind,
     /// `namespace/name`.
     pub key: String,
@@ -335,7 +384,11 @@ struct Pending {
     built: Vec<route::Built>,
     middlewares: Vec<Declared>,
     services: BTreeMap<Box<str>, route::Service>,
+    l4: Option<l4::Payload>,
 }
+
+/// What turns a route into a draft: its namespace, the listeners it attached to and the backends.
+type Build<'a> = dyn Fn(&str, &[Attachment], &Backends<'_>) -> Result<route::Draft, Rejection> + 'a;
 
 fn creation(meta: &ObjectMeta) -> u64 {
     meta.creation_timestamp
@@ -394,111 +447,109 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
     };
 
     let mut pending: Vec<Pending> = Vec::new();
-    let mut handle =
-        |route: &RouteMeta<'_>, rules: &dyn Fn() -> Result<Vec<httproute::Rule>, Rejection>| {
-            let namespace = route.meta.namespace();
-            let key = route.meta.key();
-            let claim = cluster.tenancy.claim(namespace, None);
-            let parsed: Result<Vec<HostPattern>, Rejection> = route
-                .hostnames
-                .iter()
-                .map(|host| {
-                    HostPattern::parse(host).map_err(|_| {
-                        reject(
-                            "UnsupportedValue",
-                            format!("hostname {host:?} is not valid"),
-                        )
-                    })
-                })
-                .collect();
-            let attached = gateways.attach(&RouteInfo {
-                kind: route.kind,
-                namespace,
-                parent_refs: route.parent_refs,
-                hostnames: parsed.as_deref().unwrap_or(&[]),
-                claim: &claim,
-            });
-            if !attached.ours {
-                return;
-            }
-            let result = (|| -> Result<Pending, Rejection> {
-                parsed?;
-                if attached.attachments.is_empty() {
-                    let first = attached.parents.iter().find(|parent| !parent.accepted);
-                    return Err(first.map_or_else(
-                        || reject("NoMatchingParent", "no parent reference names a listener"),
-                        |parent| reject(parent.reason, parent.message.clone()),
-                    ));
-                }
-                let rules = rules()?;
-                let groups = route::groups(&attached.attachments);
-                let draft = route::translate(route.kind, namespace, &rules, &groups, &backends)?;
-                let routers: Vec<Router> = draft
-                    .routers
-                    .iter()
-                    .map(|built| built.router.clone())
-                    .collect();
-                let vetted = cluster.tenancy.vet(&claim, &routers).map_err(|problem| {
+    let mut handle = |route: &RouteMeta<'_>, build: &Build| {
+        let namespace = route.meta.namespace();
+        let key = route.meta.key();
+        let claim = cluster.tenancy.claim(namespace, None);
+        let parsed: Result<Vec<HostPattern>, Rejection> = route
+            .hostnames
+            .iter()
+            .map(|host| {
+                HostPattern::parse(host).map_err(|_| {
                     reject(
-                        "NotAllowedByListeners",
-                        format!("{}: {}", problem.code, problem.message),
+                        "UnsupportedValue",
+                        format!("hostname {host:?} is not valid"),
                     )
-                })?;
-                let mut built = Vec::new();
-                let mut left_out = Vec::new();
-                for (item, refused) in draft.routers.into_iter().zip(vetted.refused) {
-                    match refused {
-                        Some(problem) => left_out.push(format!(
-                            "router {} left out: {}: {}",
-                            item.router.name, problem.code, problem.message
-                        )),
-                        None => built.push(item),
-                    }
-                }
-                if built.is_empty() {
-                    return Err(reject("NotAllowedByListeners", left_out.join("; ")));
-                }
-                for note in left_out {
-                    out.notes.push(format!("{} {key}: {note}", route.kind));
-                }
-                Ok(Pending {
-                    kind: route.kind,
-                    namespace: namespace.to_owned(),
-                    name: route.meta.name.clone(),
-                    first_seen: creation(route.meta),
-                    claim: claim.clone(),
-                    attachments: attached.attachments.clone(),
-                    built,
-                    middlewares: draft.middlewares,
-                    services: draft.services,
                 })
-            })();
-            let rejected = match result {
-                Ok(done) => {
-                    pending.push(done);
-                    None
+            })
+            .collect();
+        let attached = gateways.attach(&RouteInfo {
+            kind: route.kind,
+            namespace,
+            parent_refs: route.parent_refs,
+            hostnames: parsed.as_deref().unwrap_or(&[]),
+            claim: &claim,
+        });
+        if !attached.ours {
+            return;
+        }
+        let result = (|| -> Result<Pending, Rejection> {
+            parsed?;
+            if attached.attachments.is_empty() {
+                let first = attached.parents.iter().find(|parent| !parent.accepted);
+                return Err(first.map_or_else(
+                    || reject("NoMatchingParent", "no parent reference names a listener"),
+                    |parent| reject(parent.reason, parent.message.clone()),
+                ));
+            }
+            let draft = build(namespace, &attached.attachments, &backends)?;
+            let routers: Vec<Router> = draft
+                .routers
+                .iter()
+                .map(|built| built.router.clone())
+                .collect();
+            let vetted = cluster.tenancy.vet(&claim, &routers).map_err(|problem| {
+                reject(
+                    "NotAllowedByListeners",
+                    format!("{}: {}", problem.code, problem.message),
+                )
+            })?;
+            let mut built = Vec::new();
+            let mut left_out = Vec::new();
+            for (item, refused) in draft.routers.into_iter().zip(vetted.refused) {
+                match refused {
+                    Some(problem) => left_out.push(format!(
+                        "router {} left out: {}: {}",
+                        item.router.name, problem.code, problem.message
+                    )),
+                    None => built.push(item),
                 }
-                Err(rejection) => {
-                    out.notes.push(format!(
-                        "{} {key} rejected: {}: {}",
-                        route.kind, rejection.reason, rejection.message
-                    ));
-                    Some(rejection)
-                }
-            };
-            out.routes.push(RouteReport {
+            }
+            if built.is_empty() {
+                return Err(reject("NotAllowedByListeners", left_out.join("; ")));
+            }
+            for note in left_out {
+                out.notes.push(format!("{} {key}: {note}", route.kind));
+            }
+            Ok(Pending {
                 kind: route.kind,
-                key,
-                generation: route.meta.generation,
-                parents: attached.parents,
-                attachments: attached
-                    .attachments
-                    .iter()
-                    .map(|attachment| (attachment.gateway.clone(), attachment.listener.clone()))
-                    .collect(),
-                rejected,
-            });
+                namespace: namespace.to_owned(),
+                name: route.meta.name.clone(),
+                first_seen: creation(route.meta),
+                claim: claim.clone(),
+                attachments: attached.attachments.clone(),
+                built,
+                middlewares: draft.middlewares,
+                services: draft.services,
+                l4: draft.l4,
+            })
+        })();
+        let rejected = match result {
+            Ok(done) => {
+                pending.push(done);
+                None
+            }
+            Err(rejection) => {
+                out.notes.push(format!(
+                    "{} {key} rejected: {}: {}",
+                    route.kind, rejection.reason, rejection.message
+                ));
+                Some(rejection)
+            }
         };
+        out.routes.push(RouteReport {
+            kind: route.kind,
+            key,
+            generation: route.meta.generation,
+            parents: attached.parents,
+            attachments: attached
+                .attachments
+                .iter()
+                .map(|attachment| (attachment.gateway.clone(), attachment.listener.clone()))
+                .collect(),
+            rejected,
+        });
+    };
     for route in cache.http.iter().flat_map(Store::values) {
         handle(
             &RouteMeta {
@@ -507,7 +558,11 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
                 parent_refs: &route.spec.parent_refs,
                 hostnames: &route.spec.hostnames,
             },
-            &|| httproute::rules(route),
+            &|namespace, attachments, backends| {
+                let rules = httproute::rules(route)?;
+                let groups = route::groups(attachments);
+                route::translate(Kind::Http, namespace, &rules, &groups, backends)
+            },
         );
     }
     for route in cache.grpc.iter().flat_map(Store::values) {
@@ -518,13 +573,75 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
                 parent_refs: &route.spec.parent_refs,
                 hostnames: &route.spec.hostnames,
             },
-            &|| grpcroute::rules(route),
+            &|namespace, attachments, backends| {
+                let rules = grpcroute::rules(route)?;
+                let groups = route::groups(attachments);
+                route::translate(Kind::Grpc, namespace, &rules, &groups, backends)
+            },
         );
+    }
+    for route in cache.tls.iter().flat_map(Store::values) {
+        handle(
+            &RouteMeta {
+                kind: Kind::Tls,
+                meta: &route.metadata,
+                parent_refs: &route.spec.parent_refs,
+                hostnames: &route.spec.hostnames,
+            },
+            &|namespace, attachments, backends| {
+                tlsroute::draft(route, namespace, attachments, backends)
+            },
+        );
+    }
+    for route in cache.tcp.iter().flat_map(Store::values) {
+        handle(
+            &RouteMeta {
+                kind: Kind::Tcp,
+                meta: &route.metadata,
+                parent_refs: &route.spec.parent_refs,
+                hostnames: &[],
+            },
+            &|namespace, attachments, backends| {
+                tcproute::draft(route, namespace, attachments, backends)
+            },
+        );
+    }
+    for route in cache.udp.iter().flat_map(Store::values) {
+        handle(
+            &RouteMeta {
+                kind: Kind::Udp,
+                meta: &route.metadata,
+                parent_refs: &route.spec.parent_refs,
+                hostnames: &[],
+            },
+            &|namespace, attachments, backends| {
+                udproute::draft(route, namespace, attachments, backends)
+            },
+        );
+    }
+
+    // A second TCPRoute or UDPRoute on an entry point, or a second TLSRoute for a server name,
+    // loses to the oldest.
+    for (index, why) in l4::conflicts(&pending).into_iter().rev() {
+        let lost = pending.remove(index);
+        let key = format!("{}/{}", lost.namespace, lost.name);
+        out.notes.push(format!(
+            "{} {key} rejected: {}: {}",
+            lost.kind, why.reason, why.message
+        ));
+        if let Some(report) = out
+            .routes
+            .iter_mut()
+            .find(|report| report.kind == lost.kind && report.key == key)
+        {
+            report.rejected = Some(why);
+        }
     }
 
     // Priorities: one order per tenant over all of its routers.
     let candidates: Vec<Candidate> = pending
         .iter()
+        .filter(|route| route.l4.is_none())
         .flat_map(|route| {
             route.built.iter().map(|built| Candidate {
                 tenant: route.claim.mapped.clone(),
@@ -553,8 +670,11 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
         .collect();
     let mut served: BTreeMap<(String, Box<str>), BTreeSet<HostPattern>> = BTreeMap::new();
     for route in &mut pending {
+        let ranked = route.l4.is_none();
         for built in &mut route.built {
-            built.router.priority = priorities.next();
+            if ranked {
+                built.router.priority = priorities.next();
+            }
         }
         for attachment in &route.attachments {
             if gateway_tenants.get(&attachment.gateway) == Some(&route.claim.mapped)
@@ -655,7 +775,14 @@ fn app(source: &str, route: Pending) -> Result<SourceApp, String> {
         .filter(|(name, _)| used.contains(&***name))
         .map(|(_, service)| &service.declared)
         .collect();
-    let app: App = serde_json::from_value(json!({
+    // The routers of an L4 route are stand-ins that carried the tenant rules; the daemon's own
+    // are in the `tcp` or `udp` section.
+    let l4 = route.l4.as_ref().map(|payload| {
+        let kept: BTreeSet<&str> = routers.iter().map(|router| &*router.name).collect();
+        payload.section(&kept)
+    });
+    let routers = if l4.is_some() { Vec::new() } else { routers };
+    let mut value = json!({
         // The core replaces `tenant` and `declared_by`; they only have to exist.
         "id": format!("{}{}_{}", route.kind.id_prefix(), route.namespace, route.name),
         "tenant": "default",
@@ -665,8 +792,12 @@ fn app(source: &str, route: Pending) -> Result<SourceApp, String> {
         "middlewares": middlewares,
         "services": services,
         "revisions": [{ "id": REVISION, "state": "serving", "weight": 1 }],
-    }))
-    .map_err(|err: serde_json::Error| format!("{} {key}: {err}", route.kind))?;
+    });
+    if let Some((section, body)) = l4.flatten() {
+        value[section] = body;
+    }
+    let app: App = serde_json::from_value(value)
+        .map_err(|err: serde_json::Error| format!("{} {key}: {err}", route.kind))?;
     Ok(SourceApp {
         origin: Origin {
             source: source.into(),

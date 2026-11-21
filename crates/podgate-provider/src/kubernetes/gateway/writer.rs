@@ -24,7 +24,10 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 
 use super::status::{Target, Write};
+use super::tcproute::TcpRoute;
+use super::tlsroute::TlsRoute;
 use super::types::{Gateway, GatewayClass, GrpcRoute, HttpRoute};
+use super::udproute::UdpRoute;
 use crate::kubernetes::client::{ApiClient, ClientError};
 use crate::kubernetes::lease::Leader;
 
@@ -76,6 +79,18 @@ async fn patch(client: &ApiClient, write: &Write) -> Result<(), ClientError> {
             .map(drop),
         Target::Grpc(_) => client
             .merge_patch::<GrpcRoute>(namespace, name, Some("status"), body)
+            .await
+            .map(drop),
+        Target::Tls(_) => client
+            .merge_patch::<TlsRoute>(namespace, name, Some("status"), body)
+            .await
+            .map(drop),
+        Target::Tcp(_) => client
+            .merge_patch::<TcpRoute>(namespace, name, Some("status"), body)
+            .await
+            .map(drop),
+        Target::Udp(_) => client
+            .merge_patch::<UdpRoute>(namespace, name, Some("status"), body)
             .await
             .map(drop),
     }

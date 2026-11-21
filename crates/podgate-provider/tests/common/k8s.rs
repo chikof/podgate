@@ -113,6 +113,7 @@ struct Inner {
     gone_as: GoneAs,
     tokens: Vec<String>,
     requests: Vec<Seen>,
+    absent: Vec<String>,
 }
 
 struct Shared {
@@ -191,6 +192,7 @@ impl FakeApi {
                 gone_as: GoneAs::Frame,
                 tokens: Vec::new(),
                 requests: Vec::new(),
+                absent: Vec::new(),
             }),
             news,
         });
@@ -341,6 +343,17 @@ impl FakeApi {
     pub fn fail(&self, failure: Option<Failure>) {
         lock(&self.shared).failure = failure;
         self.drop_watches();
+    }
+
+    /// Makes `plural` a kind whose CRD is not installed: its lists and watches answer `404`, as
+    /// the real API server does.
+    pub fn uninstall(&self, plural: &str) {
+        lock(&self.shared).absent.push(plural.to_owned());
+    }
+
+    /// Installs the CRD of `plural` again.
+    pub fn install(&self, plural: &str) {
+        lock(&self.shared).absent.retain(|absent| absent != plural);
     }
 
     /// Every request seen so far.
@@ -654,6 +667,15 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, shared: Arc<Sha
     };
     let namespace = route.namespace.map(str::to_owned);
     let plural = route.plural.to_owned();
+    if lock(&shared).absent.contains(&plural) && seen.method == "GET" && route.name.is_none() {
+        respond(
+            &mut stream,
+            404,
+            &status_body(404, "the server could not find the requested resource"),
+        )
+        .await;
+        return;
+    }
     match (seen.method.as_str(), route.name) {
         ("GET", None) if seen.is_watch() => {
             watch_stream(stream, shared, seen, namespace, plural, gone_as).await;

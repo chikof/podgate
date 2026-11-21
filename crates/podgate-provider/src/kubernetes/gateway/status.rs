@@ -70,6 +70,12 @@ pub enum Target {
     Http(String),
     /// A `GRPCRoute`, by `namespace/name`.
     Grpc(String),
+    /// A `TLSRoute`, by `namespace/name`.
+    Tls(String),
+    /// A `TCPRoute`, by `namespace/name`.
+    Tcp(String),
+    /// A `UDPRoute`, by `namespace/name`.
+    Udp(String),
 }
 
 impl Target {
@@ -77,7 +83,13 @@ impl Target {
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Self::Class(key) | Self::Gateway(key) | Self::Http(key) | Self::Grpc(key) => key,
+            Self::Class(key)
+            | Self::Gateway(key)
+            | Self::Http(key)
+            | Self::Grpc(key)
+            | Self::Tls(key)
+            | Self::Tcp(key)
+            | Self::Udp(key) => key,
         }
     }
 
@@ -89,6 +101,9 @@ impl Target {
             Self::Gateway(_) => "Gateway",
             Self::Http(_) => "HTTPRoute",
             Self::Grpc(_) => "GRPCRoute",
+            Self::Tls(_) => "TLSRoute",
+            Self::Tcp(_) => "TCPRoute",
+            Self::Udp(_) => "UDPRoute",
         }
     }
 
@@ -602,6 +617,14 @@ pub fn plan(
             writes.push(Write {
                 target: Target::Grpc(route.metadata.key()),
                 body: patch(&route.metadata, &status),
+            });
+        }
+    }
+    for (kind, meta, status) in cache.l4_routes() {
+        if let Some(status) = route_status(kind, meta, status) {
+            writes.push(Write {
+                target: Target::l4(kind, meta.key()),
+                body: patch(meta, &status),
             });
         }
     }
