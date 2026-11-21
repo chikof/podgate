@@ -26,6 +26,6 @@ mod parse;
 mod regexp;
 mod rule;
 
-pub use error::RuleError;
+pub use error::{RuleError, RuleErrorKind};
 pub use regexp::check_pattern;
 pub use rule::{Dialect, Rule, parse};

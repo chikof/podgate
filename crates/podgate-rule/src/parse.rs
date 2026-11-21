@@ -36,7 +36,7 @@ impl Parser {
         let node = self.or()?;
         match self.tokens.get(self.next) {
             None => Ok(node),
-            Some((token, at)) => Err(RuleError::new(
+            Some((token, at)) => Err(RuleError::invalid(
                 *at,
                 format!(
                     "expected `&&`, `||` or the end of the rule, found {}",
@@ -88,7 +88,7 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Node, RuleError> {
         if self.depth >= MAX_DEPTH {
-            return Err(RuleError::new(self.at(), "the rule nests too deeply"));
+            return Err(RuleError::invalid(self.at(), "the rule nests too deeply"));
         }
         self.depth += 1;
         let node = self.operand();
@@ -109,13 +109,13 @@ impl Parser {
                 if self.eat(&Token::RParen) {
                     Ok(node)
                 } else {
-                    Err(RuleError::new(self.at(), "expected `)`"))
+                    Err(RuleError::invalid(self.at(), "expected `)`"))
                 }
             }
             Some((Token::Ident(name), _)) => {
                 self.next += 1;
                 if !self.eat(&Token::LParen) {
-                    return Err(RuleError::new(
+                    return Err(RuleError::invalid(
                         self.at(),
                         format!("expected `(` after the function name {name}"),
                     ));
@@ -123,11 +123,11 @@ impl Parser {
                 let args = self.arguments()?;
                 call(self.dialect, &name, args, at, &mut self.regexes)
             }
-            Some((token, at)) => Err(RuleError::new(
+            Some((token, at)) => Err(RuleError::invalid(
                 at,
                 format!("expected a function, `!` or `(`, found {}", show(&token)),
             )),
-            None => Err(RuleError::new(
+            None => Err(RuleError::invalid(
                 at,
                 "the rule ends where an operand is expected",
             )),
@@ -146,20 +146,23 @@ impl Parser {
                     args.push(text);
                 }
                 Some((token, at)) => {
-                    return Err(RuleError::new(
+                    return Err(RuleError::invalid(
                         at,
                         format!("expected a quoted argument, found {}", show(&token)),
                     ));
                 }
                 None => {
-                    return Err(RuleError::new(self.at(), "the arguments are never closed"));
+                    return Err(RuleError::invalid(
+                        self.at(),
+                        "the arguments are never closed",
+                    ));
                 }
             }
             if self.eat(&Token::RParen) {
                 return Ok(args);
             }
             if !self.eat(&Token::Comma) {
-                return Err(RuleError::new(self.at(), "expected `,` or `)`"));
+                return Err(RuleError::invalid(self.at(), "expected `,` or `)`"));
             }
         }
     }

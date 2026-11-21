@@ -22,7 +22,7 @@ pub(crate) enum Token {
 /// The tokens of `rule`, each with the byte offset where it starts.
 pub(crate) fn lex(rule: &str) -> Result<Vec<(Token, usize)>, RuleError> {
     if rule.len() > MAX_RULE_BYTES {
-        return Err(RuleError::new(
+        return Err(RuleError::invalid(
             0,
             format!("the rule is longer than {MAX_RULE_BYTES} bytes"),
         ));
@@ -37,7 +37,7 @@ pub(crate) fn lex(rule: &str) -> Result<Vec<(Token, usize)>, RuleError> {
             ',' => Token::Comma,
             '&' | '|' => {
                 if chars.next_if(|&(_, next)| next == ch).is_none() {
-                    return Err(RuleError::new(
+                    return Err(RuleError::invalid(
                         at,
                         format!("`{ch}` is not an operator, write `{ch}{ch}`"),
                     ));
@@ -46,14 +46,17 @@ pub(crate) fn lex(rule: &str) -> Result<Vec<(Token, usize)>, RuleError> {
             }
             '!' => {
                 if chars.peek().is_some_and(|&(_, next)| next == '=') {
-                    return Err(RuleError::new(at, "`!=` is not an operator"));
+                    return Err(RuleError::invalid(at, "`!=` is not an operator"));
                 }
                 Token::Not
             }
             '`' => {
                 let rest = &rule[at + 1..];
                 let Some(end) = rest.find('`') else {
-                    return Err(RuleError::new(at, "this backtick string is never closed"));
+                    return Err(RuleError::invalid(
+                        at,
+                        "this backtick string is never closed",
+                    ));
                 };
                 let text = rest[..end].to_owned();
                 for _ in 0..text.chars().count() + 1 {
@@ -72,7 +75,7 @@ pub(crate) fn lex(rule: &str) -> Result<Vec<(Token, usize)>, RuleError> {
                 Token::Ident(name)
             }
             _ => {
-                return Err(RuleError::new(
+                return Err(RuleError::invalid(
                     at,
                     format!("unexpected character {ch:?} in the rule"),
                 ));
@@ -100,7 +103,7 @@ fn quoted(
                 Some((_, 't')) => text.push('\t'),
                 Some((_, 'r')) => text.push('\r'),
                 Some((_, other)) => {
-                    return Err(RuleError::new(
+                    return Err(RuleError::invalid(
                         at,
                         format!("the escape `\\{other}` is not supported, use a backtick string"),
                     ));
@@ -108,7 +111,7 @@ fn quoted(
                 None => break,
             },
             '\n' => {
-                return Err(RuleError::new(
+                return Err(RuleError::invalid(
                     at,
                     "a double-quoted string cannot contain a line break",
                 ));
@@ -116,7 +119,7 @@ fn quoted(
             other => text.push(other),
         }
     }
-    Err(RuleError::new(start, "this string is never closed"))
+    Err(RuleError::invalid(start, "this string is never closed"))
 }
 
 #[cfg(test)]

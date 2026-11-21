@@ -32,9 +32,12 @@ pub(crate) fn call(
     regexes: &mut Vec<Box<str>>,
 ) -> Result<Node, RuleError> {
     let fail = |message: String| RuleError::new(at, message);
+    let malformed = |message: String| RuleError::invalid(at, message);
     let function = name.to_ascii_lowercase();
     if args.len() > MAX_ARGS {
-        return Err(fail(format!("{name} has more than {MAX_ARGS} arguments")));
+        return Err(malformed(format!(
+            "{name} has more than {MAX_ARGS} arguments"
+        )));
     }
     if V2_FUNCTIONS.contains(&function.as_str()) {
         return Err(fail(format!(
@@ -44,7 +47,7 @@ pub(crate) fn call(
     let http = dialect == Dialect::Http;
     let one_or_more = |what: &str| -> Result<(), RuleError> {
         if args.is_empty() {
-            Err(fail(format!("{what} needs at least one argument")))
+            Err(malformed(format!("{what} needs at least one argument")))
         } else {
             Ok(())
         }
@@ -129,13 +132,13 @@ pub(crate) fn call(
                 })?,
                 [key, value] => (key.as_str(), value.as_str()),
                 _ => {
-                    return Err(fail(format!(
+                    return Err(malformed(format!(
                         "{name} takes `name=value` or a name and a value"
                     )));
                 }
             };
             if key.is_empty() {
-                return Err(fail(format!("{name}: the parameter name is empty")));
+                return Err(malformed(format!("{name}: the parameter name is empty")));
             }
             if regex {
                 regexp::check(value, at, regexes)?;
@@ -174,15 +177,15 @@ pub(crate) fn call(
         "alpn" if !http => {
             one_or_more(name)?;
             if args.iter().any(String::is_empty) {
-                return Err(fail("ALPN: a protocol name is empty".to_owned()));
+                return Err(malformed("ALPN: a protocol name is empty".to_owned()));
             }
             Ok(Node::leaf("alpn", one_or_list(args)))
         }
         "host" | "hostregexp" | "path" | "pathprefix" | "pathregexp" | "method" | "header"
-        | "headerregexp" | "query" | "queryregexp" => Err(fail(format!(
+        | "headerregexp" | "query" | "queryregexp" => Err(malformed(format!(
             "{name} is an HTTP rule function and this is a TCP rule"
         ))),
-        "hostsni" | "hostsniregexp" | "alpn" => Err(fail(format!(
+        "hostsni" | "hostsniregexp" | "alpn" => Err(malformed(format!(
             "{name} is a TCP rule function and this is an HTTP rule"
         ))),
         _ => Err(fail(format!("unknown function {name}"))),
@@ -209,7 +212,7 @@ fn exactly<'a, const N: usize>(
     at: usize,
 ) -> Result<[&'a String; N], RuleError> {
     <[&String; N]>::try_from(args.iter().collect::<Vec<_>>()).map_err(|_| {
-        RuleError::new(
+        RuleError::invalid(
             at,
             format!("{name} takes {N} argument(s), not {}", args.len()),
         )

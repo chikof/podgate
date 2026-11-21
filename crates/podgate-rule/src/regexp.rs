@@ -12,7 +12,7 @@ pub(crate) fn check(
     regexes: &mut Vec<Box<str>>,
 ) -> Result<(), RuleError> {
     check_pattern(pattern)
-        .map_err(|why| RuleError::new(at, format!("regular expression {pattern:?}: {why}")))?;
+        .map_err(|why| RuleError::invalid(at, format!("regular expression {pattern:?}: {why}")))?;
     regexes.push(pattern.into());
     Ok(())
 }
