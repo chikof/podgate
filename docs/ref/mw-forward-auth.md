@@ -18,13 +18,13 @@ Delegates the decision to an auth service of the same app: podgate asks it first
 
 | Field | Meaning |
 |---|---|
-| `address` | Required. An absolute `http://` or `https://` URL whose host is an IP literal (a host name is `dns_upstream_not_built` until the resolver, lands). A port defaults to 80 or 443. Credentials in the URL, a relative address or anything else that is not an absolute URL is `invalid_middleware`. The path and query are sent as written. Fixed configuration: never derived from the request. |
+| `address` | Required. An absolute `http://` or `https://` URL whose host is an IP literal (a host name is `dns_upstream_not_built` until the resolver, lands). A port defaults to 80 or 443. Credentials in the URL, `h2c://` (the call is written as HTTP/1.1, which an h2c server cannot answer), a relative address or anything else that is not an absolute `http(s)` URL is `invalid_middleware`. The path and query are sent as written. Fixed configuration: never derived from the request. |
 | `trust_forward_header` | Default `false`. When `true` and the entry point trusts the peer (`forwarded_headers`, `docs/ref/client-ip.md`), `X-Forwarded-For` carries the whole chain the peer sent, then the peer. Otherwise it carries the resolved client. A raw `X-Forwarded-*` of the client is never copied. |
 | `request_headers` | Allow list of the client's request headers sent to the auth service, case-insensitive, 1 to 64 names. Default: every header except the reserved ones below. |
 | `response_headers` | Names copied from a `2xx` answer into the request that goes on, case-insensitive, at most 64. Default none (the middleware then only gates). |
 | `response_headers_regex` | A regular expression (at most 256 bytes, case-insensitive, matched unanchored against the lower-case header name) of more names to copy. Anchor it: `^x-auth-`. |
 | `timeout_secs` | One bound for connecting, sending and reading the whole answer. Default 5, 1 to 3600; a call also never runs past the process's `REQUEST_TIMEOUT_SECS`. |
-| `transport` | Name of a `servers_transport` of the app: CA, SNI and client certificate of an `https://` address, the same as for a service. A transport with TLS options on an `http://` address is `invalid_middleware`; an undeclared name is `unknown_transport`. |
+| `transport` | Name of a `servers_transport` of the app: CA, SNI and client certificate of an `https://` address, the same as for a service. The call is always HTTP/1.1 (ALPN `http/1.1`), so its `http2` and pool settings do not apply. A transport with TLS options on an `http://` address is `invalid_middleware`; an undeclared name is `unknown_transport`. |
 | `max_response_bytes` | The cap of the answer's body. Default 65536, at most 1048576. |
 | `max_concurrent` | Calls in flight at once for this middleware. Default 64, at most 4096. |
 

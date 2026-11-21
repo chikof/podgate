@@ -232,6 +232,11 @@ fn parse_address(address: &str) -> Result<(Server, Box<str>, Box<str>), Invalid>
     let tls = match uri.scheme_str() {
         Some("http") => false,
         Some("https") => true,
+        Some("h2c") => {
+            return Err(invalid(
+                "address is h2c://: the call is written as HTTP/1.1, which an h2c server cannot answer",
+            ));
+        }
         _ => return Err(bad()),
     };
     let authority = uri.authority().ok_or_else(bad)?;
@@ -280,6 +285,7 @@ fn parse_address(address: &str) -> Result<(Server, Box<str>, Box<str>), Invalid>
         url: address.into(),
         addr: SocketAddr::new(ip, port),
         tls,
+        h2c: false,
         weight: 1,
         state: Arc::default(),
     };
