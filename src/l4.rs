@@ -1,22 +1,23 @@
 //! TCP and UDP routing (layer 4). The model is in [`podgate_model::Tcp`] and
 //! [`podgate_model::Udp`]. Pingora has no UDP support and no L4 router, so these run as podgate's
-//! own services on tokio.
+//! own services: TCP as a Pingora `ServerApp` on a listening service, UDP on tokio.
 //!
 //! The compile step is shared: `compile` turns an app's L4 declarations into a [`Compiled`]
 //! that the app carries in the routing table, and `detect` finds the conflicts between apps.
 //! Each protocol owns its own module and adds one field to [`Compiled`] and one call to
 //! `compile` and `detect`:
 //!
+//! - [`tcp`]: TCP routers and services. Built; TCP middlewares and TLS on TCP
+//!   routers are not, and [`reject`] refuses a snapshot that carries middlewares with
+//!   `l4_not_built`, so nothing is silently left unrouted.
 //! - [`udp`]: UDP routers and services. Built.
-//! - `tcp`: TCP routers and services. Not built; [`reject`] refuses a snapshot that carries any
-//!   with `l4_not_built`, so nothing is silently left unrouted.
 //!
 //! What every L4 protocol needs is here: `reserve` checks that the entry point a router
 //! listens on exists, speaks the router's protocol and is reserved to the router's tenant (an L4
 //! listener has no host to tell tenants apart by), and `server_address` parses a server
 //! address and applies the upstream address policy.
 
-mod tcp;
+pub mod tcp;
 pub mod udp;
 
 use std::net::SocketAddr;
@@ -24,15 +25,28 @@ use std::net::SocketAddr;
 use crate::compile::{Invalid, Rejected};
 use crate::conflict::Conflict;
 use crate::entry::{CompileContext, Protocol};
+use crate::service::resolve::NameBudget;
 use podgate_model::{App, Snapshot};
 
 /// The L4 side of a compiled app.
 #[derive(Debug, Default)]
 pub struct Compiled {
+    tcp: tcp::Compiled,
     udp: udp::Compiled,
 }
 
 impl Compiled {
+    /// The app's TCP routers and services.
+    #[must_use]
+    pub fn tcp(&self) -> &tcp::Compiled {
+        &self.tcp
+    }
+
+    /// The TCP side, mutable, for the registry that carries service state across a push.
+    pub(crate) fn tcp_mut(&mut self) -> &mut tcp::Compiled {
+        &mut self.tcp
+    }
+
     /// The app's UDP routers and services.
     #[must_use]
     pub fn udp(&self) -> &udp::Compiled {
@@ -40,31 +54,32 @@ impl Compiled {
     }
 }
 
-/// The refusal for an app that declares TCP routers, services or middlewares (not built), `None`
-/// when it declares none.
+/// The refusal for an app that declares TCP middlewares (not built), `None` when it declares
+/// none.
 #[must_use]
 pub fn reject(app: &App) -> Option<Invalid> {
     app.tcp
         .as_ref()
-        .is_some_and(|tcp| {
-            !(tcp.routers.is_empty() && tcp.services.is_empty() && tcp.middlewares.is_empty())
-        })
+        .is_some_and(|tcp| !tcp.middlewares.is_empty())
         .then(|| {
             Invalid::new(
                 "l4_not_built",
-                "TCP routers and services are planned and not built yet",
+                "TCP middlewares are planned and not built yet",
             )
         })
 }
 
-/// Compiles the L4 routers and services of `app`; every problem goes to `rejected`.
+/// Compiles the L4 routers and services of `app`; every problem goes to `rejected`. `names`
+/// counts the DNS names the servers use, with those of the app's HTTP services.
 pub(crate) fn compile(
     app: &App,
     snapshot: &Snapshot,
     context: &CompileContext,
+    names: &mut NameBudget,
     rejected: &mut Vec<Rejected>,
 ) -> Compiled {
     Compiled {
+        tcp: tcp::compile(app, snapshot, context, names, rejected),
         udp: udp::compile(app, snapshot, context, rejected),
     }
 }
@@ -72,7 +87,9 @@ pub(crate) fn compile(
 /// The conflicts among the L4 routers of `apps` (`compiled[i]` belongs to `apps[i]`), in
 /// declaration order.
 pub(crate) fn detect(apps: &[App], compiled: &[Compiled]) -> Vec<Conflict> {
-    udp::detect(apps, compiled)
+    let mut found = tcp::detect(apps, compiled);
+    found.extend(udp::detect(apps, compiled));
+    found
 }
 
 /// Checks that the router of `app` may listen on `entry_point` as a `protocol` router: the node

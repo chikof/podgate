@@ -512,7 +512,8 @@ impl Resolver {
     }
 }
 
-/// The tenants that use each name of `table`'s services, by kind of name.
+/// The tenants that use each name of `table`'s services (the HTTP ones and the TCP ones), by
+/// kind of name.
 struct Wanted {
     /// Names resolved to `A` and `AAAA` addresses.
     names: HashMap<Box<str>, HashSet<Box<str>>>,
@@ -530,15 +531,22 @@ fn names_of(table: &RoutingTable) -> Wanted {
             .revisions()
             .iter()
             .flat_map(|revision| revision.services());
-        for named in app.services().iter().chain(own) {
-            for name in named.service.dns_names() {
+        let http = app.services().iter().chain(own).map(|named| &named.service);
+        let tcp = app
+            .l4()
+            .tcp()
+            .services()
+            .iter()
+            .map(|service| service.balancer());
+        for service in http.chain(tcp) {
+            for name in service.dns_names() {
                 wanted
                     .names
                     .entry(name.into())
                     .or_default()
                     .insert(app.tenant().into());
             }
-            for name in named.service.srv_names() {
+            for name in service.srv_names() {
                 wanted
                     .srv
                     .entry(name.into())
@@ -837,8 +845,15 @@ impl ResolveService {
                 .revisions()
                 .iter()
                 .flat_map(|revision| revision.services());
-            for named in app.services().iter().chain(own) {
-                changed |= named.service.refresh();
+            let http = app.services().iter().chain(own).map(|named| &named.service);
+            let tcp = app
+                .l4()
+                .tcp()
+                .services()
+                .iter()
+                .map(|service| service.balancer());
+            for service in http.chain(tcp) {
+                changed |= service.refresh();
             }
         }
         if changed {

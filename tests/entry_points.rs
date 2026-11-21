@@ -178,22 +178,15 @@ fn entry_points_invalid_values() {
         );
     }
 
-    // The parser accepts tcp and udp. Starting a tcp entry point waits for the spec that builds
-    // it, and a udp one cannot take the PROXY protocol; the error names the entry point.
-    for (value, name) in [
-        ("web=127.0.0.1:18080/http,db=127.0.0.1:15432/tcp", "db"),
-        ("dns=127.0.0.1:15353/udp;proxy_protocol", "dns"),
-    ] {
-        let (code, stderr) = startup_failure(&[
-            ("ENTRY_POINTS", value),
-            ("ADMIN_SOCKET", "/tmp/podgate-entry-points-unused.sock"),
-        ]);
-        assert_eq!(code, Some(1), "{value}: {stderr}");
-        assert!(
-            stderr.contains(&format!("entry point {name}")),
-            "{value}: {stderr}"
-        );
-    }
+    // The parser accepts tcp and udp, and both start. A udp entry point
+    // cannot take the PROXY protocol, and the error names the entry point.
+    let value = "dns=127.0.0.1:15353/udp;proxy_protocol";
+    let (code, stderr) = startup_failure(&[
+        ("ENTRY_POINTS", value),
+        ("ADMIN_SOCKET", "/tmp/podgate-entry-points-unused.sock"),
+    ]);
+    assert_eq!(code, Some(1), "{value}: {stderr}");
+    assert!(stderr.contains("entry point dns"), "{value}: {stderr}");
 }
 
 #[tokio::test]

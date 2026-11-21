@@ -122,8 +122,8 @@ pub use wake::{Wake, WakeService};
 /// # Errors
 ///
 /// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE` or `DASHBOARD_AUTH_FILE` is invalid, a
-/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, an entry point is `tcp` (not built
-/// yet) or a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be bound, a TLS listener
+/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, a `udp` entry point sets
+/// `proxy_protocol`, a UDP socket cannot be bound, a TLS listener
 /// cannot be configured, the admin socket or the dashboard address cannot be bound, or an
 /// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
@@ -257,10 +257,23 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 ));
                 continue;
             }
-            entry::Protocol::Tcp => anyhow::bail!(
-                "entry point {} is tcp: TCP entry points are not built yet",
-                point.name
-            ),
+            entry::Protocol::Tcp => {
+                let app = l4::tcp::Listener::new(
+                    &point.name,
+                    table.clone(),
+                    budgets.clone(),
+                    upstream_policy.clone(),
+                    timeout,
+                )
+                .map_err(|err| anyhow::anyhow!("tcp entry point {}: {err}", point.name))?;
+                let mut listener = pingora::services::listening::Service::new(
+                    format!("tcp entry point {}", point.name),
+                    entry::proxy_protocol::hook::Fronted::new(gate, app),
+                );
+                listener.add_tcp(&addr);
+                server.add_service(listener);
+                continue;
+            }
         }
         server.add_service(proxy);
     }

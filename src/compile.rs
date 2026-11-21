@@ -195,10 +195,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     for (app, list) in snapshot.apps.iter().zip(&routers) {
         catch_all_rule(app, list, context, &mut rejected);
     }
+    let mut names = NameBudget::default();
     let l4s: Vec<l4::Compiled> = snapshot
         .apps
         .iter()
-        .map(|app| l4::compile(app, snapshot, context, &mut rejected))
+        .map(|app| l4::compile(app, snapshot, context, &mut names, &mut rejected))
         .collect();
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
@@ -243,7 +244,6 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut rejected = Vec::new();
     let mut parts = Vec::with_capacity(snapshot.apps.len());
     let mut rings = RingBudget::default();
-    let mut names = NameBudget::default();
     for (app, app_routers) in snapshot.apps.iter().zip(&mut routers) {
         let limits = crate::cache::Limits {
             tenant_budget: snapshot

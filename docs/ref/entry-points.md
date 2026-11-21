@@ -15,9 +15,9 @@ Syntax: `name=address/protocol[;proxy_protocol]`, entries comma separated.
 | `name` | 1 to 63 letters, digits, `-` or `_`. Unique. Routers, policies and explain refer to it. |
 | `address` | A socket address (`0.0.0.0:80`, `[::1]:8443`). Two entries may not use the same address on the same transport (TCP for `http`, `https` and `tcp`; UDP for `udp`). |
 | `protocol` | `http`: plain HTTP/1.1. `https`: TLS termination, HTTP/2 and HTTP/1.1, certificates from the snapshot chosen by SNI. `tcp`, `udp`: raw listeners. |
-| `;proxy_protocol` | Every connection starts with a PROXY protocol header from a peer the snapshot's `entry_points[].proxy_protocol` trusts; anything else is closed. `http` and `https` entry points only. See `docs/ref/proxy-protocol.md`. |
+| `;proxy_protocol` | Every connection starts with a PROXY protocol header from a peer the snapshot's `entry_points[].proxy_protocol` trusts; anything else is closed. `http`, `https` and `tcp` entry points only. See `docs/ref/proxy-protocol.md`. |
 
-`tcp` is parsed and then refused at startup with an error naming the entry point, because its listener is not built yet. A `udp` entry point is served (`docs/ref/l4-udp.md`) and cannot take `;proxy_protocol`.
+A `tcp` entry point is served (`docs/ref/l4-tcp.md`) and takes `;proxy_protocol`: the header's source is the client address a TCP router matches on. A `udp` entry point is served (`docs/ref/l4-udp.md`) and cannot take `;proxy_protocol` (the process refuses to start).
 
 `PROXY_ADDR` and `PROXY_TLS_ADDR` are the shorthand for `web=<addr>/http` and `websecure=<addr>/https`. With neither variable nor `ENTRY_POINTS` set, the process has `web=127.0.0.1:8080/http`. Setting `ENTRY_POINTS` together with `PROXY_ADDR` or `PROXY_TLS_ADDR` stops startup with an error that names both.
 

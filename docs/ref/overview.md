@@ -29,6 +29,7 @@ Every list is `{"total": n, "items": [...]}`. `total` counts what the filters se
 | `tenants` | `id`, `weight`, `budget`, `apps`, and live `inflight` and `buffer_bytes`. |
 | `certificates` | `hosts`, `issuer`, `not_after` (seconds since the Unix epoch), `source` (`acme` when the issuer renews it, else `snapshot`). Never a chain or a key. |
 | `apps` | Sorted by id. Per app: `id`, `tenant`, `declared_by`, `tls` (`mode`, `challenge`, `client_auth`), `hosts`, `allow_domain_fronting`, `scale_to_zero`, `canary`, `routers`, `revisions`, `services`, `middlewares`, `recent`. |
+| `tcp` | Only when the app declares any: `routers` (`{name, entry_points, service, match?}`) and `services` (`{name, algorithm, servers, names, idle_timeout_secs}`; `servers` are the addresses the servers stand for now, a DNS name expanded into what it resolves to, `names` the DNS names). Absent otherwise. |
 | `udp` | Only when the app declares any: `routers` (`{name, entry_points, service, max_sessions, max_reply_ratio?}`) and `services` (`{name, servers, session_timeout_secs}`). Absent otherwise. |
 
 An app has:

@@ -34,7 +34,7 @@ The entry point is process configuration: `ENTRY_POINTS=dns=0.0.0.0:53/udp`. A `
 | service `servers[].address` | `ip:port` of an IP literal, 1 to 256 of them. A host name is `invalid_service`: the resolver is not wired for UDP yet. |
 | service `session_timeout_secs` | Idle time before a session expires. Default 30, 1 to 3600. |
 
-A UDP router has no match criteria, so an entry point carries one router: a second router on it, in the same app or another, is `route_ambiguity` (with `entry_point`, `apps`, `routers`, `declared_by`). The entry point must be bound by the node (`unknown_entry_point`), be `udp` (`entry_point_protocol`) and have a policy whose `tenants` lists only the router's tenant (`entry_point_forbidden`). A server the upstream address policy forbids is `upstream_forbidden`, and the policy is checked again with the exact address before each session connects. TCP routers are still `l4_not_built`.
+A UDP router has no match criteria, so an entry point carries one router: a second router on it, in the same app or another, is `route_ambiguity` (with `entry_point`, `apps`, `routers`, `declared_by`). The entry point must be bound by the node (`unknown_entry_point`), be `udp` (`entry_point_protocol`) and have a policy whose `tenants` lists only the router's tenant (`entry_point_forbidden`). A server the upstream address policy forbids is `upstream_forbidden`, and the policy is checked again with the exact address before each session connects. TCP routers are in `docs/ref/l4-tcp.md`.
 
 ## Sessions
 

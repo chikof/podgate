@@ -454,6 +454,11 @@ impl Podgate {
         ))
     }
 
+    /// The process id of the podgate under test.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// `GET path` on the admin socket.
     pub async fn admin_get(&self, path: &str) -> Response {
         let mut stream = UnixStream::connect(&self.admin_socket)

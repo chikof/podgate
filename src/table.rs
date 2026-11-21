@@ -469,10 +469,15 @@ impl CompiledApp {
         &self.tenant
     }
 
-    /// The app's UDP (and later TCP) routers and services.
+    /// The app's TCP and UDP routers and services.
     #[must_use]
     pub fn l4(&self) -> &l4::Compiled {
         &self.l4
+    }
+
+    /// [`Self::l4`], mutable, for the registry that settles the state of the TCP services.
+    pub(crate) fn l4_mut(&mut self) -> &mut l4::Compiled {
+        &mut self.l4
     }
 
     /// The source named in the snapshot declaration.

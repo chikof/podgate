@@ -49,7 +49,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::Service;
+use super::{LoadBalancer, Service};
 use crate::router::digest;
 use crate::table::CompiledApp;
 use podgate_model::Declared;
@@ -304,25 +304,7 @@ impl Registry {
                             server: None,
                             fingerprint: balancer.fingerprint(),
                         };
-                        if let Some(old) = settled.services.get(&key) {
-                            balancer.adopt_shared(Arc::clone(old));
-                        }
-                        kept.services.insert(key.clone(), balancer.shared());
-                        // Servers named by DNS keep their states in the service's state, which
-                        // was just adopted; these are the ones declared by IP address.
-                        balancer.settle_servers(|server| {
-                            let key = Key {
-                                server: Some(server.url.clone()),
-                                ..key.clone()
-                            };
-                            // Two entries naming one URL share one state, so they keep doing so.
-                            if let Some(old) =
-                                kept.servers.get(&key).or_else(|| settled.servers.get(&key))
-                            {
-                                server.state = Arc::clone(old);
-                            }
-                            kept.servers.insert(key, Arc::clone(&server.state));
-                        });
+                        settle_balancer(&key, balancer, &settled, &mut kept);
                         continue;
                     }
                     Service::Weighted(weighted) => weighted.state_mut(),
@@ -343,9 +325,45 @@ impl Registry {
                 }
                 kept.services.insert(key, Arc::clone(shared));
             }
+            // The TCP services of an app have no revision; a `tcp:` prefix keeps their keys apart
+            // from the HTTP services'.
+            for (name, service) in app.l4_mut().tcp_mut().balancers_mut() {
+                if let Service::LoadBalancer(balancer) = service {
+                    let key = Key {
+                        app: app_id.clone(),
+                        revision: None,
+                        service: format!("tcp:{name}").into(),
+                        server: None,
+                        fingerprint: balancer.fingerprint(),
+                    };
+                    settle_balancer(&key, balancer, &settled, &mut kept);
+                }
+            }
         }
         *settled = kept;
     }
+}
+
+/// Hands the state `settled` holds under `key` to `balancer`, and records what `balancer` keeps
+/// in `kept`.
+fn settle_balancer(key: &Key, balancer: &mut LoadBalancer, settled: &Settled, kept: &mut Settled) {
+    if let Some(old) = settled.services.get(key) {
+        balancer.adopt_shared(Arc::clone(old));
+    }
+    kept.services.insert(key.clone(), balancer.shared());
+    // Servers named by DNS keep their states in the service's state, which was just adopted;
+    // these are the ones declared by IP address.
+    balancer.settle_servers(|server| {
+        let key = Key {
+            server: Some(server.url.clone()),
+            ..key.clone()
+        };
+        // Two entries naming one URL share one state, so they keep doing so.
+        if let Some(old) = kept.servers.get(&key).or_else(|| settled.servers.get(&key)) {
+            server.state = Arc::clone(old);
+        }
+        kept.servers.insert(key, Arc::clone(&server.state));
+    });
 }
 
 #[cfg(test)]

@@ -446,8 +446,37 @@ struct AppView<'a> {
     services: Vec<ServiceView<'a>>,
     middlewares: Vec<MiddlewareView<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tcp: Option<TcpView<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     udp: Option<UdpView<'a>>,
     recent: Recent,
+}
+
+/// The app's TCP routers and services.
+#[derive(Serialize)]
+struct TcpView<'a> {
+    routers: Vec<TcpRouterView<'a>>,
+    services: Vec<TcpServiceView<'a>>,
+}
+
+#[derive(Serialize)]
+struct TcpRouterView<'a> {
+    name: &'a str,
+    entry_points: &'a [Box<str>],
+    service: &'a str,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matcher: Option<&'a Value>,
+}
+
+#[derive(Serialize)]
+struct TcpServiceView<'a> {
+    name: &'a str,
+    algorithm: Option<&'static str>,
+    /// The addresses the servers stand for now: a name is expanded into what it resolves to.
+    servers: Vec<std::net::SocketAddr>,
+    /// The DNS names among the servers.
+    names: Vec<&'a str>,
+    idle_timeout_secs: u64,
 }
 
 /// The app's UDP routers and services.
@@ -651,9 +680,47 @@ fn app_view<'a>(app: &'a CompiledApp, runtime: &Runtime<'_>) -> AppView<'a> {
                 config: named.stage.describe(),
             })
             .collect(),
+        tcp: tcp_view(app),
         udp: udp_view(app),
         recent: recent(runtime, app.id(), None),
     }
+}
+
+/// The TCP side of `app`, `None` when it declares none.
+fn tcp_view(app: &CompiledApp) -> Option<TcpView<'_>> {
+    let tcp = app.l4().tcp();
+    if tcp.routers().is_empty() && tcp.services().is_empty() {
+        return None;
+    }
+    Some(TcpView {
+        routers: (0..tcp.routers().len())
+            .filter_map(|at| {
+                let (router, service) = tcp.route(at)?;
+                Some(TcpRouterView {
+                    name: router.name(),
+                    entry_points: router.entry_points(),
+                    service: service.name(),
+                    matcher: router.match_json(),
+                })
+            })
+            .collect(),
+        services: tcp
+            .services()
+            .iter()
+            .map(|service| TcpServiceView {
+                name: service.name(),
+                algorithm: service.balancer().algorithm(),
+                servers: service
+                    .balancer()
+                    .servers()
+                    .iter()
+                    .map(|server| server.addr)
+                    .collect(),
+                names: service.balancer().dns_names().collect(),
+                idle_timeout_secs: service.idle().as_secs(),
+            })
+            .collect(),
+    })
 }
 
 /// The UDP side of `app`, `None` when it declares none.
