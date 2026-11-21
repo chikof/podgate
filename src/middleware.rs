@@ -422,6 +422,23 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Runs once on an HTTP/2 response that ends in trailers, just before them, in reverse chain
+    /// order. The body is over, but its last DATA frame did not say so, so `response_body` never
+    /// saw the end: a stage that holds the body back releases it here through `body` (which
+    /// holds what the later stages already released, if any), the way it would at the end of
+    /// the stream. The trailers still follow as trailers.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the held bytes cannot be released.
+    fn response_before_trailers(
+        &self,
+        _body: &mut Option<Bytes>,
+        _state: &mut Self::State,
+    ) -> pingora::Result<()> {
+        Ok(())
+    }
+
     /// Runs on the upstream's response trailers, last stage first. Returns the last bytes of the
     /// body when the trailers become part of it: the trailers are then not sent as trailers, and
     /// the chain's body hooks do not see these bytes. The first stage that returns some ends the
@@ -757,6 +774,21 @@ macro_rules! kinds {
                     $(
                         (Self::$variant(kind), StageState::$variant(state)) => {
                             $crate::middleware::Kind::request_body_chunk(kind, body, end_of_stream, state)
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
+
+            fn response_before_trailers(
+                &self,
+                body: &mut Option<bytes::Bytes>,
+                state: &mut StageState,
+            ) -> pingora::Result<()> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_before_trailers(kind, body, state)
                         }
                     )*
                     _ => Ok(()),
@@ -1273,6 +1305,26 @@ pub fn run_request_body_chunk(
         }
     }
     Ok(())
+}
+
+/// Runs the hooks that release a held response body ahead of its trailers, in the order of
+/// [`run_response_body`]: the bytes the chain releases, `None` when it holds nothing back.
+///
+/// # Errors
+///
+/// The first error a hook returns.
+pub fn run_response_before_trailers(
+    stages: &[Named],
+    chain: &[usize],
+    state: &mut State,
+) -> pingora::Result<Option<Bytes>> {
+    let mut body = None;
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.response_before_trailers(&mut body, slot)?;
+        }
+    }
+    Ok(body)
 }
 
 /// Runs the trailer hooks of `chain`, last stage first: the last bytes of the body the first

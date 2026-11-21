@@ -458,6 +458,13 @@ where
                     return Err(e);
                 }
             }
+            // podgate patch: trailers end the body. The filter may now release what
+            // it held back (a buffered response); it is written ahead of the trailers.
+            if matches!(t, HttpTask::Trailer(Some(_))) {
+                if let Some(body) = self.inner.response_body_before_trailers(session, ctx)? {
+                    filtered_tasks.push(HttpTask::Body(Some(body), false));
+                }
+            }
             filtered_tasks.push(
                 self.h2_response_filter(
                     session,

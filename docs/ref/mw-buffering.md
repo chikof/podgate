@@ -47,11 +47,15 @@ A response of unknown length (chunked, or ended by the upstream closing) cannot 
 
 The charge for a held response is its `Content-Length` before the head goes out (an over-budget answer is a clean `503` with `retry-after: 1`), or 64 KiB at a time as a chunked body arrives. The limit judges the response as the upstream sent it, before compression. A `HEAD` request, `1xx`, `204` and `304` have no body and are not limited.
 
+### Trailers
+
+An HTTP/2 upstream can end a response with trailers instead of a last DATA frame that carries the end of the stream, so the body hook never sees an end. A held body is released at the trailers: the whole body is written as data, then the trailers go out as trailers, in that order, and the limit and the charge behave as for any held response (a body over `max_response_body_bytes` is still dropped and the connection reset, before any trailer). This needs a hook that stock Pingora 0.9.1 lacks, `ProxyHttp::response_body_before_trailers`, called from `pingora-proxy/src/proxy_h2.rs` (`process_upstream_tasks_h2`) just before the trailer task; it is carried by the vendored `pingora-proxy` (`vendor/pingora-proxy`, see `docs/ref/websocket.md`) and reaches the chain as the `Kind::response_before_trailers` hook. Stock Pingora can only turn trailers into body bytes (`response_trailer_filter`, `proxy_h2.rs:993-1021`), which would drop the trailers, so a response header such as `trailer` or `te` is not used to guess: every non-gRPC response is held the same way. `tests/mw_buffering.rs` `buffer_response_releases_body_before_h2_trailers`.
+
 ## Exempt
 
 `Upgrade` requests and `CONNECT` are exempt from every limit in both directions: a WebSocket is not a body.
 
-A gRPC call (`Content-Type` `application/grpc`, `application/grpc+...`, or gRPC-Web `application/grpc-web...`) is never held, whatever `buffer_request` and `buffer_response` say. Its request and response are streams that run together: a held request would wait for a body that a bidirectional or client-streaming call only ends after the response, and a held response would withhold every message and lose the trailers it ends with. The request limit (`max_request_body_bytes`) still counts the stream, so it caps the whole call, not each message; `max_response_body_bytes` needs `buffer_response` and so does not apply. `tests/grpc.rs` `grpc_not_compressed_or_buffered`.
+A gRPC call (`Content-Type` `application/grpc`, `application/grpc+...`, or gRPC-Web `application/grpc-web...`) is never held, whatever `buffer_request` and `buffer_response` say. Its request and response are streams that run together: a held request would wait for a body that a bidirectional or client-streaming call only ends after the response, and a held response would withhold every message until the call ends. The request limit (`max_request_body_bytes`) still counts the stream, so it caps the whole call, not each message; `max_response_body_bytes` needs `buffer_response` and so does not apply. `tests/grpc.rs` `grpc_not_compressed_or_buffered`.
 
 ## Plan
 

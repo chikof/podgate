@@ -141,3 +141,9 @@ once for an upgrade request, that returns the upstream read timeout to use after
 `Notify` that ends the tunnel. It is what lets a transport's `tunnel_idle_timeout_secs` replace
 the read timeout after the `101` and lets the lifetime and close-delay timers end a tunnel from
 outside the proxy loop. A `ProxyHttp` that does not implement it behaves as stock Pingora.
+
+A third change: `ProxyHttp::response_body_before_trailers`, called once when an HTTP/2
+upstream response ends in trailers, just before the trailer task. A filter that holds the body until
+its end (the `buffering` middleware) returns it there, and it is written as body data ahead of the
+trailers, which still go out as trailers (`docs/ref/mw-buffering.md`, `### Trailers`). A
+`ProxyHttp` that does not implement it behaves as stock Pingora.

@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{Podgate, app, serving, snapshot, with_buffering};
+use bytes::Bytes;
+use common::grpc::Client;
+use common::{Podgate, TestCert, app, serving, snapshot, with_buffering};
+use http::{HeaderMap, HeaderValue, Response};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -777,4 +780,84 @@ async fn expect_continue_over_cap_417() {
         "the upstream never sees an expectation the proxy already answered: {}",
         seen[0].head
     );
+}
+
+/// An HTTP/2 cleartext upstream whose every response is a `text/plain` body in two DATA frames
+/// (`first`, `second`, a pause between) that do not end the stream, then the trailers
+/// `x-checksum: abc123` and `x-done: yes`. `declared` also sends a `Content-Length`.
+async fn trailer_upstream(first: &'static str, second: &'static str, declared: bool) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(mut connection) = h2::server::handshake(tcp).await else {
+                    return;
+                };
+                while let Some(Ok((_request, mut respond))) = connection.accept().await {
+                    tokio::spawn(async move {
+                        let mut head = Response::builder()
+                            .status(200)
+                            .header("content-type", "text/plain");
+                        if declared {
+                            head = head.header("content-length", first.len() + second.len());
+                        }
+                        let Ok(mut send) =
+                            respond.send_response(head.body(()).expect("head"), false)
+                        else {
+                            return;
+                        };
+                        drop(send.send_data(Bytes::from_static(first.as_bytes()), false));
+                        sleep(Duration::from_millis(20)).await;
+                        drop(send.send_data(Bytes::from_static(second.as_bytes()), false));
+                        sleep(Duration::from_millis(20)).await;
+                        let mut trailers = HeaderMap::new();
+                        trailers.insert("x-checksum", HeaderValue::from_static("abc123"));
+                        trailers.insert("x-done", HeaderValue::from_static("yes"));
+                        drop(send.send_trailers(trailers));
+                    });
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// A held HTTP/2 response that ends in trailers reaches the client whole: the body first, the
+/// trailers after it; an HTTP/1.1 client gets the body. With and without a declared length.
+#[tokio::test]
+async fn buffer_response_releases_body_before_h2_trailers() {
+    const HOST: &str = "t.test";
+    for declared in [false, true] {
+        let upstream = trailer_upstream("hello ", "trailers", declared).await;
+        let podgate = Podgate::start().await;
+        let cert = TestCert::new(&[HOST]);
+        let mut revision = serving("r1", upstream);
+        revision["services"][0]["servers"][0]["url"] = json!(format!("h2c://{upstream}"));
+        let config = json!({ "max_response_body_bytes": 65536, "buffer_response": true });
+        let mut pushed = snapshot(1, &[with_buffering(app("t", &[HOST], &[revision]), config)]);
+        pushed["certificates"] = json!([cert.entry(&[HOST])]);
+        let reply = podgate.push_snapshot(&pushed).await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+
+        let client = Client::tls(podgate.tls_addr, HOST, &cert.der).await;
+        let mut call = client.start_request("GET", "text/plain", "/", &[]).await;
+        call.finish();
+        let raw = call.raw().await;
+        assert_eq!(raw.status, 200, "declared {declared}");
+        assert_eq!(
+            String::from_utf8_lossy(&raw.body),
+            "hello trailers",
+            "declared {declared}"
+        );
+        let trailers = raw.trailers.expect("the trailers arrive");
+        assert_eq!(trailers.get("x-checksum").expect("checksum"), "abc123");
+        assert_eq!(trailers.get("x-done").expect("done"), "yes");
+
+        // An HTTP/1.1 client has no trailers to receive, but gets the whole body.
+        let plain = exchange(&podgate, &post(HOST, "Content-Length: 0\r\n", b"")).await;
+        assert_eq!(plain.status, 200, "declared {declared}");
+        assert_eq!(plain.text(), "hello trailers", "declared {declared}");
+        wait_for_metric(&podgate, "podgate_tenant_buffer_bytes", 0).await;
+    }
 }

@@ -919,6 +919,22 @@ impl ProxyHttp for Gateway {
         Ok(())
     }
 
+    fn response_body_before_trailers(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<Option<Bytes>> {
+        ctx.matched
+            .and_then(|matched| ctx.table.router(matched))
+            .map_or(Ok(None), |(app, router)| {
+                middleware::run_response_before_trailers(
+                    app.stages(),
+                    router.chain(),
+                    &mut ctx.chain,
+                )
+            })
+    }
+
     async fn response_trailer_filter(
         &self,
         _session: &mut Session,

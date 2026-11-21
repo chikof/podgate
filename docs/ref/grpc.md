@@ -48,7 +48,7 @@ A `502` or `504` that podgate makes while the server's response has already star
 |Middleware|A gRPC call|Test|
 |---|---|---|
 |`compress`, and the platform's default gzip|Never encodes `application/grpc*`, whatever `Accept-Encoding` and the lists say.|`grpc_not_compressed_or_buffered`|
-|`buffering`|`buffer_request` and `buffer_response` do not hold a gRPC call: a held request would wait for a body that a bidirectional or client-streaming call only finishes after the response, and a held response would withhold every message and lose the trailers. The limits that do not need holding (`max_request_body_bytes`) still count the stream.|`grpc_not_compressed_or_buffered`|
+|`buffering`|`buffer_request` and `buffer_response` do not hold a gRPC call: a held request would wait for a body that a bidirectional or client-streaming call only finishes after the response, and a held response would withhold every message until the call ends. The limits that do not need holding (`max_request_body_bytes`) still count the stream.|`grpc_not_compressed_or_buffered`|
 |`retry`|A connect error is retried on another server (nothing was sent). A call whose response started is never repeated, and neither is one whose request body was streamed, whatever `methods` says.|`grpc_retry_connect_error`, `grpc_no_retry_after_start`|
 |`in_flight_req`|A call holds its slot until the stream ends, trailers included, not until the response head is out.|`grpc_in_flight_held_for_stream`|
 |`rate_limit`|A call takes a token when it starts, and a refusal is the `429` above.|`grpc_rate_limited_unavailable`|

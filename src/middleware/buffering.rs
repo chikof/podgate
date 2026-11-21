@@ -23,14 +23,15 @@
 //! - **Response limit.** A `Content-Length` over `max_response_body_bytes` is answered `502`
 //!   instead of the response ([`Kind::response_head`]). A response of unknown length is held
 //!   until it is complete and sent in one piece; over the limit, the connection is reset
-//!   (Pingora has already sent the head by then).
+//!   (Pingora has already sent the head by then). A response that ends in HTTP/2 trailers is
+//!   released ahead of them ([`Kind::response_before_trailers`]).
 //!
 //! `Upgrade` and `CONNECT` requests are exempt: a WebSocket is not a body.
 //!
 //! A gRPC call (`application/grpc*`, gRPC-Web included) is never held, in either direction: its
 //! request and response are streams that run together for as long as the call lives, so a held
 //! request would wait for a body that a bidirectional call only ends after the response, and a
-//! held response would withhold every message and lose the trailers it ends with. The request
+//! held response would withhold every message until the call ends. The request
 //! limit still counts the stream.
 
 use std::sync::Arc;
@@ -389,6 +390,16 @@ impl Kind for Buffering {
             *body = (!data.is_empty()).then(|| Bytes::from(data));
         }
         Ok(())
+    }
+
+    /// A response that ends in trailers (HTTP/2 upstream) never gets an end-of-stream body
+    /// chunk: the trailers are the end. The held body goes out ahead of them.
+    fn response_before_trailers(
+        &self,
+        body: &mut Option<Bytes>,
+        state: &mut State,
+    ) -> pingora::Result<()> {
+        self.response_body(body, true, state)
     }
 
     /// A limit that went away or grew is less protection than before.

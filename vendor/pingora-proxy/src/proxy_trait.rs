@@ -482,6 +482,23 @@ pub trait ProxyHttp {
         Ok(None)
     }
 
+    /// podgate patch: runs once, before `response_trailer_filter`, when an HTTP/2
+    /// upstream response ends in non-empty trailers. Trailers mean the body is over, but the last
+    /// DATA frame did not carry the end of stream, so `response_body_filter` never saw it. A filter
+    /// that holds body bytes back until the end returns them here; they are written as body data
+    /// ahead of the trailers, which are still sent as trailers. `None` (the default) keeps
+    /// Pingora's behaviour.
+    fn response_body_before_trailers(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Self::CTX,
+    ) -> Result<Option<Bytes>>
+    where
+        Self::CTX: Send + Sync,
+    {
+        Ok(None)
+    }
+
     /// Similar to [Self::response_filter()] but for response trailers.
     /// Note, returning an Ok(Some(Bytes)) will result in the downstream response
     /// trailers being written to the response body.
