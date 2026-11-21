@@ -122,7 +122,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Certificates from the control plane | `tls.certificates` | `tls cert key` | built (`certificates`) |
 | ACME HTTP-01 | `httpChallenge` | default | built (HA, ARI, on-demand) |
 | ACME TLS-ALPN-01 | `tlsChallenge` | default | built (opt-in per app; answered by the pre-TLS hook because Pingora's listener cannot carry `acme-tls/1`, see `docs/ref/acme-alpn01.md`) |
-| ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 and 0083 add control-plane solvers); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
+| ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 adds the provider's ACME broker and the solver hook, 0083 the solvers); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
 | Internal CA (`tls internal`) | none | yes | 0103 (key material in the provider and offline root, name-constrained intermediate, short-lived leaves) |
@@ -155,6 +155,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Kubernetes custom resources | `IngressRoute` and friends | none | 0076 (`PodgateRoute`, `PodgateMiddleware`) |
 | Nomad | Nomad provider | none | 0077 |
 | File | File provider (watch, templates) | Caddyfile, JSON | built (YAML, TOML and JSON, a file or a directory, polling watch, last good content on a broken file, no templating; reference `docs/ref/provider-file.md`); Traefik files via 0079 (also a migration linter) |
+| Certificate storage and cluster issuance | `storage` (`acme.json`) in the proxy; clusters need a KV store or Enterprise | `storage` file, clustering through a shared storage module | built (the provider's broker keeps certificates, account key and answers in a `0700` state directory, persisted before pushed; follower providers read it; podgate stays stateless) |
 | Consul Catalog | yes | none | 0093 |
 | Amazon ECS | yes | none | 0107 |
 | Docker Swarm | yes | `caddy-docker-proxy` | 0108 |
