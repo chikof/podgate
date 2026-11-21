@@ -149,7 +149,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| Docker and Podman labels | Docker provider | `caddy-docker-proxy` | 0070 (`podgate.*`), 0071 (`traefik.*` subset) |
+| Docker and Podman labels | Docker provider | `caddy-docker-proxy` | built (`podgate.*` labels, the server address taken from the container's own network address, health and events, revisions, tenants by fixed, network or label; reference `docs/ref/provider-docker.md`), 0071 (`traefik.*` subset) |
 | Traefik rule strings | native | none | 0071 (translated; priority equals rule length) |
 | Kubernetes Ingress | yes | ingress controller | 0072 |
 | Gateway API | HTTPRoute, GRPCRoute, TLSRoute, TCPRoute | none first-party | 0073, 0074 (status), 0075 (L4 routes) |
