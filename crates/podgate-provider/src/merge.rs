@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use podgate_model::{App, Certificate, EntryPointPolicy, Snapshot, Tenant};
 use serde_json::{Map, Value};
 
-use crate::config::{Config, TenantConfig};
+use crate::config::{Config, Operator, TenantConfig};
 use crate::policy::UpstreamPolicy;
 use crate::source::{ObjectKind, ObjectRef, SourceApp, SourceCertificate, State, TenantClaim};
 use crate::trust::{HostPattern, Problem, Resolved, RouterHosts, Trust};
@@ -98,6 +98,16 @@ impl Merged {
         snapshot.version = version;
         canonical(&snapshot)
     }
+
+    /// Like [`Self::body`] with every secret shown as `[redacted]`: what `print` shows. The
+    /// secrets are the skew secret, certificate and ACME account keys, and the EAB HMAC key.
+    #[must_use]
+    pub fn redacted_body(&self, version: u64) -> String {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.version = version;
+        let value = serde_json::to_value(&snapshot).unwrap_or(Value::Null);
+        sorted(redact(value)).to_string()
+    }
 }
 
 /// The canonical JSON text of `snapshot`: sorted object keys at every depth.
@@ -125,6 +135,27 @@ fn sorted(value: Value) -> Value {
     }
 }
 
+/// Keys whose string values are secrets in a snapshot.
+const SECRET_KEYS: [&str; 4] = ["skew_secret", "key_pem", "account_key_pem", "hmac_key"];
+
+fn redact(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    if SECRET_KEYS.contains(&key.as_str()) && value.is_string() {
+                        (key, Value::from("[redacted]"))
+                    } else {
+                        (key, redact(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact).collect()),
+        other => other,
+    }
+}
+
 /// The rules and inputs that stay the same from one merge to the next.
 #[derive(Debug, Clone)]
 pub struct Merger {
@@ -133,6 +164,7 @@ pub struct Merger {
     kinds: BTreeMap<Box<str>, Box<str>>,
     tenants: Vec<Tenant>,
     entry_points: Vec<EntryPointPolicy>,
+    operator: Operator,
 }
 
 /// An object waiting to be looked at, in age order.
@@ -229,6 +261,7 @@ impl Merger {
                 .collect(),
             tenants,
             entry_points,
+            operator: config.operator.clone(),
         }
     }
 
@@ -513,6 +546,9 @@ impl Run {
             apps: self.apps,
             certificates: self.certificates,
             entry_points: merger.entry_points.clone(),
+            skew_secret: merger.operator.skew_secret.clone(),
+            revert_window_secs: merger.operator.revert_window_secs,
+            observability: merger.operator.observability.clone(),
             ..Snapshot::default()
         };
         Merged {

@@ -53,3 +53,12 @@ exclusive_entry_points = ["globex-private"]
 [[source]]
 kind = "docker"
 name = "docker-prod"
+
+# The parts of the snapshot no source declares. On a node where the provider is the only writer,
+# these are copied into every snapshot as written; unset means the field is absent. The skew
+# secret is read from a file (at least 16 bytes), never written in this file.
+# [snapshot]
+# revert_window_secs = 60
+# skew_secret_file = "/etc/podgate/skew.key"
+# [snapshot.observability]
+# access_log = true

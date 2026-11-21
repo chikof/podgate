@@ -1531,22 +1531,29 @@ mod daemon {
         }
     }
 
-    fn binary() -> PathBuf {
-        if let Ok(path) = std::env::var("PODGATE_BIN") {
-            return PathBuf::from(path);
+    /// The daemon binary: `PODGATE_BIN`, else `target/debug/podgate` of the workspace, which the
+    /// workspace build of the test run produces. This never runs cargo: a test must not build
+    /// under the shared build lock. `None` means skip, which is allowed only outside the gate
+    /// (`VJ_GATE_LOCKED` is set by `scripts/check.sh`); under the gate a missing binary fails.
+    pub(crate) fn binary() -> Option<PathBuf> {
+        let path = std::env::var("PODGATE_BIN").map_or_else(
+            |_| {
+                let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+                let target = std::env::var("CARGO_TARGET_DIR")
+                    .map_or_else(|_| workspace.join("target"), PathBuf::from);
+                target.join("debug/podgate")
+            },
+            PathBuf::from,
+        );
+        if path.exists() {
+            return Some(path);
         }
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace = manifest.join("../..");
-        let status = Command::new(&cargo)
-            .args(["build", "--quiet", "-p", "podgate", "--bin", "podgate"])
-            .current_dir(&workspace)
-            .status()
-            .expect("run cargo to build the daemon");
-        assert!(status.success(), "building the podgate daemon failed");
-        let target = std::env::var("CARGO_TARGET_DIR")
-            .map_or_else(|_| workspace.join("target"), PathBuf::from);
-        target.join("debug/podgate")
+        assert!(
+            std::env::var_os("VJ_GATE_LOCKED").is_none(),
+            "end_to_end_against_daemon needs the podgate binary at {}: run `cargo nextest run --workspace` (its build produces it) or set PODGATE_BIN",
+            path.display()
+        );
+        None
     }
 
     fn free_ports(count: usize) -> Vec<u16> {
@@ -1590,8 +1597,7 @@ mod daemon {
 
     impl Daemon {
         /// Starts the daemon with `policy` as its upstream policy file and waits for it.
-        pub(crate) async fn start(policy: &Path) -> Self {
-            let binary = binary();
+        pub(crate) async fn start(binary: &Path, policy: &Path) -> Self {
             for attempt in 0..5 {
                 let ports = free_ports(2);
                 let dir = std::env::temp_dir().join(format!(
@@ -1605,7 +1611,7 @@ mod daemon {
                 std::fs::create_dir_all(&dir).expect("temp dir");
                 let admin = dir.join("admin.sock");
                 let proxy = std::net::SocketAddr::from(([127, 0, 0, 1], ports[0]));
-                let child = Command::new(&binary)
+                let child = Command::new(binary)
                     .env("PROXY_ADDR", proxy.to_string())
                     .env("PROXY_TLS_ADDR", format!("127.0.0.1:{}", ports[1]))
                     .env("ADMIN_SOCKET", &admin)
@@ -1697,6 +1703,12 @@ mod daemon {
 #[tokio::test]
 async fn end_to_end_against_daemon() {
     let work = tokio::time::timeout(Duration::from_secs(1500), async {
+        let Some(binary) = daemon::binary() else {
+            eprintln!(
+                "skipped: no podgate binary (set PODGATE_BIN, or build the workspace so that target/debug/podgate exists)"
+            );
+            return;
+        };
         let dir = std::env::temp_dir().join(format!("pgp-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let policy_file = dir.join("upstream-policy.json");
@@ -1705,7 +1717,7 @@ async fn end_to_end_against_daemon() {
         let (addr_a, _backend_a) = daemon::backend("from-docker").await;
         let (addr_b, _backend_b) = daemon::backend("from-k8s").await;
         let (addr_c, _backend_c) = daemon::backend("from-docker-two").await;
-        let daemon = daemon::Daemon::start(&policy_file).await;
+        let daemon = daemon::Daemon::start(&binary, &policy_file).await;
 
         let socket = daemon.admin.clone();
         let extra = format!(
@@ -1902,4 +1914,115 @@ async fn a_source_kind_that_is_not_built_is_an_error() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _ = std::fs::remove_file(path);
+}
+
+// ---- the operator's snapshot section ---------------------------------------------------------
+
+const SECRET: &str = "0123456789abcdef-skew-secret";
+
+fn operator_toml(secret_file: &Path) -> String {
+    format!(
+        "debounce_ms = 20\nmax_delay_ms = 200\n\n[snapshot]\nrevert_window_secs = 90\nskew_secret_file = {:?}\n[snapshot.observability]\naccess_log = true\n",
+        secret_file.display().to_string()
+    )
+}
+
+#[tokio::test]
+async fn operator_section_reaches_snapshot() {
+    let secret_file = std::env::temp_dir().join(format!("pgp-{}-skew.key", std::process::id()));
+    std::fs::write(&secret_file, format!("{SECRET}\n")).expect("write the key file");
+    let extra = operator_toml(&secret_file);
+
+    // `print` shows the fields, with the secret redacted.
+    let text = format!("admin_socket = \"/nonexistent/admin.sock\"\n{extra}");
+    let path = write_config("operator", &text);
+    let output = provider("print", path.clone()).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(SECRET),
+        "the key must not be printed: {stdout}"
+    );
+    let printed: Value = serde_json::from_str(&stdout).expect("the snapshot is JSON");
+    assert_eq!(printed["skew_secret"], "[redacted]");
+    assert_eq!(printed["revert_window_secs"], 90);
+    assert_eq!(printed["observability"]["access_log"], true);
+
+    // The pushed body carries the real key.
+    let h = Harness::start(&extra, &["one"]);
+    h.source("one").apps(vec![app("one", "a", &["a.test"], UP)]);
+    let puts = h
+        .admin
+        .wait_puts("first push", |puts| !puts.is_empty())
+        .await;
+    assert_eq!(puts[0].body["skew_secret"], SECRET);
+    assert_eq!(puts[0].body["revert_window_secs"], 90);
+    assert_eq!(puts[0].body["observability"]["access_log"], true);
+    h.stop().await.expect("clean stop");
+
+    // Unset means absent.
+    let bare = merge(&merger(TENANTS), vec![("local", vec![])]);
+    let body: Value = serde_json::from_str(&bare.body(1)).expect("JSON");
+    assert!(body["skew_secret"].is_null() && body["acme"].is_null());
+    assert!(body["revert_window_secs"].is_null() && body["observability"].is_null());
+    let _ = std::fs::remove_file(secret_file);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn skew_secret_file_unreadable_fails_config() {
+    let field_of = |text: &str| match podgate_provider::Config::parse(text) {
+        Err(podgate_provider::ConfigError::Invalid { field, .. }) => field.to_string(),
+        other => panic!("expected an invalid field, got {other:?}"),
+    };
+    let head = "admin_socket = \"/x.sock\"\n[snapshot]\n";
+    assert_eq!(
+        field_of(&format!(
+            "{head}skew_secret_file = \"/nonexistent/skew.key\"\n"
+        )),
+        "snapshot.skew_secret_file"
+    );
+    let short = std::env::temp_dir().join(format!("pgp-{}-short.key", std::process::id()));
+    std::fs::write(&short, "too short\n").expect("write");
+    assert_eq!(
+        field_of(&format!(
+            "{head}skew_secret_file = {:?}\n",
+            short.display().to_string()
+        )),
+        "snapshot.skew_secret_file"
+    );
+    let _ = std::fs::remove_file(short);
+    // The key is a file path only: an inline key is an unknown field.
+    assert!(
+        podgate_provider::Config::parse(&format!("{head}skew_secret = \"0123456789abcdef\"\n"))
+            .is_err()
+    );
+}
+
+#[test]
+fn snapshot_acme_refused_until_relay() {
+    // Orders would never complete without the event relay and would burn the CA's rate limits.
+    let text = "admin_socket = \"/x.sock\"\n[snapshot.acme]\nissuer_node = \"node-1\"\ndirectory_url = \"https://acme.example.test/dir\"\n";
+    match podgate_provider::Config::parse(text) {
+        Err(podgate_provider::ConfigError::Invalid { field, reason }) => {
+            assert_eq!(&*field, "snapshot.acme");
+            assert!(
+                reason.contains("needs the event relay, not built yet")
+                    && reason.contains("docs/ref/provider.md"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected the acme refusal, got {other:?}"),
+    }
+    // Without `acme` the section still loads.
+    assert!(
+        podgate_provider::Config::parse(
+            "admin_socket = \"/x.sock\"\n[snapshot]\nrevert_window_secs = 60\n"
+        )
+        .is_ok()
+    );
 }

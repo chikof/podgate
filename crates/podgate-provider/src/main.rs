@@ -89,7 +89,7 @@ async fn execute(command: Command, config_path: PathBuf) -> anyhow::Result<ExitC
         }
         Command::Print => {
             let merged = engine.first_pass(COLLECT_WAIT).await?;
-            println!("{}", merged.body(0));
+            println!("{}", merged.redacted_body(0));
             Ok(ExitCode::SUCCESS)
         }
         Command::Check => {
@@ -128,7 +128,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match execute(command, config).await {
+    match Box::pin(execute(command, config)).await {
         Ok(code) => code,
         Err(err) => {
             error!("{err:#}");

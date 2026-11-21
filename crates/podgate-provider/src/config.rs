@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use podgate_model::Budget;
+use podgate_model::{Budget, Observability, SkewSecret};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -130,6 +130,21 @@ pub struct Config {
     pub tenants: Vec<TenantConfig>,
     /// The sources.
     pub sources: Vec<SourceConfig>,
+    /// The parts of the snapshot the operator owns, copied into every snapshot.
+    pub operator: Operator,
+}
+/// The snapshot fields no source declares: the operator's `[snapshot]` section. A provider-only
+/// node has no other writer for them, so the provider copies them into every snapshot verbatim.
+/// Unset means the field is absent from the snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Operator {
+    /// Seconds an auto-revert watches a new snapshot.
+    pub revert_window_secs: Option<u64>,
+    /// Access log, metrics and tracing settings.
+    pub observability: Option<Observability>,
+    /// The key of the session cookie that pins a browser to a revision, read from
+    /// `skew_secret_file`. Never in the TOML, never printed.
+    pub skew_secret: Option<SkewSecret>,
 }
 
 #[derive(Deserialize)]
@@ -176,6 +191,14 @@ struct RawSource {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawSnapshot {
+    acme: Option<toml::Value>,
+    revert_window_secs: Option<u64>,
+    observability: Option<Observability>,
+    skew_secret_file: Option<PathBuf>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     admin_socket: PathBuf,
     upstream_policy_file: Option<PathBuf>,
@@ -187,6 +210,7 @@ struct RawConfig {
     tenant: Vec<RawTenant>,
     #[serde(default)]
     source: Vec<RawSource>,
+    snapshot: Option<RawSnapshot>,
 }
 
 /// A tenant or source name: lowercase letters, digits, `.`, `_` and `-`, starting with a letter
@@ -295,6 +319,7 @@ impl Config {
         let sources = sources(raw.source)?;
         let default_tenant = default_tenant(raw.default_tenant)?;
         let tenants = tenants(raw.tenant, &sources, &default_tenant)?;
+        let operator = operator(raw.snapshot)?;
         Ok(Self {
             admin_socket: raw.admin_socket,
             upstream_policy_file: raw.upstream_policy_file,
@@ -304,6 +329,7 @@ impl Config {
             default_tenant,
             tenants,
             sources,
+            operator,
         })
     }
 
@@ -311,6 +337,47 @@ impl Config {
     pub fn source_names(&self) -> impl Iterator<Item = &str> {
         self.sources.iter().map(|source| &*source.name)
     }
+}
+
+fn operator(raw: Option<RawSnapshot>) -> Result<Operator, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(Operator::default());
+    };
+    if raw.acme.is_some() {
+        return Err(ConfigError::invalid(
+            "snapshot.acme",
+            "ACME on a provider-only node needs the event relay, not built yet; see docs/ref/provider.md",
+        ));
+    }
+    let skew_secret = match raw.skew_secret_file {
+        None => None,
+        Some(path) => {
+            let field = "snapshot.skew_secret_file";
+            let text = std::fs::read_to_string(&path).map_err(|err| {
+                ConfigError::invalid(field, format!("cannot read {}: {err}", path.display()))
+            })?;
+            // A trailing newline is how files end, not part of the key.
+            let secret = text.strip_suffix('\n').unwrap_or(&text);
+            let secret = secret.strip_suffix('\r').unwrap_or(secret);
+            let secret = SkewSecret::new(secret);
+            if !secret.is_long_enough() {
+                return Err(ConfigError::invalid(
+                    field,
+                    format!(
+                        "{} holds a key shorter than {} bytes",
+                        path.display(),
+                        SkewSecret::MIN_LEN
+                    ),
+                ));
+            }
+            Some(secret)
+        }
+    };
+    Ok(Operator {
+        revert_window_secs: raw.revert_window_secs,
+        observability: raw.observability,
+        skew_secret,
+    })
 }
 
 fn sources(raw: Vec<RawSource>) -> Result<Vec<SourceConfig>, ConfigError> {
