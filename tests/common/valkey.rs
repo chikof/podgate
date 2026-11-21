@@ -99,6 +99,9 @@ impl Valkey {
     }
 
     async fn spawn(&mut self) -> Result<(), String> {
+        // A failed earlier attempt was dropped, and its Drop removed the shared directory.
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|err| format!("create {:?}: {err}", self.dir))?;
         let log = |name: &str| {
             Stdio::from(std::fs::File::create(self.dir.join(name)).expect("create a log file"))
         };
