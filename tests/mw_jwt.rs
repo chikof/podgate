@@ -640,8 +640,8 @@ async fn jwt_invalid_config_rejected_by_snapshot() {
         (json!({"algorithms": ["ES256"]}), "no keys and no jwks_uri"),
         (with(&good, &json!({"jwks_uri": "not a url"})), "bad url"),
         (
-            with(&good, &json!({"jwks_uri": "https://idp.example/jwks"})),
-            "a host name",
+            with(&good, &json!({"jwks_uri": "https://-bad-.example/jwks"})),
+            "a bad host name",
         ),
         (
             with(&good, &json!({"jwks_uri": "h2c://10.0.0.5/jwks"})),
@@ -963,6 +963,56 @@ async fn jwks_uses_transport_tls() {
     plain["middlewares"][0]["jwks_uri"] = json!(format!("http://{addr}/jwks"));
     let refused = podgate.push_snapshot(&snapshot(2, &[plain])).await;
     assert_eq!(rejection(&refused)["code"], "invalid_middleware");
+}
+
+#[tokio::test]
+async fn jwks_named_uri_dials_checked_ip() {
+    let dns = common::dns::Dns::start().await;
+    let policy = PolicyFile::write(r#"{"deny": ["10.9.0.0/16"]}"#);
+    let podgate = Podgate::start_with_env(&[
+        ("DNS_SERVERS", &dns.servers()),
+        ("DNS_TIMEOUT_MS", "1000"),
+        ("UPSTREAM_POLICY_FILE", policy.path.to_str().expect("utf-8")),
+    ])
+    .await;
+    let up = echo().await;
+    let key = Signer::es256("k");
+    let (jwks, _) = jwks_endpoint(&[&key]).await;
+    let port = jwks.addr.port();
+    dns.set("jwks.internal", &["127.0.0.1"], 30);
+    dns.set("rebind.internal", &["10.9.0.1"], 30);
+    let named = |id: &str, host: &str, name: &str| {
+        with_jwt_auth(
+            app(id, &[host], &[serving("r1", up.addr)]),
+            json!({"jwks_uri": format!("http://{name}:{port}/jwks"), "algorithms": ["ES256"]}),
+        )
+    };
+    let apps = [
+        named("a", "a.test", "jwks.internal"),
+        named("b", "b.test", "rebind.internal"),
+        named("c", "c.test", "missing.internal"),
+    ];
+    push(&podgate, &snapshot(1, &apps)).await;
+    let token = key.sign("ES256", &json!({}), &claims(&json!({})));
+
+    // Resolved once for the fetch, dialled at the permitted address, the name is the Host.
+    assert_eq!(bearer(&podgate, "a.test", &token).await.status, 200);
+    assert_eq!(
+        header_of(&jwks.heads()[0], "host"),
+        Some(format!("jwks.internal:{port}").as_str())
+    );
+    assert_eq!(dns.queries_for("jwks.internal"), 2);
+    // The keys are cached: no second fetch, no second resolution.
+    assert_eq!(bearer(&podgate, "a.test", &token).await.status, 200);
+    assert_eq!(jwks.requests(), 1);
+    assert_eq!(dns.queries_for("jwks.internal"), 2);
+
+    // A name that answers a denied address, or none, gives no keys: closed.
+    for host in ["b.test", "c.test"] {
+        let closed = bearer(&podgate, host, &token).await;
+        assert_eq!(closed.status, 503, "{host}: {closed:?}");
+    }
+    assert_eq!(jwks.requests(), 1, "nothing was dialled for them");
 }
 
 /// A policy file in its own temp directory, removed on drop.

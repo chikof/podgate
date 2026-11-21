@@ -3,13 +3,15 @@
 //! # The fetch
 //!
 //! One `GET` through the bounded HTTP/1.1 client of `forward_auth`
-//! ([`Client::call`]): the connection is made with the peer of [`Upstream::peer`] (so the named
-//! transport gives an `https://` endpoint its trust anchors and server name), the exact IP is
-//! checked against the upstream address policy on every call, the answer is read up to
-//! [`MAX_BODY`] bytes under a 5 second timeout, and a redirect is a failure. The memory of the
-//! call is charged to the tenant's `max_buffer_bytes` before the connection is made. `jwks_uri`
-//! is fixed configuration whose host is an IP literal; a name needs the resolver, which is not
-//! wired for JWKS yet.
+//! ([`Client::call`]): the connection is made with the peer of
+//! [`crate::service::Upstream::peer`] (so the named transport gives an `https://` endpoint its
+//! trust anchors and server name), the exact IP is checked against the upstream address policy on
+//! every call, the answer is read up to [`MAX_BODY`] bytes under a 5 second timeout, and a
+//! redirect is a failure. The memory of the call is charged to the tenant's `max_buffer_bytes`
+//! before the connection is made. `jwks_uri` is fixed configuration. Its host is an IP literal,
+//! dialled as it is, or a host name, resolved once per fetch with the node's resolver: every
+//! answer is checked against the policy for the tenant, the first permitted address is dialled,
+//! and the name is the `Host` and the SNI.
 //!
 //! # The cache
 //!
@@ -27,11 +29,10 @@
 //! - A token whose `kid` no key has starts a fetch at most once per [`KID_MISS`], and waits for
 //!   it.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use http::Uri;
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -39,9 +40,10 @@ use super::verify::{KeySet, SetError};
 use crate::budget::TenantBudget;
 use crate::compile::Invalid;
 use crate::middleware::errors::fetch::{ALLOWANCE as HEAD_ALLOWANCE, Failure as CallFailure};
-use crate::middleware::forward_auth::Client;
+use crate::middleware::forward_auth::{Client, Parsed, Route, parse_url};
+use crate::service::resolve::Resolver;
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{Server, Transport, Upstream};
+use crate::service::{Server, Transport};
 
 /// The most bytes of a JWKS answer.
 pub(super) const MAX_BODY: usize = 256 * 1024;
@@ -93,8 +95,10 @@ impl Target {
         format!("{scheme}://{}{path}", self.host)
     }
 
-    pub(super) fn ip(&self) -> IpAddr {
-        self.server.addr.ip()
+    /// The address of the endpoint when its URL has an IP literal; `None` for a host name, which
+    /// is resolved and checked against the upstream policy on every fetch.
+    pub(super) fn ip(&self) -> Option<IpAddr> {
+        self.server.host().is_none().then(|| self.server.addr.ip())
     }
 }
 
@@ -106,84 +110,26 @@ fn invalid(message: impl std::fmt::Display) -> Invalid {
 ///
 /// # Errors
 ///
-/// `invalid_middleware` for anything but an absolute `http://` or `https://` URL with an IP
-/// literal host (an `h2c://` one too: the fetch is HTTP/1.1, which an h2c server cannot answer;
-/// a host name too: the resolver is not wired for JWKS yet), and for credentials in the URL.
+/// `invalid_middleware` for anything but an absolute `http://` or `https://` URL whose host is an
+/// IP literal or a host name (an `h2c://` one too: the fetch is HTTP/1.1, which an h2c server
+/// cannot answer), for credentials in the URL, and for a transport that sets TLS options on a
+/// plain `http://` URL.
 pub(super) fn parse_uri(text: &str, transport: Arc<Transport>) -> Result<Target, Invalid> {
-    let bad = || {
-        invalid(format!(
-            "jwks_uri {text:?} must be an absolute http:// or https:// URL with an IP address host"
-        ))
-    };
-    if text.len() > MAX_URI {
-        return Err(invalid(format!("jwks_uri is longer than {MAX_URI} bytes")));
-    }
-    let uri: Uri = text.parse().map_err(|_| bad())?;
-    let tls = match uri.scheme_str() {
-        Some("http") => false,
-        Some("https") => true,
-        Some("h2c") => {
-            return Err(invalid(
-                "jwks_uri is h2c://: the fetch is written as HTTP/1.1, which an h2c server cannot answer",
-            ));
-        }
-        _ => return Err(bad()),
-    };
-    let authority = uri.authority().ok_or_else(bad)?;
-    if authority.as_str().contains('@') {
-        return Err(invalid(
-            "jwks_uri carries credentials; the fetch sends none",
-        ));
-    }
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let ip: IpAddr = host.parse().map_err(|_| {
-        let named = !host.is_empty()
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'));
-        if named {
-            invalid(format!(
-                "jwks_uri {text}: a host name needs the resolver, which is not wired for JWKS yet; use an IP address"
-            ))
-        } else {
-            bad()
-        }
-    })?;
-    let default_port = if tls { 443 } else { 80 };
-    // `Uri` reads a port out of range as no port: look at the text, so it is never dropped.
-    let tail = authority
-        .as_str()
-        .get(authority.host().len()..)
-        .unwrap_or_default();
-    let port = match tail.strip_prefix(':') {
-        None if tail.is_empty() => default_port,
-        Some(digits) => digits.parse::<u16>().map_err(|_| bad())?,
-        None => return Err(bad()),
-    };
-    let path = uri.path_and_query().map_or("/", |target| target.as_str());
-    if !path.bytes().all(|b| b.is_ascii_graphic() && b != b'#') {
-        return Err(invalid("jwks_uri path is not printable ASCII"));
-    }
-    if !tls && transport.has_tls_settings() {
+    let Parsed {
+        server,
+        host,
+        target,
+    } = parse_url(text, "jwks_uri", MAX_URI).map_err(invalid)?;
+    if !server.tls && transport.has_tls_settings() {
         return Err(invalid(
             "the transport sets TLS options and jwks_uri is plain http://",
         ));
     }
     Ok(Target {
-        server: Server {
-            url: text.into(),
-            addr: SocketAddr::new(ip, port),
-            tls,
-            h2c: false,
-            weight: 1,
-            state: Arc::default(),
-        },
+        server,
         transport,
-        host: authority.as_str().into(),
-        path: path.into(),
+        host,
+        path: target,
         uri: text.into(),
     })
 }
@@ -206,6 +152,7 @@ pub(super) struct Fetch {
     pub(super) target: Arc<Target>,
     pub(super) client: Client,
     pub(super) policy: UpstreamPolicy,
+    pub(super) resolver: Resolver,
     pub(super) tenant: Box<str>,
     pub(super) budget: Arc<TenantBudget>,
 }
@@ -218,21 +165,16 @@ impl Fetch {
             "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
             self.target.path, self.target.host
         );
-        let peer = Upstream {
+        let route = Route {
             server: &self.target.server,
             transport: &self.target.transport,
-        }
-        .peer();
+            resolver: &self.resolver,
+            policy: &self.policy,
+            tenant: &self.tenant,
+        };
         let answer = self
             .client
-            .call(
-                peer,
-                &self.policy,
-                &self.tenant,
-                request.as_bytes(),
-                MAX_BODY,
-                TIMEOUT,
-            )
+            .call(&route, request.as_bytes(), MAX_BODY, TIMEOUT)
             .await?;
         if answer.status != 200 {
             return Err(FetchError::Status(answer.status));
@@ -554,7 +496,7 @@ mod test {
     }
 
     #[test]
-    fn a_jwks_uri_is_an_absolute_http_url_with_an_ip_host() {
+    fn a_jwks_uri_is_an_absolute_http_url_with_an_ip_or_host_name() {
         let t = target("https://10.0.0.5:8443/.well-known/jwks.json?x=1").expect("uri");
         assert_eq!(t.server.addr, "10.0.0.5:8443".parse().expect("addr"));
         assert!(t.server.tls);
@@ -578,9 +520,23 @@ mod test {
                 "{bad:?}"
             );
         }
-        let named = target("https://idp.example/jwks").expect_err("a name");
-        assert_eq!(named.code, "invalid_middleware");
-        assert!(named.message.contains("resolver"), "{}", named.message);
+        let named = target("https://IdP.Example./jwks").expect("a name");
+        assert_eq!(named.server.host(), Some("idp.example"));
+        assert_eq!(named.server.sni_name().as_deref(), Some("idp.example"));
+        assert_eq!(named.ip(), None);
+        assert_eq!(named.server.addr.port(), 443);
+        assert_eq!(t.ip(), Some("10.0.0.5".parse().expect("ip")));
+        for bad in [
+            "https://-bad-.example/jwks",
+            "https://[idp.example]/jwks",
+            "https://10.0.0.999/",
+        ] {
+            assert_eq!(
+                target(bad).expect_err(bad).code,
+                "invalid_middleware",
+                "{bad:?}"
+            );
+        }
     }
 }
 
@@ -597,6 +553,7 @@ mod dial {
         Fetch {
             target: Arc::new(parse_uri(uri, Arc::new(Transport::default())).expect("uri")),
             client: Client::new(Duration::from_secs(5)),
+            resolver: Resolver::default(),
             policy,
             tenant: "t1".into(),
             budget: Budgets::new().tenant(

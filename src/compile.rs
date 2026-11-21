@@ -253,7 +253,14 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                 .map_or(0, |tenant| tenant.budget.max_buffer_bytes),
             max_percent: context.cache_tenant_max_percent(),
         };
-        let stages = stages_of(app, app_routers, &mut engine, limits, &mut rejected);
+        let stages = stages_of(
+            app,
+            app_routers,
+            &mut engine,
+            limits,
+            &mut rejected,
+            context.resolver(),
+        );
         let max_buffer_bytes = snapshot
             .tenants
             .iter()
@@ -684,6 +691,7 @@ fn stages_of(
     engine: &mut engine::Compiler,
     limits: crate::cache::Limits,
     rejected: &mut Vec<Rejected>,
+    resolver: &Resolver,
 ) -> Vec<middleware::Named> {
     let mut stages: Vec<middleware::Named> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
@@ -710,6 +718,12 @@ fn stages_of(
                 // The one kind whose limits depend on the tenant's budget and the operator.
                 if let middleware::Stage::Cache(cache) = &mut stage {
                     cache.bind(limits)?;
+                }
+                // The kinds that dial a host name of their configuration.
+                match &mut stage {
+                    middleware::Stage::ForwardAuth(auth) => auth.bind(resolver),
+                    middleware::Stage::JwtAuth(auth) => auth.bind(resolver),
+                    _ => {}
                 }
                 Ok(stage)
             });

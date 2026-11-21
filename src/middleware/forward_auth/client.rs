@@ -2,28 +2,38 @@
 //!
 //! Like the error page client ([`crate::middleware::errors::fetch`]) it dials through Pingora's
 //! `TransportConnector`, so an `https://` auth service is reached with the transport it names,
-//! and it checks the exact IP it is about to dial against the upstream address policy. Every size
-//! is a number here: the response head is read up to [`HEAD_LIMIT`] bytes, the body up to the cap
-//! the caller charged to the tenant, and the whole exchange runs under one timeout. It never
-//! follows a redirect and never reuses a connection. The request is built by the caller; this
-//! file never sees the client's request.
+//! and it checks the exact IP it is about to dial against the upstream address policy.
+//!
+//! A server named by an IP literal is dialled as it is. A server named by a host name is resolved
+//! once per call with [`Resolver::resolve_once`], every answer is checked against the policy for
+//! the calling tenant, and the first permitted address is dialled. The name is the `Host` the
+//! caller sends and the TLS server name; it is never resolved again within the call, so the
+//! answer cannot change between the check and the dial (DNS rebinding), and a name whose every
+//! answer the policy refuses is refused. Every size is a number here: the response head is read
+//! up to [`HEAD_LIMIT`] bytes, the body up to the cap the caller charged to the tenant, and the
+//! whole exchange (resolution included) runs under one timeout. It never follows a redirect and
+//! never reuses a connection. The request is built by the caller; this file never sees the
+//! client's request.
 //!
 //! The answer is judged strictly because a verdict is read from it: two `Content-Length`
 //! headers, a transfer coding other than `chunked`, both framings at once, a content coding, a
 //! folded header, a `1xx` or a status outside `200..=599` all fail the call, and a failed call is
 //! a denial.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use pingora::connectors::TransportConnector;
-use pingora::upstreams::peer::HttpPeer;
+use pingora::protocols::l4::socket::SocketAddr as PeerAddr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::middleware::errors::fetch::{Failure, Framing, HEAD_LIMIT, READ, fill, find, read_body};
+use crate::service::resolve::{Resolver, is_host_name};
 use crate::service::upstream_policy::UpstreamPolicy;
+use crate::service::{Server, Transport, Upstream};
 
 /// The most bytes the request head may take; a longer one is not sent.
 pub(super) const REQUEST_LIMIT: usize = 32 * 1024;
@@ -44,6 +54,131 @@ pub(in crate::middleware) struct Answer {
     pub(in crate::middleware) headers: HeaderMap,
     /// The body, at most the cap.
     pub(in crate::middleware) body: Vec<u8>,
+}
+
+/// Where a call goes and who is sending it.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::middleware) struct Route<'a> {
+    /// The server: its address when the URL has an IP literal, its URL's host name otherwise
+    /// (then the address only holds the port, see [`Server::host`]).
+    pub(in crate::middleware) server: &'a Server,
+    /// How to talk to it: trust anchors, server name, client certificate.
+    pub(in crate::middleware) transport: &'a Transport,
+    /// Resolves a host name.
+    pub(in crate::middleware) resolver: &'a Resolver,
+    /// The operator's rule for the addresses the proxy may dial.
+    pub(in crate::middleware) policy: &'a UpstreamPolicy,
+    /// The tenant the call is made for: the policy is theirs.
+    pub(in crate::middleware) tenant: &'a str,
+}
+
+impl Route<'_> {
+    /// The address to dial: the literal of the URL, or the first address of a fresh resolution
+    /// of its host name that the policy permits the tenant. Every candidate is checked, so a
+    /// name that answers loopback or a metadata address is refused.
+    async fn address(&self) -> Result<IpAddr, Failure> {
+        let candidates = match self.server.sni_name() {
+            Some(name) => self.resolver.resolve_once(&name).await,
+            None => vec![self.server.addr.ip()],
+        };
+        if candidates.is_empty() {
+            return Err(Failure::Connect("the host name did not resolve".into()));
+        }
+        candidates
+            .into_iter()
+            .find(|ip| self.policy.check(self.tenant, *ip).is_ok())
+            .ok_or(Failure::Policy)
+    }
+}
+
+/// What a call needs of the URL it was configured with.
+#[derive(Debug)]
+pub(in crate::middleware) struct Parsed {
+    /// The server the URL names. Its `url` is always `scheme://host:port` (the IPv6 literal in
+    /// brackets), which is what [`Server::host`] reads: a host name there is resolved per call,
+    /// and the address then holds only the port.
+    pub(in crate::middleware) server: Server,
+    /// The `Host` header of the call: the authority as written.
+    pub(in crate::middleware) host: Box<str>,
+    /// The request target of the call: the path and query of the URL.
+    pub(in crate::middleware) target: Box<str>,
+}
+
+/// Reads `text`, the configured `what` (a field name, for the messages), as an absolute `http://`
+/// or `https://` URL whose host is an IP literal or a host name.
+///
+/// # Errors
+///
+/// The reason `text` is not usable: not absolute, another scheme (`h2c://` too: the call is
+/// HTTP/1.1, which an h2c server cannot answer), credentials, a host that is neither an IP
+/// address nor a valid name, a port out of range, a path that is not printable ASCII, or longer
+/// than `max_len`.
+pub(in crate::middleware) fn parse_url(
+    text: &str,
+    what: &str,
+    max_len: usize,
+) -> Result<Parsed, String> {
+    let bad = || {
+        format!(
+            "{what} {text:?} must be an absolute http:// or https:// URL with an IP address or host name"
+        )
+    };
+    if text.len() > max_len {
+        return Err(format!("{what} is longer than {max_len} bytes"));
+    }
+    let uri: Uri = text.parse().map_err(|_| bad())?;
+    let tls = match uri.scheme_str() {
+        Some("http") => false,
+        Some("https") => true,
+        Some("h2c") => {
+            return Err(format!(
+                "{what} is h2c://: the call is written as HTTP/1.1, which an h2c server cannot answer"
+            ));
+        }
+        _ => return Err(bad()),
+    };
+    let authority = uri.authority().ok_or_else(bad)?;
+    if authority.as_str().contains('@') {
+        return Err(format!("{what} carries credentials; the call sends none"));
+    }
+    let raw = authority.host();
+    let literal = raw.trim_start_matches('[').trim_end_matches(']');
+    let default_port = if tls { 443 } else { 80 };
+    // `Uri` reads a port out of range as no port: look at the text, so it is never dropped.
+    let tail = authority.as_str().get(raw.len()..).unwrap_or_default();
+    let port = match tail.strip_prefix(':') {
+        None if tail.is_empty() => default_port,
+        Some(digits) => digits.parse::<u16>().map_err(|_| bad())?,
+        None => return Err(bad()),
+    };
+    let scheme = if tls { "https" } else { "http" };
+    let (url, ip) = match literal.parse::<IpAddr>() {
+        Ok(ip) => (format!("{scheme}://{}", SocketAddr::new(ip, port)), ip),
+        Err(_) if !raw.starts_with('[') && is_host_name(literal) => {
+            let name = literal.strip_suffix('.').unwrap_or(literal);
+            (
+                format!("{scheme}://{}:{port}", name.to_ascii_lowercase()),
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            )
+        }
+        Err(_) => return Err(bad()),
+    };
+    let target = uri.path_and_query().map_or("/", |target| target.as_str());
+    if !target.bytes().all(|b| b.is_ascii_graphic() && b != b'#') {
+        return Err(format!("{what} path is not printable ASCII"));
+    }
+    Ok(Parsed {
+        server: Server {
+            url: url.into(),
+            addr: SocketAddr::new(ip, port),
+            tls,
+            h2c: false,
+            weight: 1,
+            state: Arc::default(),
+        },
+        host: authority.as_str().into(),
+        target: target.into(),
+    })
 }
 
 /// Dials auth services. Cheap to clone; clones share the connector.
@@ -72,34 +207,35 @@ impl Client {
         }
     }
 
-    /// Sends `request` (a complete request head) to the server `peer` points at, on behalf of
-    /// `tenant`, and reads the answer.
+    /// Sends `request` (a complete request head, and the body when it has one) to the server
+    /// `route` names, on behalf of its tenant, and reads the answer.
     ///
     /// # Errors
     ///
-    /// A [`Failure`]: the policy refuses the address (nothing is dialled), the connection or the
-    /// timeout fails, or the answer is over `max_body` or not one this client accepts.
+    /// A [`Failure`]: the host name does not resolve or the policy refuses every address
+    /// (nothing is dialled), the connection or the timeout fails, or the answer is over
+    /// `max_body` or not one this client accepts.
     pub(in crate::middleware) async fn call(
         &self,
-        mut peer: HttpPeer,
-        policy: &UpstreamPolicy,
-        tenant: &str,
+        route: &Route<'_>,
         request: &[u8],
         max_body: usize,
         wait: Duration,
     ) -> Result<Answer, Failure> {
         let wait = wait.min(self.ceiling);
-        let ip = peer
-            ._address
-            .as_inet()
-            .map(std::net::SocketAddr::ip)
-            .ok_or(Failure::NotInet)?;
-        // The exact address about to be dialled, every time.
-        policy.check(tenant, ip).map_err(|_| Failure::Policy)?;
-        peer.options.connection_timeout = Some(wait);
-        peer.options.read_timeout = Some(wait);
-        peer.options.write_timeout = Some(wait);
         let exchange = async {
+            // The exact address about to be dialled, every time; a name resolves here and
+            // nowhere else.
+            let ip = route.address().await?;
+            let mut peer = Upstream {
+                server: route.server,
+                transport: route.transport,
+            }
+            .peer();
+            peer._address = PeerAddr::Inet(SocketAddr::new(ip, route.server.addr.port()));
+            peer.options.connection_timeout = Some(wait);
+            peer.options.read_timeout = Some(wait);
+            peer.options.write_timeout = Some(wait);
             let mut stream = Box::pin(self.connector.new_stream(&peer))
                 .await
                 .map_err(|err| Failure::Connect(err.to_string().into()))?;

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use common::dns::Dns;
 use common::{
     Podgate, Response, app, refused, serving, snapshot, with_forward_auth, with_middleware,
 };
@@ -1089,4 +1090,80 @@ async fn forward_auth_identity_bypasses_cache() {
         "{second:?}"
     );
     assert_eq!(up.requests(), 2, "both requests reached the upstream");
+}
+
+#[tokio::test]
+async fn forward_auth_named_address_dials_checked_ip() {
+    let dns = Dns::start().await;
+    let policy = PolicyFile::write(r#"{"deny": ["10.9.0.0/16"]}"#);
+    let podgate = Podgate::start_with_env(&[
+        ("DNS_SERVERS", &dns.servers()),
+        ("DNS_TIMEOUT_MS", "1000"),
+        ("UPSTREAM_POLICY_FILE", policy.0.to_str().expect("utf-8")),
+    ])
+    .await;
+    let (up, auth) = (echo().await, auth().await);
+    let port = auth.addr.port();
+    dns.set("auth.internal", &["127.0.0.1"], 30);
+    dns.set("rebind.internal", &["10.9.0.1"], 30);
+    dns.set("mixed.internal", &["10.9.0.1", "127.0.0.1"], 30);
+    let named = |id: &str, host: &str, name: &str| {
+        with_middleware(
+            app(id, &[host], &[serving("r1", up.addr)]),
+            "auth",
+            "forward_auth",
+            json!({"address": format!("http://{name}:{port}/verify")}),
+        )
+    };
+    let apps = [
+        named("a", "a.test", "auth.internal"),
+        named("b", "b.test", "rebind.internal"),
+        named("c", "c.test", "mixed.internal"),
+        named("d", "d.test", "missing.internal"),
+    ];
+    push(&podgate, &snapshot(1, &apps)).await;
+
+    // The name is resolved once for the call, dialled at the permitted address, and sent as Host.
+    assert_eq!(podgate.get("a.test", "/ok").await.status, 200);
+    assert_eq!(auth.requests(), 1);
+    assert_eq!(
+        header_of(&auth.heads()[0], "host"),
+        Some(format!("auth.internal:{port}").as_str())
+    );
+    assert_eq!(
+        dns.queries_for("auth.internal"),
+        2,
+        "one A and one AAAA question for one call"
+    );
+    assert_eq!(podgate.get("a.test", "/ok").await.status, 200);
+    assert_eq!(
+        dns.queries_for("auth.internal"),
+        4,
+        "resolved again per call"
+    );
+
+    // A name that answers a denied address is refused, whatever the name looks like.
+    assert_closed(&podgate.get("b.test", "/ok").await);
+    assert_eq!(
+        auth.requests(),
+        2,
+        "nothing was dialled for the denied answer"
+    );
+    let metrics = podgate.admin_get("/metrics").await.body;
+    assert!(
+        metrics
+            .lines()
+            .any(|line| line.starts_with("podgate_upstream_refused_total{tenant=\"t1\"} ")),
+        "{metrics}"
+    );
+    // The first permitted answer is the one dialled.
+    assert_eq!(podgate.get("c.test", "/ok").await.status, 200);
+    assert_eq!(auth.requests(), 3);
+    // A name that does not resolve fails closed.
+    assert_closed(&podgate.get("d.test", "/ok").await);
+    assert_eq!(
+        up.requests(),
+        3,
+        "only the allowed requests reached the upstream"
+    );
 }

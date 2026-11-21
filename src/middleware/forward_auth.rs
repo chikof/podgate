@@ -13,10 +13,12 @@
 //! continue; every other status is relayed to the client.
 //!
 //! - **Where.** `address` is fixed configuration, an `http://` or `https://` URL whose host is an
-//!   IP literal. It is never derived from the request. The connection is made with the peer of
-//!   [`Upstream::peer`] (so `transport` gives an `https://` address its trust anchors, SNI and
-//!   client certificate) and the exact IP is checked against the upstream address policy on every
-//!   call.
+//!   IP literal or a host name. It is never derived from the request. The connection is made
+//!   with the peer of [`crate::service::Upstream::peer`] (so `transport` gives an `https://` address its trust
+//!   anchors, SNI and client certificate). A host name is resolved once per call, every answer
+//!   is checked against the upstream address policy for the tenant, and the first permitted
+//!   address is dialled; the name is the `Host` and the SNI, and it is not resolved again within
+//!   the call. An IP literal is checked against the policy on every call.
 //! - **What is sent.** `GET` with `Host` of the address, `X-Forwarded-Method`, `-Proto`, `-Host`,
 //!   `-Uri` and `-For` written from the connection and the resolved client address
 //!   ([`ForwardedView`]), never from a raw `X-Forwarded-*` of the client, and the request headers
@@ -33,13 +35,13 @@
 mod client;
 
 pub use client::Client;
+pub(super) use client::{Parsed, Route, parse_url};
 
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::{HeaderName, Method, Uri};
+use http::{HeaderName, Method};
 use pingora::http::{RequestHeader, ResponseHeader};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
@@ -52,7 +54,8 @@ use crate::client_ip::{ForwardedView, UNKNOWN};
 use crate::compile::Invalid;
 use crate::error::AppError;
 use crate::plan;
-use crate::service::{Server, Transport, Upstream};
+use crate::service::resolve::Resolver;
+use crate::service::{Server, Transport};
 use crate::table::CompiledApp;
 use podgate_model::Declared;
 
@@ -117,8 +120,11 @@ struct Runtime {
 
 #[derive(Debug)]
 struct Parts {
-    /// The server the address names; the transport decides how to talk to it.
+    /// The server the address names (a host name resolves per call, see [`client::Route`]); the
+    /// transport decides how to talk to it.
     server: Server,
+    /// Resolves the address's host name; bound at compile ([`ForwardAuth::bind`]).
+    resolver: Resolver,
     transport: Arc<Transport>,
     transport_name: Option<Box<str>>,
     /// The `Host` header of the call: the authority as written.
@@ -216,80 +222,9 @@ fn names(list: &[String], field: &str) -> Result<Vec<HeaderName>, Invalid> {
     Ok(out)
 }
 
-/// Splits `address` into the server it names, the `Host` of the call and its request target.
-fn parse_address(address: &str) -> Result<(Server, Box<str>, Box<str>), Invalid> {
-    let bad = || {
-        invalid(format!(
-            "address {address:?} must be an absolute http:// or https:// URL with an IP address host"
-        ))
-    };
-    if address.len() > MAX_ADDRESS {
-        return Err(invalid(format!(
-            "address is longer than {MAX_ADDRESS} bytes"
-        )));
-    }
-    let uri: Uri = address.parse().map_err(|_| bad())?;
-    let tls = match uri.scheme_str() {
-        Some("http") => false,
-        Some("https") => true,
-        Some("h2c") => {
-            return Err(invalid(
-                "address is h2c://: the call is written as HTTP/1.1, which an h2c server cannot answer",
-            ));
-        }
-        _ => return Err(bad()),
-    };
-    let authority = uri.authority().ok_or_else(bad)?;
-    if authority.as_str().contains('@') {
-        return Err(invalid("address carries credentials; the call sends none"));
-    }
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let ip: IpAddr = match host.parse() {
-        Ok(ip) => ip,
-        Err(_) => {
-            let named = !host.is_empty()
-                && host
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'));
-            return Err(if named {
-                Invalid::new(
-                    "invalid_middleware",
-                    format!(
-                        "forward_auth: address {address}: a host name is not supported yet, the DNS resolver is not wired for forward_auth; use an IP address"
-                    ),
-                )
-            } else {
-                bad()
-            });
-        }
-    };
-    let default_port = if tls { 443 } else { 80 };
-    // `Uri` reads a port out of range as no port: look at the text, so it is never dropped.
-    let tail = authority
-        .as_str()
-        .get(authority.host().len()..)
-        .unwrap_or_default();
-    let port = match tail.strip_prefix(':') {
-        None if tail.is_empty() => default_port,
-        Some(digits) => digits.parse::<u16>().map_err(|_| bad())?,
-        None => return Err(bad()),
-    };
-    let target = uri.path_and_query().map_or("/", |target| target.as_str());
-    if !target.bytes().all(|b| b.is_ascii_graphic() && b != b'#') {
-        return Err(invalid("address path is not printable ASCII"));
-    }
-    let server = Server {
-        url: address.into(),
-        addr: SocketAddr::new(ip, port),
-        tls,
-        h2c: false,
-        weight: 1,
-        state: Arc::default(),
-    };
-    Ok((server, authority.as_str().into(), target.into()))
+/// Reads `address`: the server it names, the `Host` of the call and its request target.
+fn parse_address(address: &str) -> Result<client::Parsed, Invalid> {
+    client::parse_url(address, "address", MAX_ADDRESS).map_err(invalid)
 }
 
 /// The transport named `name` of `app`, compiled for the call.
@@ -321,6 +256,11 @@ fn transport_of(
 }
 
 impl ForwardAuth {
+    /// Gives the stage the resolver its host name (when `address` has one) is resolved with.
+    pub(crate) fn bind(&mut self, resolver: &Resolver) {
+        self.0.resolver = resolver.clone();
+    }
+
     /// Refuses a call that could never be charged: the allowances plus the body cap are more
     /// than the tenant's whole `max_buffer_bytes`. A budget that is only full right now is not
     /// judged here; the request is refused with `503` when its charge is refused.
@@ -456,20 +396,15 @@ impl ForwardAuth {
                 tracing::warn!(app = cx.app.id(), "forward_auth request head is too large");
                 AppError::AuthUnavailable
             })?;
-        let peer = Upstream {
+        let route = client::Route {
             server: &self.0.server,
             transport: &self.0.transport,
-        }
-        .peer();
+            resolver: &self.0.resolver,
+            policy: cx.policy,
+            tenant: cx.app.tenant(),
+        };
         cx.auth
-            .call(
-                peer,
-                cx.policy,
-                cx.app.tenant(),
-                &request,
-                self.0.max_response,
-                self.0.timeout,
-            )
+            .call(&route, &request, self.0.max_response, self.0.timeout)
             .await
             .map_err(|why| {
                 tracing::warn!(app = cx.app.id(), %why, "forward_auth call failed");
@@ -509,7 +444,11 @@ impl Kind for ForwardAuth {
     fn compile(declared: &Declared, cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
         let config: Config =
             serde_json::from_value(Value::Object(declared.config.clone())).map_err(invalid)?;
-        let (server, host, target) = parse_address(&config.address)?;
+        let client::Parsed {
+            server,
+            host,
+            target,
+        } = parse_address(&config.address)?;
         let transport = transport_of(cx.app, config.transport.as_deref(), server.tls)?;
         let request_headers = match &config.request_headers {
             None => None,
@@ -560,6 +499,7 @@ impl Kind for ForwardAuth {
         let permits = usize::try_from(max_concurrent).unwrap_or(usize::MAX);
         Ok(Self(Box::new(Parts {
             server,
+            resolver: Resolver::default(),
             transport,
             transport_name: config.transport.map(Into::into),
             host,
@@ -678,7 +618,7 @@ impl Registry {
 
 #[cfg(test)]
 mod test {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
     use crate::client_ip::Proto;
@@ -736,7 +676,7 @@ mod test {
     }
 
     #[test]
-    fn an_address_is_an_absolute_http_url_with_an_ip_host() {
+    fn an_address_is_an_absolute_http_url_with_an_ip_or_host_name() {
         assert!(compile(&json!({"address": "http://10.0.0.5:9091/verify?k=1"})).is_ok());
         assert!(compile(&json!({"address": "https://[2001:db8::5]/v"})).is_ok());
         assert!(compile(&json!({"address": "http://10.0.0.5"})).is_ok());
@@ -759,10 +699,29 @@ mod test {
                 "{bad:?}"
             );
         }
+        let named = compile(&json!({"address": "https://Auth.Internal.:9091/v"})).expect("a name");
+        assert_eq!(named.0.server.host(), Some("auth.internal"));
+        assert_eq!(named.0.server.sni_name().as_deref(), Some("auth.internal"));
+        assert_eq!(named.0.server.addr.port(), 9091);
+        assert_eq!(&*named.0.host, "Auth.Internal.:9091");
+        let literal = compile(&json!({"address": "https://[2001:db8::5]/v"})).expect("a literal");
         assert_eq!(
-            code(&json!({"address": "http://auth.internal:9091/"})),
-            "invalid_middleware"
+            literal.0.server.host(),
+            None,
+            "an IPv6 literal is not a name"
         );
+        for bad in [
+            "http://-bad-.internal/",
+            "http://[auth.internal]/",
+            "http://10.0.0.999/",
+            "http://a..b/",
+        ] {
+            assert_eq!(
+                code(&json!({"address": bad})),
+                "invalid_middleware",
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

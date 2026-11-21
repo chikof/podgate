@@ -64,6 +64,7 @@ use crate::error::AppError;
 use crate::middleware::forward_auth::Client;
 use crate::plan;
 use crate::service::Transport;
+use crate::service::resolve::Resolver;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::{CompiledApp, RoutingTable};
 use podgate_model::{Declared, Snapshot};
@@ -514,6 +515,7 @@ struct Parts {
     jwks: Option<Arc<Target>>,
     refresh_secs: u64,
     transport_name: Option<Box<str>>,
+    resolver: Resolver,
     runtime: Arc<Runtime>,
     fingerprint: u64,
 }
@@ -588,6 +590,12 @@ struct Who<'a> {
 }
 
 impl JwtAuth {
+    /// Gives the stage the resolver the host name of its `jwks_uri` (when it has one) is
+    /// resolved with.
+    pub(crate) fn bind(&mut self, resolver: &Resolver) {
+        self.0.resolver = resolver.clone();
+    }
+
     /// The `jwks_uri` this middleware fetches, if any.
     fn target(&self) -> Option<&Arc<Target>> {
         self.0.jwks.as_ref()
@@ -618,6 +626,7 @@ impl JwtAuth {
             target: Arc::clone(target),
             client: who.client.clone(),
             policy: who.policy.clone(),
+            resolver: self.0.resolver.clone(),
             tenant: who.tenant.into(),
             budget: Arc::clone(budget),
         };
@@ -872,6 +881,7 @@ impl Kind for JwtAuth {
             jwks,
             refresh_secs,
             transport_name: config.transport.map(Into::into),
+            resolver: Resolver::default(),
             runtime: Arc::new(Runtime {
                 cache: Cache::new(refresh_secs),
                 stats: Stats::default(),
@@ -1089,7 +1099,9 @@ pub(crate) fn check_snapshot(
                     .with("max_buffer_bytes", budget),
                 ));
             }
-            if let Err(refused) = policy.evaluate(&app.tenant, target.ip()) {
+            if let Some(ip) = target.ip()
+                && let Err(refused) = policy.evaluate(&app.tenant, ip)
+            {
                 rejected.push(Rejected::new(
                     app,
                     at.clone(),
