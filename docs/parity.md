@@ -67,7 +67,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | SRV upstreams | none | `srv` dynamic upstreams | built (`resolve: "srv"` with priorities, weights, the TTL, a port deny list because DNS then chooses the port, and the address policy on every target), see docs/ref/dns-srv.md; `multi` and other sources declined |
 | Upstream address policy (SSRF) | none | none | built: operator allow and deny CIDRs per tenant; loopback, link-local, metadata, unspecified and multicast denied by default; checked at compile and before every dial |
 | Response flush interval | `responseForwarding.flushInterval` | `flush_interval` | declined: Pingora streams chunks as they arrive |
-| Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport; default never closes a tunnel) |
+| Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport); by default no timer ends an active tunnel, and an idle one closes at the shorter of the transport's `read_timeout_secs` (default `REQUEST_TIMEOUT_SECS`) and the entry point's `timeouts.read_secs`, traffic either way keeping it open (`docs/ref/websocket.md`) |
+| WebSocket proxying | transparent | transparent | built and verified (`docs/ref/websocket.md`; upgrade, frames, TLS, the middleware matrix, drain and shutdown tested end to end) |
 
 ## Transports
 
@@ -190,5 +191,5 @@ Every item the earlier passes deferred or declined now has a spec in the matrix.
 | Templating, `map`, `vars` (Caddy) | Snapshots are generated data | Template in the snapshot writer |
 | Per-route TLS options | TLS is decided before routing | Per-app policy; separate hosts for different policies |
 | Marathon, Rancher providers | End-of-life platforms | None |
-| WebSockets over HTTP/2 and HTTP/3 | Depends on Pingora and the h3 crate; 0063 records the HTTP/2 result | Follow the finding of 0063 |
+| WebSockets over HTTP/2 and HTTP/3 | Pingora 0.9.1 does not send `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 8441), so an extended `CONNECT` is reset with `PROTOCOL_ERROR` and clients use HTTP/1.1 (`docs/ref/websocket.md`); no WebSockets over h3 | Use HTTP/1.1 WebSockets; revisit when Pingora enables the setting |
 | `flush_interval` | Pingora streams chunks as they arrive | Nothing to do |
