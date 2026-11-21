@@ -241,10 +241,10 @@ fn endpoint(name: &str, entry: &Entry) -> Result<(Option<Tls>, Box<str>, u16), L
         (false, None) => None,
     };
     if tls.is_none() && entry.password_file.is_some() && !is_loopback(host) {
-        tracing::warn!(
-            store = name,
-            "the password of this rate limit store is sent in clear text; use `rediss://` unless the network is private"
-        );
+        return Err(bad(
+            name,
+            "`password_file` with `redis://` to a host that is not loopback would send the password in clear text across the network; use `rediss://` with `tls_ca_file`",
+        ));
     }
     Ok((tls, host.into(), port))
 }
@@ -364,7 +364,9 @@ mod test {
             let err = parse_one(&case).expect_err(&case.to_string());
             assert!(!err.to_string().contains("hunter2"), "{err}");
         }
-        assert!(parse_one(&with("password_file", serde_json::json!(password))).is_ok());
+        let mut loopback = entry("redis://127.0.0.1:1");
+        loopback["password_file"] = serde_json::json!(password);
+        assert!(parse_one(&loopback).is_ok());
         std::fs::remove_file(&password).expect("remove");
     }
 
@@ -382,5 +384,42 @@ mod test {
         let shown = format!("{spec:?} {auth:?} {:#?}", auth.password);
         assert!(!shown.contains("hunter2"), "{shown}");
         assert!(shown.contains("[redacted]"));
+    }
+
+    #[test]
+    fn store_password_over_plaintext_refused() {
+        let path = std::env::temp_dir().join(format!("podgate-pw-plain-{}", std::process::id()));
+        std::fs::write(&path, "hunter2-planted\n").expect("write");
+        let with_password = |url: &str| {
+            let mut config = entry(url);
+            config["password_file"] = serde_json::json!(path);
+            parse_one(&config)
+        };
+        for url in [
+            "redis://cache.internal:6379",
+            "redis://10.0.0.5",
+            "redis://[fd00::5]:6379",
+            "redis://localhost.example:6379",
+        ] {
+            let err = with_password(url).expect_err(url);
+            let text = err.to_string();
+            assert!(
+                text.contains("\"main\"") && text.contains("rediss://"),
+                "{text}"
+            );
+            assert!(!text.contains("hunter2"), "{text}");
+        }
+        for url in [
+            "redis://127.0.0.1:6379",
+            "redis://[::1]:6379",
+            "redis://localhost",
+        ] {
+            assert!(with_password(url).is_ok(), "{url}");
+        }
+        assert!(
+            parse_one(&entry("redis://cache.internal:6379")).is_ok(),
+            "no password, nothing to protect"
+        );
+        std::fs::remove_file(&path).expect("remove");
     }
 }

@@ -602,10 +602,13 @@ fn planted_stores() -> String {
     let password = dir.join("password");
     std::fs::write(&password, plant("store-password")).expect("write the password file");
     let file = dir.join("stores.json");
-    let stores = json!({"main": {
-        "url": format!("redis://{}:6379", plant("store-host")),
-        "password_file": password, "tenants": ["t1"],
-    }});
+    // A password is only allowed over loopback or TLS, so the planted host is a second store.
+    let stores = json!({
+        "main": {"url": "redis://127.0.0.1:6379", "password_file": password, "tenants": ["t1"]},
+        "remote": {
+            "url": format!("redis://{}:6379", plant("store-host")), "tenants": ["t1"],
+        },
+    });
     std::fs::write(&file, stores.to_string()).expect("write the stores file");
     file.to_string_lossy().into_owned()
 }

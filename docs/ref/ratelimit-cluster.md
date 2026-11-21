@@ -60,7 +60,7 @@ A bad file, a missing password or CA file, or an entry that breaks a rule stops 
 
 **The upstream address policy does not apply to a store.** The policy (`docs/ref/upstream-policy.md`) guards the addresses a *tenant* can aim podgate at. The store's address is chosen by the operator, and it usually lives on a private network the default policy denies. The tenant's only influence is choosing among the stores the operator listed for it.
 
-**Passwords and TLS.** The password is held in a type whose `Debug` prints `[redacted]`, is never in a log line, an error, explain, the overview or a metric label, and never reaches a snapshot. With `redis://` the password crosses the network in clear text: use `rediss://` unless the network is private (podgate logs a warning for a non-loopback `redis://` store with a password). The password and the `AUTH` command are not zeroized from memory.
+**Passwords and TLS.** The password is held in a type whose `Debug` prints `[redacted]`, is never in a log line, an error, explain, the overview or a metric label, and never reaches a snapshot. A `password_file` with `redis://` to a host that is not loopback (an address in `127.0.0.0/8` or `::1`, or `localhost`) stops startup with `invalid RATE_LIMIT_STORES_FILE: <path>: store "<name>": ...`, because it would send the credential in clear text across the network; use `rediss://` with `tls_ca_file`. Loopback and `rediss://` are allowed, and a store without a password may use `redis://` anywhere. The password and the `AUTH` command are not zeroized from memory.
 
 ## The algorithm
 

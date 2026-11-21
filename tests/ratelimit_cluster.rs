@@ -1078,3 +1078,68 @@ async fn cluster_limit_latency() {
         }
     }
 }
+
+/// Starts the binary with `stores` as `RATE_LIMIT_STORES_FILE` and returns whether it stopped on
+/// its own with a failure, and what it wrote to stderr.
+fn start_with_stores(stores: &Path) -> (bool, String) {
+    let dir = valkey::scratch("startup");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_podgate"))
+        .env("PROXY_ADDR", "127.0.0.1:0")
+        .env("ADMIN_SOCKET", dir.join("admin.sock"))
+        .env("RATE_LIMIT_STORES_FILE", stores)
+        .env("RUST_LOG", "warn")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn podgate");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll podgate") {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if status.is_none() {
+        drop(child.kill());
+    }
+    let output = child.wait_with_output().expect("collect output");
+    drop(std::fs::remove_dir_all(&dir));
+    (
+        status.is_some_and(|status| !status.success()),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn store_password_over_plaintext_refused() {
+    let dir = valkey::scratch("plaintext");
+    let password = dir.join("password");
+    std::fs::write(&password, "planted-plaintext-pw-4e1d\n").expect("write the password file");
+    let stores = |url: &str| {
+        let mut entry = json!({"url": url, "tenants": ["t1"]});
+        entry["password_file"] = json!(password);
+        valkey::stores_file(&dir, &json!({ "cache": entry }))
+    };
+
+    let (failed, stderr) = start_with_stores(&stores("redis://cache.internal:6379"));
+    assert!(failed, "podgate did not stop:\n{stderr}");
+    assert!(
+        stderr.contains("RATE_LIMIT_STORES_FILE")
+            && stderr.contains("\"cache\"")
+            && stderr.contains("rediss://"),
+        "the variable, the store and the fix are named in:\n{stderr}"
+    );
+    assert!(!stderr.contains("planted-plaintext"), "{stderr}");
+
+    // Loopback is allowed: the password never leaves the host.
+    let podgate = Podgate::start_with_env(&[(
+        "RATE_LIMIT_STORES_FILE",
+        stores("redis://127.0.0.1:9").to_str().expect("utf-8 path"),
+    )])
+    .await;
+    assert_eq!(podgate.admin_get("/readyz").await.status, 200);
+}
