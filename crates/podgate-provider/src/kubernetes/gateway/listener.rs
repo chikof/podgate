@@ -14,14 +14,14 @@
 //!
 //! A route that is accepted by no listener is rejected, with the reason of each parent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 
 use super::backend::{Grants, cross_namespace};
-use super::types::{GROUP, Gateway, Listener, ParentRef, SelectorRequirement};
+use super::types::{GROUP, Gateway, Listener, ObjectReference, ParentRef, SelectorRequirement};
 use super::{Kind, Rejection, reject};
 use crate::kubernetes::client::ObjectMeta;
 use crate::kubernetes::endpoints::Secret;
@@ -49,6 +49,8 @@ pub struct ParentReport {
     pub gateway: String,
     /// The `sectionName`, when the entry names one.
     pub section: Option<String>,
+    /// The `port`, when the entry names one.
+    pub port: Option<u16>,
     /// Whether the route attached to at least one listener of it.
     pub accepted: bool,
     /// The Gateway API reason: `Accepted`, `NotAllowedByListeners`, `NoMatchingListenerHostname`
@@ -90,6 +92,9 @@ pub struct Gateways<'a> {
     /// Listener port to entry point.
     entry_points: &'a BTreeMap<u16, Box<str>>,
     tenancy: &'a Tenancy,
+    /// The listeners that conflict with another listener of their Gateway, by Gateway key and
+    /// listener name. They are refused: their port is not served for them.
+    conflicts: BTreeMap<(String, String), Rejection>,
 }
 
 impl<'a> Gateways<'a> {
@@ -102,18 +107,29 @@ impl<'a> Gateways<'a> {
         entry_points: &'a BTreeMap<u16, Box<str>>,
         tenancy: &'a Tenancy,
     ) -> Self {
+        let gateways: BTreeMap<(&'a str, &'a str), &'a Gateway> = gateways
+            .map(|gateway| {
+                (
+                    (gateway.metadata.namespace(), gateway.metadata.name.as_str()),
+                    gateway,
+                )
+            })
+            .collect();
+        let conflicts = gateways
+            .values()
+            .flat_map(|gateway| {
+                let key = gateway.metadata.key();
+                conflicts(&gateway.spec.listeners)
+                    .into_iter()
+                    .map(move |(name, why)| ((key.clone(), name.to_owned()), why))
+            })
+            .collect();
         Self {
-            gateways: gateways
-                .map(|gateway| {
-                    (
-                        (gateway.metadata.namespace(), gateway.metadata.name.as_str()),
-                        gateway,
-                    )
-                })
-                .collect(),
+            gateways,
             labels,
             entry_points,
             tenancy,
+            conflicts,
         }
     }
 
@@ -141,6 +157,7 @@ impl<'a> Gateways<'a> {
             let mut report = ParentReport {
                 gateway: key.clone(),
                 section: parent.section_name.clone(),
+                port: parent.port,
                 accepted: false,
                 reason: "NoMatchingParent",
                 message: format!(
@@ -195,10 +212,19 @@ impl<'a> Gateways<'a> {
     ) -> Result<Attachment, Rejection> {
         let key = gateway.metadata.key();
         let name = &listener.name;
+        if let Some(conflict) = self.conflict(&key, name) {
+            return Err(reject(
+                "NotAllowedByListeners",
+                format!(
+                    "listener {name} of Gateway {key} is in conflict and is not used: {}: {}",
+                    conflict.reason, conflict.message
+                ),
+            ));
+        }
         let entry_point = self.usable(listener).map_err(|why| {
             reject(
                 "NotAllowedByListeners",
-                format!("listener {name} of Gateway {key}: {why}"),
+                format!("listener {name} of Gateway {key}: {}", why.message),
             )
         })?;
         self.allowed(gateway, listener, route).map_err(|why| {
@@ -232,8 +258,21 @@ impl<'a> Gateways<'a> {
         })
     }
 
-    /// The entry point of a listener that can carry HTTP routes.
-    fn usable(&self, listener: &Listener) -> Result<Box<str>, String> {
+    /// Why the listener `name` of the Gateway `gateway` (`namespace/name`) is refused for
+    /// conflicting with another listener, when it is.
+    #[must_use]
+    pub fn conflict(&self, gateway: &str, name: &str) -> Option<&Rejection> {
+        self.conflicts.get(&(gateway.to_owned(), name.to_owned()))
+    }
+
+    /// The entry point of a listener that can carry HTTP routes, or why not:
+    /// `UnsupportedProtocol` or `PortUnavailable`, the Gateway API's reasons of a listener's
+    /// `Accepted` condition.
+    ///
+    /// # Errors
+    ///
+    /// The [`Rejection`] with that reason.
+    pub fn usable(&self, listener: &Listener) -> Result<Box<str>, Rejection> {
         match listener.protocol.as_str() {
             "HTTP" => {}
             "HTTPS" => {
@@ -243,12 +282,18 @@ impl<'a> Gateways<'a> {
                     .and_then(|tls| tls.mode.as_deref())
                     .is_some_and(|mode| mode != "Terminate")
                 {
-                    return Err("an HTTPS listener must terminate TLS".to_owned());
+                    return Err(reject(
+                        "UnsupportedProtocol",
+                        "an HTTPS listener must terminate TLS",
+                    ));
                 }
             }
             other => {
-                return Err(format!(
-                    "the protocol {other:?} carries no HTTP route (only HTTP and HTTPS do)"
+                return Err(reject(
+                    "UnsupportedProtocol",
+                    format!(
+                        "the protocol {other:?} carries no HTTP route (only HTTP and HTTPS do)"
+                    ),
                 ));
             }
         }
@@ -256,9 +301,12 @@ impl<'a> Gateways<'a> {
             .get(&listener.port)
             .cloned()
             .ok_or_else(|| {
-                format!(
-                    "port {} has no entry point; add it to listener_entry_points",
-                    listener.port
+                reject(
+                    "PortUnavailable",
+                    format!(
+                        "port {} has no entry point; add it to listener_entry_points",
+                        listener.port
+                    ),
                 )
             })
     }
@@ -434,6 +482,7 @@ pub fn certificates(
     gateway: &Gateway,
     served: &dyn Fn(&str) -> Vec<HostPattern>,
     certs: &Certs<'_, '_>,
+    skip: &dyn Fn(&str) -> bool,
     notes: &mut Vec<String>,
 ) -> Vec<SourceCertificate> {
     let meta: &ObjectMeta = &gateway.metadata;
@@ -445,6 +494,9 @@ pub fn certificates(
         .unwrap_or(0);
     let mut out = Vec::new();
     for listener in &gateway.spec.listeners {
+        if skip(&listener.name) {
+            continue;
+        }
         let Some(tls) = listener
             .tls
             .as_ref()
@@ -476,28 +528,8 @@ pub fn certificates(
                 listener.name
             );
             let result: Result<SourceCertificate, String> = (|| {
-                let group = reference.group.as_deref().unwrap_or("");
-                let kind = reference.kind.as_deref().unwrap_or("Secret");
-                if !group.is_empty() || kind != "Secret" {
-                    return Err(format!("{kind} (group {group:?}) is not a Secret"));
-                }
-                let namespace = reference.namespace.as_deref().unwrap_or(meta.namespace());
-                cross_namespace(
-                    certs.tenancy,
-                    certs.grants,
-                    "Gateway",
-                    meta.namespace(),
-                    namespace,
-                    "",
-                    "Secret",
-                    &reference.name,
-                )?;
-                let secret = (certs.secret)(namespace, &reference.name).ok_or_else(|| {
-                    format!(
-                        "no Secret {namespace}/{} of type kubernetes.io/tls (it is missing, or has another type)",
-                        reference.name
-                    )
-                })?;
+                let (secret, namespace) = resolve_secret(meta, reference, certs)
+                    .map_err(|rejection| rejection.message)?;
                 certs
                     .tenancy
                     .check_hosts(&claim, &hosts)
@@ -521,6 +553,260 @@ pub fn certificates(
             match result {
                 Ok(certificate) => out.push(certificate),
                 Err(why) => notes.push(format!("{place}: {why}")),
+            }
+        }
+    }
+    out
+}
+
+/// The Secret a certificate reference of `meta`'s Gateway names, with its namespace, or why a
+/// listener cannot use it: `InvalidCertificateRef` for a kind that is not a Secret and for a
+/// Secret that is missing (or of another type), `RefNotPermitted` for a reference into another
+/// namespace that no `ReferenceGrant` allows, or into another tenant.
+fn resolve_secret<'s>(
+    meta: &ObjectMeta,
+    reference: &ObjectReference,
+    certs: &Certs<'_, 's>,
+) -> Result<(&'s Secret, String), Rejection> {
+    let group = reference.group.as_deref().unwrap_or("");
+    let kind = reference.kind.as_deref().unwrap_or("Secret");
+    if !group.is_empty() || kind != "Secret" {
+        return Err(reject(
+            "InvalidCertificateRef",
+            format!("{kind} (group {group:?}) is not a Secret"),
+        ));
+    }
+    let namespace = reference.namespace.as_deref().unwrap_or(meta.namespace());
+    cross_namespace(
+        certs.tenancy,
+        certs.grants,
+        "Gateway",
+        meta.namespace(),
+        namespace,
+        "",
+        "Secret",
+        &reference.name,
+    )
+    .map_err(|why| reject("RefNotPermitted", why))?;
+    let secret = (certs.secret)(namespace, &reference.name).ok_or_else(|| {
+        reject(
+            "InvalidCertificateRef",
+            format!(
+                "no Secret {namespace}/{} of type kubernetes.io/tls (it is missing, or has another type)",
+                reference.name
+            ),
+        )
+    })?;
+    Ok((secret, namespace.to_owned()))
+}
+
+/// What the status of one listener says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerReport {
+    /// The listener's name.
+    pub name: String,
+    /// `Accepted`: `UnsupportedProtocol` or `PortUnavailable` when not.
+    pub accepted: Result<(), Rejection>,
+    /// `Conflicted`: `ProtocolConflict` or `HostnameConflict` when it is; the listener is
+    /// refused then.
+    pub conflict: Option<Rejection>,
+    /// `ResolvedRefs`: `InvalidRouteKinds`, `InvalidCertificateRef` or `RefNotPermitted` when
+    /// not.
+    pub resolved_refs: Result<(), Rejection>,
+    /// How many routes are attached to it.
+    pub attached_routes: u32,
+    /// The route kinds it supports, as `supportedKinds` lists them.
+    pub supported_kinds: Vec<&'static str>,
+    /// The `Origin::object` of each certificate it orders, for the daemon's verdict on them.
+    pub certificates: Vec<String>,
+}
+
+impl ListenerReport {
+    /// Whether the listener is in use: accepted, without conflict, with its references
+    /// resolved.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        self.accepted.is_ok() && self.conflict.is_none() && self.resolved_refs.is_ok()
+    }
+}
+
+/// What the status of one Gateway says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayReport {
+    /// `namespace/name`.
+    pub key: String,
+    /// The generation the report is about.
+    pub generation: Option<i64>,
+    /// The listeners, in order.
+    pub listeners: Vec<ListenerReport>,
+}
+
+impl Gateways<'_> {
+    /// The report of `gateway`'s listeners. `attached` gives how many routes are attached to a
+    /// listener (by its name).
+    #[must_use]
+    pub fn report(
+        &self,
+        gateway: &Gateway,
+        attached: &dyn Fn(&str) -> u32,
+        certs: &Certs<'_, '_>,
+    ) -> GatewayReport {
+        let meta = &gateway.metadata;
+        let key = meta.key();
+        let listeners = gateway
+            .spec
+            .listeners
+            .iter()
+            .map(|listener| {
+                let mut certificates = Vec::new();
+                let mut resolved_refs = kinds_supported(listener);
+                if listener.protocol == "HTTPS"
+                    && let Some(tls) = &listener.tls
+                {
+                    for (index, reference) in tls.certificate_refs.iter().enumerate() {
+                        certificates.push(format!("Gateway/{key}#{}-{index}", listener.name));
+                        if resolved_refs.is_ok() {
+                            resolved_refs = resolve_secret(meta, reference, certs).map(|_| ());
+                        }
+                    }
+                }
+                let supported_kinds = if matches!(listener.protocol.as_str(), "HTTP" | "HTTPS") {
+                    let listed = listener
+                        .allowed_routes
+                        .as_ref()
+                        .map(|allowed| &allowed.kinds);
+                    ["HTTPRoute", "GRPCRoute"]
+                        .into_iter()
+                        .filter(|kind| {
+                            listed.is_none_or(|kinds| {
+                                kinds.is_empty()
+                                    || kinds.iter().any(|listed| {
+                                        listed.group.as_deref().unwrap_or(GROUP) == GROUP
+                                            && listed.kind == *kind
+                                    })
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                ListenerReport {
+                    name: listener.name.clone(),
+                    accepted: self.usable(listener).map(|_| ()),
+                    conflict: self.conflict(&key, &listener.name).cloned(),
+                    resolved_refs,
+                    attached_routes: attached(&listener.name),
+                    supported_kinds,
+                    certificates,
+                }
+            })
+            .collect();
+        GatewayReport {
+            key,
+            generation: meta.generation,
+            listeners,
+        }
+    }
+}
+
+/// `InvalidRouteKinds` when `allowedRoutes.kinds` names a kind this source does not serve.
+fn kinds_supported(listener: &Listener) -> Result<(), Rejection> {
+    let Some(allowed) = &listener.allowed_routes else {
+        return Ok(());
+    };
+    for kind in &allowed.kinds {
+        let group = kind.group.as_deref().unwrap_or(GROUP);
+        if group != GROUP || !matches!(kind.kind.as_str(), "HTTPRoute" | "GRPCRoute") {
+            return Err(reject(
+                "InvalidRouteKinds",
+                format!(
+                    "allowedRoutes.kinds names {} (group {group:?}); only HTTPRoute and GRPCRoute are served",
+                    kind.kind
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether two listeners may share a port: the protocols that can are one family.
+fn family(protocol: &str) -> &str {
+    match protocol {
+        "HTTPS" | "TLS" => "HTTPS/TLS",
+        other => other,
+    }
+}
+
+/// The listeners of one Gateway that conflict with another one, by name, with the Gateway API's
+/// reason: `ProtocolConflict` when listeners on one port use protocols that cannot share it
+/// (`HTTP` with `HTTPS`, `TCP` with `UDP`) or two `TCP` or `UDP` listeners share a port, and
+/// `HostnameConflict` when listeners of one port and protocol family have the same `hostname`
+/// (none counts as one). Every listener of a conflict is named: the API says a conflicted
+/// listener's port is not to be configured, and no listener of the conflict outranks another.
+#[must_use]
+pub fn conflicts(listeners: &[Listener]) -> BTreeMap<&str, Rejection> {
+    let mut by_port: BTreeMap<u16, Vec<&Listener>> = BTreeMap::new();
+    for listener in listeners {
+        by_port.entry(listener.port).or_default().push(listener);
+    }
+    let mut out = BTreeMap::new();
+    for (port, group) in by_port.into_iter().filter(|(_, group)| group.len() > 1) {
+        let families: BTreeSet<&str> = group.iter().map(|l| family(&l.protocol)).collect();
+        if families.len() > 1 {
+            let protocols: BTreeSet<&str> = group.iter().map(|l| l.protocol.as_str()).collect();
+            let message = format!(
+                "port {port} carries listeners of the protocols {}, which cannot share a port",
+                protocols.into_iter().collect::<Vec<_>>().join(", ")
+            );
+            for listener in group {
+                out.insert(
+                    listener.name.as_str(),
+                    reject("ProtocolConflict", message.clone()),
+                );
+            }
+            continue;
+        }
+        if matches!(group[0].protocol.as_str(), "TCP" | "UDP") {
+            let message = format!(
+                "port {port} is used by {} listeners of the protocol {}",
+                group.len(),
+                group[0].protocol
+            );
+            for listener in group {
+                out.insert(
+                    listener.name.as_str(),
+                    reject("ProtocolConflict", message.clone()),
+                );
+            }
+            continue;
+        }
+        let mut by_host: BTreeMap<String, Vec<&Listener>> = BTreeMap::new();
+        for listener in group {
+            let host = listener
+                .hostname
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            by_host.entry(host).or_default().push(listener);
+        }
+        for (host, same) in by_host.into_iter().filter(|(_, same)| same.len() > 1) {
+            let names: Vec<&str> = same.iter().map(|l| l.name.as_str()).collect();
+            let message = if host.is_empty() {
+                format!(
+                    "listeners {} on port {port} all have no hostname",
+                    names.join(", ")
+                )
+            } else {
+                format!(
+                    "listeners {} on port {port} all have the hostname {host}",
+                    names.join(", ")
+                )
+            };
+            for listener in same {
+                out.insert(
+                    listener.name.as_str(),
+                    reject("HostnameConflict", message.clone()),
+                );
             }
         }
     }

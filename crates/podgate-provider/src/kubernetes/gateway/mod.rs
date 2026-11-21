@@ -33,7 +33,9 @@ pub mod httproute;
 pub mod listener;
 pub mod precedence;
 pub mod route;
+pub mod status;
 pub mod types;
+pub mod writer;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -45,7 +47,7 @@ use tokio::task::JoinSet;
 use tracing::debug;
 
 use self::backend::{Backends, Grants};
-use self::listener::{Attachment, Certs, Gateways, ParentReport, RouteInfo};
+use self::listener::{Attachment, Certs, GatewayReport, Gateways, ParentReport, RouteInfo};
 use self::precedence::{Candidate, priorities};
 use self::types::{
     CONTROLLER, Gateway, GatewayClass, GrpcRoute, HttpRoute, Namespace, ReferenceGrant,
@@ -275,10 +277,33 @@ pub struct RouteReport {
     pub kind: Kind,
     /// `namespace/name`.
     pub key: String,
+    /// The generation of the route the report is about.
+    pub generation: Option<i64>,
     /// One entry per parent reference that names a Gateway of ours.
     pub parents: Vec<ParentReport>,
+    /// The listeners the route attached to, as Gateway `namespace/name` and listener name.
+    pub attachments: Vec<(String, Box<str>)>,
     /// Why the route is not served, when it is not.
     pub rejected: Option<Rejection>,
+}
+
+/// Whether a rejection reason is one of the references that did not resolve: such a route is
+/// attached to its listeners (`Accepted`) but its `ResolvedRefs` condition is false.
+#[must_use]
+pub fn is_unresolved_reference(reason: &str) -> bool {
+    matches!(
+        reason,
+        "BackendNotFound" | "RefNotPermitted" | "InvalidKind"
+    )
+}
+
+/// What the status of the served `GatewayClass` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassReport {
+    /// The class name.
+    pub name: String,
+    /// The generation the report is about.
+    pub generation: Option<i64>,
 }
 
 /// What the Gateway API objects become.
@@ -293,6 +318,10 @@ pub struct Translation {
     pub notes: Vec<String>,
     /// The report of every route that names a Gateway of ours, in order, for the status.
     pub routes: Vec<RouteReport>,
+    /// The report of every Gateway of our class and its listeners, in order, for the status.
+    pub gateways: Vec<GatewayReport>,
+    /// The served `GatewayClass`, when there is one.
+    pub class: Option<ClassReport>,
 }
 
 /// A route that is accepted, waiting for its routers' priorities.
@@ -330,14 +359,18 @@ struct RouteMeta<'a> {
 #[must_use]
 pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Translation {
     let mut out = Translation::default();
-    let class_served = cache
+    let served_class = cache
         .classes
         .get("", &options.class)
-        .is_some_and(|class| class.spec.controller_name == CONTROLLER);
-    if !class_served {
+        .filter(|class| class.spec.controller_name == CONTROLLER);
+    let Some(served_class) = served_class else {
         debug!(class = %options.class, "no GatewayClass of ours with that name; no Gateway is served");
         return out;
-    }
+    };
+    out.class = Some(ClassReport {
+        name: options.class.to_string(),
+        generation: served_class.metadata.generation,
+    });
     let labels: BTreeMap<&str, &BTreeMap<String, String>> = cache
         .namespaces
         .values()
@@ -456,7 +489,13 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
             out.routes.push(RouteReport {
                 kind: route.kind,
                 key,
+                generation: route.meta.generation,
                 parents: attached.parents,
+                attachments: attached
+                    .attachments
+                    .iter()
+                    .map(|attachment| (attachment.gateway.clone(), attachment.listener.clone()))
+                    .collect(),
                 rejected,
             });
         };
@@ -543,6 +582,20 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
         secret: cluster.secret,
         source: cluster.source,
     };
+    let mut attached_routes: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    for report in &out.routes {
+        if report
+            .rejected
+            .as_ref()
+            .is_none_or(|rejection| is_unresolved_reference(rejection.reason))
+        {
+            for (gateway, listener) in &report.attachments {
+                *attached_routes
+                    .entry((gateway.as_str(), &**listener))
+                    .or_default() += 1;
+            }
+        }
+    }
     for gateway in gateways.all() {
         let key = gateway.metadata.key();
         out.certificates.extend(listener::certificates(
@@ -554,7 +607,18 @@ pub fn translate(cache: &Cache, options: &Options, cluster: &Cluster<'_>) -> Tra
                     .unwrap_or_default()
             },
             &certs,
+            &|listener| gateways.conflict(&key, listener).is_some(),
             &mut out.notes,
+        ));
+        out.gateways.push(gateways.report(
+            gateway,
+            &|listener| {
+                attached_routes
+                    .get(&(key.as_str(), listener))
+                    .copied()
+                    .unwrap_or(0)
+            },
+            &certs,
         ));
     }
     out.certificates

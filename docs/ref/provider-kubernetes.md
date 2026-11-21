@@ -1,6 +1,6 @@
 # The Kubernetes source
 
-Reference for `crates/podgate-provider/src/kubernetes`: the provider source that turns `networking.k8s.io/v1` Ingresses into routers and the pod addresses in their Services' EndpointSlices into servers, and follows the cluster live. It matches Traefik's Kubernetes Ingress provider (`ingressClass`, `allowExternalNameServices`, the `router.*` annotations) and Caddy's `caddy-ingress-controller`. Gateway API, status publishing, leader election and CRDs are changes 0073 to 0076 and build on the client described at the end.
+Reference for `crates/podgate-provider/src/kubernetes`: the provider source that turns `networking.k8s.io/v1` Ingresses into routers and the pod addresses in their Services' EndpointSlices into servers, and follows the cluster live. It matches Traefik's Kubernetes Ingress provider (`ingressClass`, `allowExternalNameServices`, the `router.*` annotations) and Caddy's `caddy-ingress-controller`. The Gateway API is `docs/ref/provider-gateway.md` and its status and leader election `docs/ref/provider-gateway-status.md`; both build on the client described at the end.
 
 ## Configuration
 
@@ -28,6 +28,9 @@ team-b = "globex"
 | `ingress_class` | `podgate` | Only Ingresses of this class are used. |
 | `namespace_tenants` | none | Namespace to tenant. The operator's decision; every tenant must exist in the provider configuration. |
 | `default_tenant` | none | The tenant of a namespace not listed above. With neither, the object belongs to the provider's default tenant. Must exist. |
+| `gateway_status` | `true` | With `gateway_api`: write the Gateway API status back, from the replica that holds the Lease. See `docs/ref/provider-gateway-status.md`. |
+| `lease_name` | `podgate-provider-status` | The `coordination.k8s.io` Lease that elects the status writer. Needs `gateway_api` and `gateway_status`. |
+| `lease_namespace` | the pod's namespace, else `default` | The Lease's namespace. Needs `gateway_api` and `gateway_status`. |
 | `allow_external_name` | `false` | Serve `ExternalName` Services and slices not written by the Kubernetes controller; see Refusals. |
 
 Unknown keys are errors, and so is a tenant that is not configured: a misspelt name must not move a namespace to another tenant. A kubeconfig that cannot be used stops the provider at start with the file and the reason.
@@ -116,7 +119,7 @@ For every kind (Ingress, Service, EndpointSlice, TLS Secret) and every namespace
 
 ## RBAC
 
-The provider only reads. Cluster-wide:
+The Ingress and Gateway API sources only read. Cluster-wide:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -136,6 +139,8 @@ rules:
 ```
 
 Reading Secrets is the sensitive part. The source asks for `kubernetes.io/tls` Secrets only, but RBAC cannot filter by type: the grant is `list` and `watch` of every Secret. Prefer `namespaces = [...]` with a `Role` and `RoleBinding` per namespace, granting `secrets` only in the namespaces that hold certificates, over a `ClusterRole`. A deployment that serves certificates from ACME needs no Secret access at all: leave `secrets` out of the rule; an Ingress that names a Secret is then rejected as missing, which is the safe failure.
+
+With `gateway_api` the provider also writes: `update` and `patch` on the `status` subresource of the Gateway API objects, and `get`, `create` and `update` on one Lease. Both are in `docs/ref/provider-gateway.md`, `## RBAC`. Without them the source keeps serving: a refused status write or Lease is logged and the status is not written.
 
 ## The client, for changes 0073 to 0076
 
@@ -161,10 +166,20 @@ Watcher::next(&mut self) -> Event<R>   // Reset(Vec<R>) | Applied(R) | Deleted(R
 Store::<R>::new(); store.apply(event) -> bool; get(ns, name); values(); is_synced()
 ```
 
-`Watcher::next` never returns an error and never gives up: a failure is an `Event::Outage` and the next call retries after the backoff; `410` and a server-ended watch are handled inside. `Event::Reset` replaces everything the consumer holds. `ObjectMeta` carries `name`, `namespace`, `resourceVersion`, `creationTimestamp`, `annotations` and `labels`; a kind that needs more reads them from its own struct. The client sends `GET` only.
+`Watcher::next` never returns an error and never gives up: a failure is an `Event::Outage` and the next call retries after the backoff; `410` and a server-ended watch are handled inside. `Event::Reset` replaces everything the consumer holds. `ObjectMeta` carries `name`, `namespace`, `resourceVersion`, `generation`, `creationTimestamp`, `annotations` and `labels`; a kind that needs more reads them from its own struct. Lists and watches send `GET`. Single objects have a write path next to `list` (on the same URL and bearer token code):
+
+```rust
+ApiClient::read::<R>(&self, namespace: Option<&str>, name: &str) -> Result<R, ClientError>      // GET
+ApiClient::create::<R>(&self, namespace: Option<&str>, object: &Value) -> Result<R, ClientError> // POST
+ApiClient::replace::<R>(&self, namespace: Option<&str>, name: &str, subresource: Option<&str>, object: &Value) -> Result<R, ClientError> // PUT
+ApiClient::merge_patch::<R>(&self, namespace: Option<&str>, name: &str, subresource: Option<&str>, patch: &Value) -> Result<R, ClientError> // PATCH, application/merge-patch+json
+ClientError::http_status(&self) -> Option<u16>   // 404, 409 and the like
+```
+
+`subresource` is `Some("status")` for the status subresource. A `metadata.resourceVersion` in the body of `replace` or `merge_patch` is a precondition: the server answers `409` when the object has moved on. `namespace` is ignored for a cluster-scoped kind.
 
 The source in `mod.rs` shows the pattern: one `Store` per kind and scope, `Event::Outage` kept per watcher, state recomputed from the stores when they change, an outage sent after the state when something was left out, and no state before every watcher has listed.
 
 ## Not built
 
-The Ingress status address (`ingressEndpoint` in Traefik) is change 0074 (status and leader election). `IngressClass` objects and the default-class annotation are not read: an Ingress without a class is not ours. Resource backends, Service `ExternalName` through CNAME flattening and `https` upstream ports (they need a servers transport) are refused with a reason.
+The Ingress status address (`ingressEndpoint` in Traefik) is not written: change 0074 writes the status of Gateway API objects only. `IngressClass` objects and the default-class annotation are not read: an Ingress without a class is not ours. Resource backends, Service `ExternalName` through CNAME flattening and `https` upstream ports (they need a servers transport) are refused with a reason.

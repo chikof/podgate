@@ -53,12 +53,18 @@ pub enum GoneAs {
 /// One request the fake saw.
 #[derive(Debug, Clone)]
 pub struct Seen {
+    /// The HTTP method.
+    pub method: String,
     /// The path without the query.
     pub path: String,
     /// The query parameters.
     pub query: BTreeMap<String, String>,
     /// The `Authorization` header, if any.
     pub authorization: Option<String>,
+    /// The `Content-Type` header, if any.
+    pub content_type: Option<String>,
+    /// The JSON body, if the request had one.
+    pub body: Option<Value>,
 }
 
 impl Seen {
@@ -67,9 +73,24 @@ impl Seen {
         self.query.get("watch").is_some_and(|value| value == "true")
     }
 
-    /// The plural resource name the path ends in.
+    /// The plural resource name the path names.
     pub fn plural(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or("")
+        route(&self.path).map_or("", |route| route.plural)
+    }
+
+    /// Whether the request changes something: `POST`, `PUT` or `PATCH`.
+    pub fn is_write(&self) -> bool {
+        matches!(self.method.as_str(), "POST" | "PUT" | "PATCH")
+    }
+
+    /// Whether this writes the `status` subresource.
+    pub fn is_status_write(&self) -> bool {
+        self.is_write() && self.path.ends_with("/status")
+    }
+
+    /// The name of the object the path names, if it names one.
+    pub fn object(&self) -> Option<&str> {
+        route(&self.path).and_then(|route| route.name)
     }
 }
 
@@ -90,7 +111,7 @@ struct Inner {
     generation: u64,
     failure: Option<Failure>,
     gone_as: GoneAs,
-    token: Option<String>,
+    tokens: Vec<String>,
     requests: Vec<Seen>,
 }
 
@@ -168,7 +189,7 @@ impl FakeApi {
                 generation: 0,
                 failure: None,
                 gone_as: GoneAs::Frame,
-                token: None,
+                tokens: Vec::new(),
                 requests: Vec::new(),
             }),
             news,
@@ -199,9 +220,21 @@ impl FakeApi {
     }
 
     /// Writes a kubeconfig that points at this server, with `token` as the user's bearer token,
-    /// and returns its path. The server then rejects requests without that token.
+    /// and returns its path. The server then rejects requests with any other token, those of
+    /// earlier calls included.
     pub fn kubeconfig(&self, dir: &Path, token: &str) -> PathBuf {
-        lock(&self.shared).token = Some(token.to_owned());
+        lock(&self.shared).tokens = vec![token.to_owned()];
+        self.write_kubeconfig(dir, token)
+    }
+
+    /// Like [`Self::kubeconfig`], but the server accepts `token` next to the tokens it accepts
+    /// already: several clients (the replicas of a test) with their own credentials.
+    pub fn kubeconfig_also(&self, dir: &Path, token: &str) -> PathBuf {
+        lock(&self.shared).tokens.push(token.to_owned());
+        self.write_kubeconfig(dir, token)
+    }
+
+    fn write_kubeconfig(&self, dir: &Path, token: &str) -> PathBuf {
         let scheme = if self.ca_pem.is_some() {
             "https"
         } else {
@@ -232,25 +265,27 @@ impl FakeApi {
 
     /// Creates or replaces an object of `plural`; a watch sees ADDED or MODIFIED. Returns the
     /// resource version it got.
-    pub fn put(&self, plural: &str, mut object: Value) -> u64 {
-        let (namespace, name) = identity(&object);
-        let mut inner = lock(&self.shared);
-        inner.rv += 1;
-        let rv = inner.rv;
-        object["metadata"]["resourceVersion"] = Value::String(rv.to_string());
-        let kind = if inner
+    pub fn put(&self, plural: &str, object: Value) -> u64 {
+        let stored = store(&self.shared, plural, object);
+        stored["metadata"]["resourceVersion"]
+            .as_str()
+            .and_then(|rv| rv.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// The object `namespace/name` of `plural` as the fake holds it now (`namespace` is empty for
+    /// a cluster-scoped kind).
+    pub fn get(&self, plural: &str, namespace: &str, name: &str) -> Option<Value> {
+        lock(&self.shared)
             .objects
-            .entry(plural.to_owned())
-            .or_default()
-            .insert((namespace, name), object.clone())
-            .is_some()
-        {
-            "MODIFIED"
-        } else {
-            "ADDED"
-        };
-        self.log(&mut inner, plural, kind, rv, object);
-        rv
+            .get(plural)
+            .and_then(|objects| objects.get(&(namespace.to_owned(), name.to_owned())))
+            .cloned()
+    }
+
+    /// Every request that changed something (`POST`, `PUT`, `PATCH`) so far.
+    pub fn writes(&self) -> Vec<Seen> {
+        self.requests().into_iter().filter(Seen::is_write).collect()
     }
 
     /// Deletes an object; a watch sees DELETED.
@@ -270,16 +305,7 @@ impl FakeApi {
     }
 
     fn log(&self, inner: &mut Inner, plural: &str, kind: &'static str, rv: u64, object: Value) {
-        inner.seq += 1;
-        let seq = inner.seq;
-        inner.log.push(Logged {
-            seq,
-            rv,
-            plural: plural.to_owned(),
-            kind,
-            object,
-        });
-        self.shared.news.send_replace(seq);
+        push_log(&self.shared, inner, plural, kind, rv, object);
     }
 
     /// Sends a BOOKMARK with the current version to every open watch of `plural` that asked for
@@ -362,6 +388,70 @@ fn identity(object: &Value) -> (String, String) {
     )
 }
 
+fn push_log(
+    shared: &Shared,
+    inner: &mut Inner,
+    plural: &str,
+    kind: &'static str,
+    rv: u64,
+    object: Value,
+) {
+    inner.seq += 1;
+    let seq = inner.seq;
+    inner.log.push(Logged {
+        seq,
+        rv,
+        plural: plural.to_owned(),
+        kind,
+        object,
+    });
+    shared.news.send_replace(seq);
+}
+
+/// Stores `object` under its name, stamping the next resource version, and tells the watches.
+/// Returns the object as stored.
+fn store(shared: &Shared, plural: &str, mut object: Value) -> Value {
+    let (namespace, name) = identity(&object);
+    let mut inner = lock(shared);
+    inner.rv += 1;
+    let rv = inner.rv;
+    object["metadata"]["resourceVersion"] = Value::String(rv.to_string());
+    let kind = if inner
+        .objects
+        .entry(plural.to_owned())
+        .or_default()
+        .insert((namespace, name), object.clone())
+        .is_some()
+    {
+        "MODIFIED"
+    } else {
+        "ADDED"
+    };
+    push_log(shared, &mut inner, plural, kind, rv, object.clone());
+    object
+}
+
+/// RFC 7386: `patch` merged into `target`; `null` removes a key, arrays are replaced.
+fn merge_patch(target: &mut Value, patch: &Value) {
+    let Value::Object(patch) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let Some(fields) = target.as_object_mut() else {
+        return;
+    };
+    for (key, value) in patch {
+        if value.is_null() {
+            fields.remove(key);
+        } else {
+            merge_patch(fields.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    }
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -381,19 +471,85 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The `(namespace, plural)` a path names.
-fn route(path: &str) -> Option<(Option<String>, String)> {
+/// What a path names.
+struct Route<'a> {
+    namespace: Option<&'a str>,
+    plural: &'a str,
+    name: Option<&'a str>,
+    subresource: Option<&'a str>,
+}
+
+fn route(path: &str) -> Option<Route<'_>> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let rest = match parts.as_slice() {
         ["api", _, rest @ ..] | ["apis", _, _, rest @ ..] => rest,
         _ => return None,
     };
+    let (namespace, rest) = match rest {
+        ["namespaces", namespace, rest @ ..] if !rest.is_empty() => (Some(*namespace), rest),
+        rest => (None, rest),
+    };
     match rest {
-        [plural] => Some((None, (*plural).to_owned())),
-        ["namespaces", namespace, plural] => {
-            Some((Some((*namespace).to_owned()), (*plural).to_owned()))
-        }
+        [plural] => Some(Route {
+            namespace,
+            plural,
+            name: None,
+            subresource: None,
+        }),
+        [plural, name] => Some(Route {
+            namespace,
+            plural,
+            name: Some(name),
+            subresource: None,
+        }),
+        [plural, name, subresource] => Some(Route {
+            namespace,
+            plural,
+            name: Some(name),
+            subresource: Some(subresource),
+        }),
         _ => None,
+    }
+}
+
+/// The request line and headers of one request, copied out of the read buffer.
+struct Head {
+    size: usize,
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Head {
+    fn parse(buffer: &[u8]) -> Option<Option<Self>> {
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut request = httparse::Request::new(&mut headers);
+        match request.parse(buffer) {
+            Ok(httparse::Status::Complete(size)) => Some(Some(Self {
+                size,
+                method: request.method?.to_owned(),
+                target: request.path?.to_owned(),
+                headers: request
+                    .headers
+                    .iter()
+                    .map(|header| {
+                        (
+                            header.name.to_ascii_lowercase(),
+                            String::from_utf8_lossy(header.value).into_owned(),
+                        )
+                    })
+                    .collect(),
+            })),
+            Ok(httparse::Status::Partial) => Some(None),
+            Err(_) => None,
+        }
+    }
+
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
     }
 }
 
@@ -406,36 +562,46 @@ async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> Option<Seen> {
             return None;
         }
         buffer.extend_from_slice(&chunk[..read]);
-        let mut headers = [httparse::EMPTY_HEADER; 32];
-        let mut request = httparse::Request::new(&mut headers);
-        if let Ok(httparse::Status::Complete(_)) = request.parse(&buffer) {
-            if request.method != Some("GET") {
-                return None;
-            }
-            let target = request.path?;
-            let (path, query) = target.split_once('?').unwrap_or((target, ""));
-            let query = query
-                .split('&')
-                .filter(|pair| !pair.is_empty())
-                .map(|pair| {
-                    let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                    (percent_decode(key), percent_decode(value))
-                })
-                .collect();
-            let authorization = request
-                .headers
-                .iter()
-                .find(|header| header.name.eq_ignore_ascii_case("authorization"))
-                .map(|header| String::from_utf8_lossy(header.value).into_owned());
-            return Some(Seen {
-                path: path.to_owned(),
-                query,
-                authorization,
-            });
-        }
-        if buffer.len() > 16 * 1024 {
+        if buffer.len() > 1024 * 1024 {
             return None;
         }
+        let Some(head) = Head::parse(&buffer)? else {
+            continue;
+        };
+        let length: usize = head
+            .header("content-length")
+            .and_then(|length| length.parse().ok())
+            .unwrap_or(0);
+        while buffer.len() < head.size + length {
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body = (length > 0)
+            .then(|| serde_json::from_slice(&buffer[head.size..head.size + length]).ok())
+            .flatten();
+        let (path, query) = head
+            .target
+            .split_once('?')
+            .unwrap_or((head.target.as_str(), ""));
+        let query = query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (percent_decode(key), percent_decode(value))
+            })
+            .collect();
+        return Some(Seen {
+            method: head.method.clone(),
+            path: path.to_owned(),
+            query,
+            authorization: head.header("authorization"),
+            content_type: head.header("content-type"),
+            body,
+        });
     }
 }
 
@@ -457,10 +623,10 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, shared: Arc<Sha
     let Some(seen) = read_head(&mut stream).await else {
         return;
     };
-    let (failure, token, gone_as) = {
+    let (failure, tokens, gone_as) = {
         let mut inner = lock(&shared);
         inner.requests.push(seen.clone());
-        (inner.failure, inner.token.clone(), inner.gone_as)
+        (inner.failure, inner.tokens.clone(), inner.gone_as)
     };
     match failure {
         Some(Failure::Reset) => return,
@@ -475,21 +641,119 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, shared: Arc<Sha
         }
         None => {}
     }
-    if let Some(token) = token
-        && seen.authorization.as_deref() != Some(&format!("Bearer {token}"))
+    if !tokens.is_empty()
+        && !tokens
+            .iter()
+            .any(|token| seen.authorization.as_deref() == Some(&format!("Bearer {token}")))
     {
         respond(&mut stream, 401, &status_body(401, "Unauthorized")).await;
         return;
     }
-    let Some((namespace, plural)) = route(&seen.path) else {
+    let Some(route) = route(&seen.path) else {
         respond(&mut stream, 404, &status_body(404, "no such path")).await;
         return;
     };
-    if seen.is_watch() {
-        watch_stream(stream, shared, seen, namespace, plural, gone_as).await;
-    } else {
-        list(&mut stream, &shared, &seen, namespace.as_deref(), &plural).await;
+    let namespace = route.namespace.map(str::to_owned);
+    let plural = route.plural.to_owned();
+    match (seen.method.as_str(), route.name) {
+        ("GET", None) if seen.is_watch() => {
+            watch_stream(stream, shared, seen, namespace, plural, gone_as).await;
+        }
+        ("GET", None) => list(&mut stream, &shared, &seen, namespace.as_deref(), &plural).await,
+        ("GET", Some(name)) => {
+            let found = lock(&shared)
+                .objects
+                .get(&plural)
+                .and_then(|objects| {
+                    objects.get(&(namespace.clone().unwrap_or_default(), name.to_owned()))
+                })
+                .cloned();
+            match found {
+                Some(object) => respond(&mut stream, 200, &object).await,
+                None => respond(&mut stream, 404, &status_body(404, "not found")).await,
+            }
+        }
+        ("POST", None) => {
+            let (code, body) = create(&shared, &plural, namespace.as_deref(), seen.body);
+            respond(&mut stream, code, &body).await;
+        }
+        ("PUT" | "PATCH", Some(name)) => {
+            let (code, body) = update(
+                &shared,
+                &plural,
+                &(namespace.unwrap_or_default(), name.to_owned()),
+                route.subresource,
+                &seen,
+            );
+            respond(&mut stream, code, &body).await;
+        }
+        _ => respond(&mut stream, 405, &status_body(405, "not supported")).await,
     }
+}
+
+/// `POST`: creates the object, `409` when it exists.
+fn create(
+    shared: &Shared,
+    plural: &str,
+    namespace: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let Some(mut object) = body.filter(|body| body["metadata"]["name"].is_string()) else {
+        return (400, status_body(400, "an object with a name is required"));
+    };
+    if let Some(namespace) = namespace {
+        object["metadata"]["namespace"] = Value::String(namespace.to_owned());
+    }
+    let key = identity(&object);
+    let exists = lock(shared)
+        .objects
+        .get(plural)
+        .is_some_and(|objects| objects.contains_key(&key));
+    if exists {
+        return (409, status_body(409, "already exists"));
+    }
+    (201, store(shared, plural, object))
+}
+
+/// `PUT` and merge `PATCH` of an object or its `status`: `404` when it does not exist, `409` when
+/// the body names another `resourceVersion` than the stored one.
+fn update(
+    shared: &Shared,
+    plural: &str,
+    key: &(String, String),
+    subresource: Option<&str>,
+    seen: &Seen,
+) -> (u16, Value) {
+    let Some(patch) = seen.body.clone() else {
+        return (400, status_body(400, "a JSON body is required"));
+    };
+    let Some(mut object) = lock(shared)
+        .objects
+        .get(plural)
+        .and_then(|objects| objects.get(key))
+        .cloned()
+    else {
+        return (404, status_body(404, "not found"));
+    };
+    if let Some(version) = patch["metadata"]["resourceVersion"].as_str()
+        && object["metadata"]["resourceVersion"].as_str() != Some(version)
+    {
+        return (409, status_body(409, "the object has been modified"));
+    }
+    let merge = seen.method == "PATCH";
+    if subresource == Some("status") {
+        let status = patch.get("status").cloned().unwrap_or(Value::Null);
+        if merge {
+            merge_patch(&mut object["status"], &status);
+        } else {
+            object["status"] = status;
+        }
+    } else if merge {
+        merge_patch(&mut object, &patch);
+    } else {
+        object = patch;
+    }
+    (200, store(shared, plural, object))
 }
 
 fn selected(object: &Value, namespace: Option<&str>, selector: Option<&String>) -> bool {

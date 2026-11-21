@@ -46,7 +46,11 @@ const MAX_STALE_RETRIES: u32 = 3;
 /// Times validation is asked again after `503` busy.
 const MAX_BUSY_RETRIES: u32 = 5;
 
-type SourceTask = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// A source that has not started: given the engine's status (`run`) or none (`first_pass`, which
+/// only collects), it returns the future that runs it.
+type SourceTask = Box<
+    dyn FnOnce(Option<watch::Receiver<Status>>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+>;
 
 /// How long the engine waits for every source before it shares claims anyway.
 const CLAIMS_PATIENCE: Duration = Duration::from_secs(30);
@@ -108,6 +112,35 @@ pub struct QuarantinedObject {
     pub reason: Box<str>,
 }
 
+/// The objects podgate accepted in the last snapshot this provider pushed, each with the text
+/// that changes when its source changes it ([`crate::source::SourceApp::fingerprint`]). Sources
+/// compare their own objects against it to learn which ones are live. The texts hold
+/// private keys, so `Debug` shows a count only.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Accepted(Arc<BTreeMap<ObjectRef, Box<str>>>);
+
+impl Accepted {
+    /// The accepted objects `objects`.
+    #[must_use]
+    pub fn new(objects: impl IntoIterator<Item = (ObjectRef, Box<str>)>) -> Self {
+        Self(Arc::new(objects.into_iter().collect()))
+    }
+
+    /// Whether `object` is accepted in exactly this form.
+    #[must_use]
+    pub fn holds(&self, object: &ObjectRef, fingerprint: &str) -> bool {
+        self.0
+            .get(object)
+            .is_some_and(|held| &**held == fingerprint)
+    }
+}
+
+impl std::fmt::Debug for Accepted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Accepted({} objects)", self.0.len())
+    }
+}
+
 /// What the engine knows, published after every round.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
@@ -123,6 +156,8 @@ pub struct Status {
     pub pushes: u64,
     /// Why the last round did not push, when it did not.
     pub error: Option<Box<str>>,
+    /// The objects of the last snapshot podgate accepted.
+    pub accepted: Accepted,
     /// Why the ACME broker stopped, when it did: no certificate or challenge is added until the
     /// provider restarts.
     pub acme_error: Option<Box<str>>,
@@ -164,7 +199,7 @@ pub struct Engine {
     states: BTreeMap<Box<str>, State>,
     outages: BTreeMap<Box<str>, Box<str>>,
     quarantine: Quarantine,
-    accepted: BTreeMap<ObjectRef, Box<str>>,
+    accepted: Accepted,
     pushed: Option<Pushed>,
     refused: Option<Box<str>>,
     repush: bool,
@@ -206,7 +241,7 @@ impl Engine {
             states: BTreeMap::new(),
             outages: BTreeMap::new(),
             quarantine: Quarantine::new(),
-            accepted: BTreeMap::new(),
+            accepted: Accepted::default(),
             pushed: None,
             refused: None,
             repush: false,
@@ -236,11 +271,17 @@ impl Engine {
     ///
     /// [`UnknownSource`] when the source's name is not in the configuration: its objects could
     /// not be given a `declared_by` kind.
-    pub fn add_source<S: Source>(&mut self, source: S) -> Result<(), UnknownSource> {
+    pub fn add_source<S: Source>(&mut self, mut source: S) -> Result<(), UnknownSource> {
         if !self.config.source_names().any(|name| name == source.name()) {
             return Err(UnknownSource(source.name().into()));
         }
-        self.tasks.push(Box::pin(source.run(self.updates.clone())));
+        let updates = self.updates.clone();
+        self.tasks.push(Box::new(move |status| {
+            if let Some(status) = status {
+                source.observe(status);
+            }
+            Box::pin(source.run(updates))
+        }));
         Ok(())
     }
 
@@ -333,6 +374,7 @@ impl Engine {
             pushed_version: self.pushed.as_ref().map(|pushed| pushed.version),
             pushes: self.pushes,
             error: self.error.clone(),
+            accepted: self.accepted.clone(),
             acme_error: self.acme_error.clone(),
         };
         self.status.send_replace(status);
@@ -374,8 +416,9 @@ impl Engine {
     /// [`RunError::WriterConflict`] when podgate answers that another writer owns the snapshot.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<(), RunError> {
         let mut sources = JoinSet::new();
+        let status = self.status.subscribe();
         for task in std::mem::take(&mut self.tasks) {
-            sources.spawn(task);
+            sources.spawn(task(Some(status.clone())));
         }
         let mut debounce = Debounce::new(
             duration_ms(self.config.debounce),
@@ -611,11 +654,12 @@ impl Engine {
             version,
             boot_id: live.boot_id.clone(),
         });
-        self.accepted = merged
-            .included()
-            .iter()
-            .map(|included| (included.object.clone(), included.fingerprint.clone()))
-            .collect();
+        self.accepted = Accepted::new(
+            merged
+                .included()
+                .iter()
+                .map(|included| (included.object.clone(), included.fingerprint.clone())),
+        );
         self.refused = None;
         self.repush = false;
         self.pushes += 1;
@@ -647,9 +691,7 @@ impl Engine {
             let changed: Vec<_> = merged
                 .included()
                 .iter()
-                .filter(|included| {
-                    self.accepted.get(&included.object) != Some(&included.fingerprint)
-                })
+                .filter(|included| !self.accepted.holds(&included.object, &included.fingerprint))
                 .cloned()
                 .collect();
             let build = |extra: &BTreeSet<ObjectRef>| {
@@ -719,7 +761,7 @@ impl Engine {
         }
         let mut sources = JoinSet::new();
         for task in std::mem::take(&mut self.tasks) {
-            sources.spawn(task);
+            sources.spawn(task(None));
         }
         let deadline = Instant::now() + wait;
         while !self.sources_ready() {

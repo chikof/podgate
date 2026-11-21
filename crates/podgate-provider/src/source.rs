@@ -12,6 +12,9 @@
 use podgate_model::{App, Certificate};
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
+
+use crate::engine::Status;
 
 /// What an object is. Part of an object's identity, so an app and a certificate of one source may
 /// share a name.
@@ -122,14 +125,16 @@ pub struct State {
 impl SourceApp {
     /// A text that changes whenever the object does: quarantine uses it to tell that a source
     /// changed an object. Never logged: it holds whatever the object holds.
-    pub(crate) fn fingerprint(&self) -> Box<str> {
+    #[must_use]
+    pub fn fingerprint(&self) -> Box<str> {
         fingerprint(&(&self.tenant, &self.app))
     }
 }
 
 impl SourceCertificate {
     /// See [`SourceApp::fingerprint`].
-    pub(crate) fn fingerprint(&self) -> Box<str> {
+    #[must_use]
+    pub fn fingerprint(&self) -> Box<str> {
         fingerprint(&(&self.tenant, &self.certificate))
     }
 }
@@ -188,4 +193,9 @@ pub trait Source: Send + 'static {
     /// channel closes. A source that loses its backend sends [`Update::outage`] and keeps trying;
     /// it never sends an empty state to say "unreachable".
     fn run(self, updates: Sender<Update>) -> impl Future<Output = ()> + Send;
+
+    /// Hands the source the engine's [`Status`], before [`Source::run`]: what podgate accepted of
+    /// the snapshot and why it left objects out. A source that reports back to its backend (the
+    /// Kubernetes source writes Gateway API status) keeps it; the others ignore it.
+    fn observe(&mut self, _engine: watch::Receiver<Status>) {}
 }

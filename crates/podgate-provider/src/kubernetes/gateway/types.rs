@@ -42,6 +42,9 @@ pub struct GatewayClass {
     /// The class settings.
     #[serde(default)]
     pub spec: GatewayClassSpec,
+    /// The status as the cluster holds it; only the status writer reads it.
+    #[serde(default)]
+    pub status: Option<Value>,
 }
 
 /// The part of a `GatewayClass` spec the source reads.
@@ -70,6 +73,9 @@ pub struct Gateway {
     /// The listeners.
     #[serde(default)]
     pub spec: GatewaySpec,
+    /// The status as the cluster holds it; only the status writer reads it.
+    #[serde(default)]
+    pub status: Option<Value>,
 }
 
 /// The part of a Gateway spec the source reads.
@@ -464,6 +470,9 @@ pub struct HttpRoute {
     /// The route.
     #[serde(default)]
     pub spec: HttpRouteSpec,
+    /// The status as the cluster holds it; only the status writer reads it.
+    #[serde(default)]
+    pub status: Option<Value>,
 }
 
 /// The spec of an HTTPRoute.
@@ -544,6 +553,9 @@ pub struct GrpcRoute {
     /// The route.
     #[serde(default)]
     pub spec: GrpcRouteSpec,
+    /// The status as the cluster holds it; only the status writer reads it.
+    #[serde(default)]
+    pub status: Option<Value>,
 }
 
 /// The spec of a GRPCRoute.

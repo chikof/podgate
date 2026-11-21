@@ -12,6 +12,10 @@
 //! default_tenant = "acme"                   # for namespaces not listed below
 //! allow_external_name = false               # default
 //! crds = false                              # true: also read PodgateRoute and PodgateMiddleware
+//! gateway_api = false                       # true: the Gateway API, see `gateway`
+//! gateway_status = true                     # with gateway_api: write Gateway API status
+//! lease_name = "podgate-provider-status"    # the Lease that elects the status writer
+//! lease_namespace = "podgate-system"        # default: the pod's namespace
 //!
 //! [source.namespace_tenants]
 //! team-a = "acme"
@@ -26,7 +30,10 @@
 //! - [`crd`]: the `PodgateRoute` and `PodgateMiddleware` custom resources and the generator of
 //!   their CRD manifests.
 //! - [`tenancy`]: the tenant of an Ingress or a route.
-//! - [`gateway`]: Gateway, HTTPRoute and GRPCRoute (`gateway_api = true`).
+//! - [`gateway`]: Gateway, HTTPRoute and GRPCRoute (`gateway_api = true`), and the status written
+//!   back to them (`status`, `writer`).
+//! - [`lease`]: the `coordination.k8s.io` Lease that elects the one replica that writes status.
+//! - [`mod@time`]: the timestamps of conditions and Leases.
 //!
 //! The source keeps one [`client::Store`] per kind and namespace scope. Every change to any of
 //! them, after a short settle time that merges a burst, recomputes the whole state and sends it
@@ -43,15 +50,19 @@ pub mod crd;
 pub mod endpoints;
 pub mod gateway;
 pub mod ingress;
+pub mod lease;
 pub mod tenancy;
+pub mod time;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout_at};
 use tracing::{debug, warn};
@@ -61,9 +72,29 @@ use self::endpoints::{EndpointSlice, Secret, Service, ServiceIndex, TLS_SECRET_T
 use self::ingress::{Cluster, Ingress, map};
 use self::tenancy::Tenancy;
 use crate::config::{Config, SourceConfig};
-use crate::source::{Source, SourceApp, SourceCertificate, State, Update, UpdateBody};
+use crate::engine::Status;
+use crate::source::{
+    ObjectKind, ObjectRef, Source, SourceApp, SourceCertificate, State, Update, UpdateBody,
+};
 
 const DEFAULT_CLASS: &str = "podgate";
+
+/// Where a pod reads its own namespace.
+const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+/// The namespace of the status Lease when `lease_namespace` is not set: the pod's own, else
+/// `default`.
+fn default_lease_namespace() -> String {
+    std::fs::read_to_string(NAMESPACE_FILE)
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "default".to_owned())
+}
+
+const fn enabled() -> bool {
+    true
+}
 
 /// The default time a burst of changes is merged before the state is recomputed.
 const DEFAULT_SETTLE: Duration = Duration::from_millis(100);
@@ -97,6 +128,17 @@ struct Settings {
     gateway_api: bool,
     gateway_class: Option<String>,
     listener_entry_points: Option<BTreeMap<String, String>>,
+    #[serde(default = "enabled")]
+    gateway_status: bool,
+    lease_name: Option<String>,
+    lease_namespace: Option<String>,
+}
+
+/// How Gateway API status is written: who is elected to write it, and how fast it writes.
+#[derive(Debug, Clone)]
+struct StatusSettings {
+    lease: lease::Settings,
+    writer: gateway::writer::Tuning,
 }
 
 /// The Kubernetes source.
@@ -113,6 +155,8 @@ pub struct KubernetesSource {
     allow_external_name: bool,
     crds: bool,
     gateway: Option<gateway::Options>,
+    status: Option<StatusSettings>,
+    engine: Option<watch::Receiver<Status>>,
 }
 
 impl KubernetesSource {
@@ -191,6 +235,35 @@ impl KubernetesSource {
         } else {
             None
         };
+        let status = if gateway.is_some() && settings.gateway_status {
+            let name = settings
+                .lease_name
+                .unwrap_or_else(|| lease::DEFAULT_NAME.to_owned());
+            let namespace = settings
+                .lease_namespace
+                .unwrap_or_else(default_lease_namespace);
+            if name.is_empty() || namespace.is_empty() {
+                return Err(invalid(
+                    "lease_name and lease_namespace must not be empty".to_owned(),
+                ));
+            }
+            Some(StatusSettings {
+                lease: lease::Settings {
+                    name: name.into(),
+                    namespace: namespace.into(),
+                    identity: lease::default_identity(),
+                    timing: lease::Timing::default(),
+                },
+                writer: gateway::writer::Tuning::default(),
+            })
+        } else if settings.lease_name.is_some() || settings.lease_namespace.is_some() {
+            return Err(invalid(
+                "lease_name and lease_namespace need gateway_api = true and gateway_status = true"
+                    .to_owned(),
+            ));
+        } else {
+            None
+        };
         Ok(Self {
             name: source.name.clone(),
             client,
@@ -202,6 +275,8 @@ impl KubernetesSource {
             allow_external_name: settings.allow_external_name,
             crds: settings.crds,
             gateway,
+            status,
+            engine: None,
         })
     }
 
@@ -216,6 +291,32 @@ impl KubernetesSource {
     #[must_use]
     pub fn with_settle(mut self, settle: Duration) -> Self {
         self.settle = settle;
+        self
+    }
+
+    /// The same source with other timing of the status Lease and of the status writes. For
+    /// tests; the defaults (15 s, 10 s, 2 s; one patch per object per second) suit a cluster.
+    /// Without Gateway API status it changes nothing.
+    #[must_use]
+    pub fn with_status_tuning(
+        mut self,
+        timing: lease::Timing,
+        writer: gateway::writer::Tuning,
+    ) -> Self {
+        if let Some(status) = &mut self.status {
+            status.lease.timing = timing;
+            status.writer = writer;
+        }
+        self
+    }
+
+    /// The same source with another identity in the status Lease. For tests that run two
+    /// replicas in one process.
+    #[must_use]
+    pub fn with_lease_identity(mut self, identity: &str) -> Self {
+        if let Some(status) = &mut self.status {
+            status.lease.identity = identity.into();
+        }
         self
     }
 }
@@ -339,6 +440,10 @@ impl Source for KubernetesSource {
         &self.name
     }
 
+    fn observe(&mut self, engine: watch::Receiver<Status>) {
+        self.engine = Some(engine);
+    }
+
     async fn run(self, updates: Sender<Update>) {
         let client = ApiClient::new(self.client.clone(), self.tuning);
         let (tx, mut rx) = mpsc::channel::<Tagged>(256);
@@ -362,27 +467,73 @@ impl Source for KubernetesSource {
         }
         drop(tx);
 
+        // Status is written when there is somewhere to learn what podgate accepted, and a
+        // Lease to learn who writes it.
+        let mut reporter = None;
+        if let (Some(settings), Some(engine)) = (&self.status, self.engine.clone()) {
+            let leader = lease::spawn(&mut tasks, client.clone(), settings.lease.clone());
+            let (plans, receiver) = gateway::writer::channel();
+            tasks.spawn(gateway::writer::run(
+                client.clone(),
+                leader,
+                receiver,
+                settings.writer,
+            ));
+            reporter = Some(Reporter { plans, engine });
+        }
+
         let mut cluster = Cache::new(self.scopes.len(), self.crds, self.gateway.is_some());
         let mut publisher = Publisher::default();
-        while let Some(first) = rx.recv().await {
-            cluster.apply(first);
-            // Merge a burst (a rollout touches Pods' slices many times a second) into one
-            // recomputation, but never wait longer than ten settle times under a steady stream.
-            let limit = Instant::now() + self.settle * 10;
-            loop {
-                let quiet = (Instant::now() + self.settle).min(limit);
-                match timeout_at(quiet, rx.recv()).await {
-                    Ok(Some(more)) => cluster.apply(more),
-                    Ok(None) => return,
-                    Err(_) => break,
+        loop {
+            tokio::select! {
+                received = rx.recv() => {
+                    let Some(first) = received else { return };
+                    cluster.apply(first);
+                    // Merge a burst (a rollout touches Pods' slices many times a second) into one
+                    // recomputation, but never wait longer than ten settle times under a steady
+                    // stream.
+                    let limit = Instant::now() + self.settle * 10;
+                    loop {
+                        let quiet = (Instant::now() + self.settle).min(limit);
+                        match timeout_at(quiet, rx.recv()).await {
+                            Ok(Some(more)) => cluster.apply(more),
+                            Ok(None) => return,
+                            Err(_) => break,
+                        }
+                    }
+                    for update in publisher.next(&self, &cluster) {
+                        if updates.send(update).await.is_err() {
+                            return;
+                        }
+                    }
                 }
+                () = engine_changed(&mut reporter) => {}
             }
-            for update in publisher.next(&self, &cluster) {
-                if updates.send(update).await.is_err() {
-                    return;
+            if let Some(reporter) = &mut reporter {
+                let engine = reporter.engine.borrow_and_update();
+                if let Some(plan) = publisher.status_plan(&self, &cluster, &engine) {
+                    reporter.plans.send_replace(Arc::new(plan));
                 }
             }
         }
+    }
+}
+
+/// What writes Gateway API status: the plans go to the writer, the engine's status comes in.
+struct Reporter {
+    plans: gateway::writer::Plan,
+    engine: watch::Receiver<Status>,
+}
+
+/// Waits until the engine's status changes; forever without a reporter. A reporter whose engine
+/// is gone is dropped.
+async fn engine_changed(reporter: &mut Option<Reporter>) {
+    let gone = match reporter.as_mut() {
+        Some(reporter) => reporter.engine.changed().await.is_err(),
+        None => std::future::pending().await,
+    };
+    if gone {
+        *reporter = None;
     }
 }
 
@@ -392,6 +543,35 @@ struct Publisher {
     state: Option<State>,
     report: Option<Box<str>>,
     logged: Vec<Box<str>>,
+    /// The Gateway API objects as the last pass translated them, for their status.
+    translation: Option<gateway::Translation>,
+    /// The objects of the state last sent, with their fingerprints.
+    identities: BTreeMap<ObjectRef, Box<str>>,
+}
+
+/// The objects of `state`, as the engine names them, with their fingerprints.
+fn identities(source: &str, state: &State) -> BTreeMap<ObjectRef, Box<str>> {
+    let object = |kind, name: &str| ObjectRef {
+        source: source.into(),
+        kind,
+        object: name.into(),
+    };
+    state
+        .apps
+        .iter()
+        .map(|app| {
+            (
+                object(ObjectKind::App, &app.origin.object),
+                app.fingerprint(),
+            )
+        })
+        .chain(state.certificates.iter().map(|certificate| {
+            (
+                object(ObjectKind::Certificate, &certificate.origin.object),
+                certificate.fingerprint(),
+            )
+        }))
+        .collect()
 }
 
 impl Publisher {
@@ -407,6 +587,7 @@ impl Publisher {
             return self.report_only(source, &problems);
         }
         let built = build(source, cluster);
+        self.translation = built.gateway;
         self.log_new(&built.rejected);
         problems.extend(built.rejected);
         let report: Option<Box<str>> = (!problems.is_empty()).then(|| problems.join("; ").into());
@@ -420,6 +601,7 @@ impl Publisher {
                 source: source.name.clone(),
                 body: UpdateBody::State(built.state.clone()),
             });
+            self.identities = identities(&source.name, &built.state);
             self.state = Some(built.state);
         }
         if let Some(report) = &report
@@ -452,12 +634,85 @@ impl Publisher {
         }
         self.logged = rejected.iter().map(|line| line.as_str().into()).collect();
     }
+
+    /// The status patches still to be written, given what the engine says of the last push.
+    /// `None` until the first pass has translated the cluster.
+    fn status_plan(
+        &self,
+        source: &KubernetesSource,
+        cluster: &Cache,
+        engine: &Status,
+    ) -> Option<Vec<gateway::status::Write>> {
+        let translation = self.translation.as_ref()?;
+        let gateway = cluster.gateway.as_ref()?;
+        let declared_by = |object: &str| format!("kubernetes/{}:{object}", source.name);
+        // Why podgate left the object out, when it did: quarantined by the engine, or dropped by
+        // the merge. Nothing for an object that is live, still to be pushed, or not ours.
+        let rejected = |object: &str| -> Option<String> {
+            let (key, fingerprint) = [ObjectKind::App, ObjectKind::Certificate]
+                .into_iter()
+                .find_map(|kind| {
+                    let key = ObjectRef {
+                        source: source.name.clone(),
+                        kind,
+                        object: object.into(),
+                    };
+                    let fingerprint = self.identities.get(&key)?;
+                    Some((key, fingerprint))
+                })?;
+            if engine.accepted.holds(&key, fingerprint) {
+                return None;
+            }
+            let name = declared_by(object);
+            engine
+                .quarantined
+                .iter()
+                .find(|held| *held.declared_by == *name)
+                .map(|held| held.reason.to_string())
+                .or_else(|| {
+                    engine
+                        .findings
+                        .iter()
+                        .find(|finding| finding.dropped && *finding.declared_by == *name)
+                        .map(|finding| finding.message.to_string())
+                })
+        };
+        let refused = || {
+            engine
+                .error
+                .as_deref()
+                .map_or(gateway::status::Whole::Waiting, |why| {
+                    gateway::status::Whole::Refused(why.to_owned())
+                })
+        };
+        let waiting = self.identities.iter().any(|(key, fingerprint)| {
+            !engine.accepted.holds(key, fingerprint) && rejected(&key.object).is_none()
+        });
+        let whole = if !waiting && engine.pushed_version.is_some() {
+            gateway::status::Whole::Pushed
+        } else {
+            refused()
+        };
+        let verdicts = gateway::status::Verdicts {
+            rejected: &rejected,
+            whole,
+        };
+        Some(gateway::status::plan(
+            gateway,
+            translation,
+            &verdicts,
+            &time::time(SystemTime::now()),
+        ))
+    }
 }
 
 /// The state computed from the cluster, and the Ingresses it had to leave out.
 struct Built {
     state: State,
     rejected: Vec<String>,
+    /// The Gateway API translation without its apps, certificates and notes, which went into the
+    /// state.
+    gateway: Option<gateway::Translation>,
 }
 
 fn build(source: &KubernetesSource, cluster: &Cache) -> Built {
@@ -502,17 +757,20 @@ fn build(source: &KubernetesSource, cluster: &Cache) -> Built {
         }
     }
     crd::build(&cluster.crd, &context, &mut apps, &mut rejected);
+    let mut gateway_report = None;
     if let (Some(options), Some(gateway)) = (&source.gateway, &cluster.gateway) {
-        let translated = gateway::translate(gateway, options, &context);
-        apps.extend(translated.apps);
-        certificates.extend(translated.certificates);
-        rejected.extend(translated.notes);
+        let mut translated = gateway::translate(gateway, options, &context);
+        apps.extend(std::mem::take(&mut translated.apps));
+        certificates.extend(std::mem::take(&mut translated.certificates));
+        rejected.extend(std::mem::take(&mut translated.notes));
+        gateway_report = Some(translated);
     }
     apps.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     certificates.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     Built {
         state: State { apps, certificates },
         rejected,
+        gateway: gateway_report,
     }
 }
 

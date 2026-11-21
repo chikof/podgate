@@ -1,6 +1,6 @@
 # The Gateway API source
 
-Reference for `crates/podgate-provider/src/kubernetes/gateway`: the half of the Kubernetes source that implements the HTTP part of the Gateway API. It accepts the `Gateway`s of its class, attaches `HTTPRoute`s and `GRPCRoute`s to their listeners and translates matches, filters and weighted backends into podgate routers, middlewares and services. It matches Traefik's Kubernetes Gateway provider (an experimental feature there, `gatewayClass`, HTTPRoute and GRPCRoute with the supported filters). Caddy has no first-party Gateway API controller. The client, the Ingress mapping, tenancy and RBAC of the Kubernetes source are in `docs/ref/provider-kubernetes.md`; status written back to the cluster is change 0074, TLSRoute, TCPRoute and UDPRoute are change 0075.
+Reference for `crates/podgate-provider/src/kubernetes/gateway`: the half of the Kubernetes source that implements the HTTP part of the Gateway API. It accepts the `Gateway`s of its class, attaches `HTTPRoute`s and `GRPCRoute`s to their listeners and translates matches, filters and weighted backends into podgate routers, middlewares and services. It matches Traefik's Kubernetes Gateway provider (an experimental feature there, `gatewayClass`, HTTPRoute and GRPCRoute with the supported filters). Caddy has no first-party Gateway API controller. The client, the Ingress mapping, tenancy and RBAC of the Kubernetes source are in `docs/ref/provider-kubernetes.md`; status written back to the cluster and leader election are `docs/ref/provider-gateway-status.md`, TLSRoute, TCPRoute and UDPRoute are change 0075.
 
 ## Configuration
 
@@ -34,6 +34,7 @@ A Gateway of the class produces nothing by itself. A route attaches to a **liste
 |---|---|
 | a `parentRefs` entry names the Gateway, and the listener by `sectionName` or `port` when it does | `NoMatchingParent` |
 | the listener's protocol is `HTTP`, or `HTTPS` that terminates TLS, and its port has an entry point | `NotAllowedByListeners` |
+| the listener does not conflict with another listener of its Gateway (same port and host name, or protocols that cannot share a port): both listeners of a conflict are refused (`docs/ref/provider-gateway-status.md`, `### Conflicts`) | `NotAllowedByListeners` |
 | `allowedRoutes.kinds` (default: `HTTPRoute` and `GRPCRoute`) lists the route's kind | `NotAllowedByListeners` |
 | `allowedRoutes.namespaces.from` is `All`, or `Same` (the default) and the route is in the Gateway's namespace, or `Selector` and the namespace's labels match | `NotAllowedByListeners` |
 | the route's host names intersect the listener's `hostname` | `NoMatchingListenerHostname` |
@@ -104,7 +105,7 @@ A backend that does not exist, has no such port or belongs to a Service the sour
 
 ### Refused, never ignored
 
-Everything the API lets a route say that podgate cannot say rejects the route with `UnsupportedValue` and a message that names the field: rule `timeouts`, `sessionPersistence` and `retry`, a filter or match type outside the lists above, a backend kind that is not `Service`, and a path or header value podgate cannot send. The routes that are rejected are named in the source's outage report (`HTTPRoute team-a/shop rejected: UnsupportedValue: rules[0].timeouts is not supported`), and the rest keeps being served. `translate` returns the report of every route that names a Gateway of ours, with the reason of each `parentRefs` entry, for the status that change 0074 writes.
+Everything the API lets a route say that podgate cannot say rejects the route with `UnsupportedValue` and a message that names the field: rule `timeouts`, `sessionPersistence` and `retry`, a filter or match type outside the lists above, a backend kind that is not `Service`, and a path or header value podgate cannot send. The routes that are rejected are named in the source's outage report (`HTTPRoute team-a/shop rejected: UnsupportedValue: rules[0].timeouts is not supported`), and the rest keeps being served. `translate` returns the report of every route that names a Gateway of ours, with the reason of each `parentRefs` entry, for the status that `docs/ref/provider-gateway-status.md` writes.
 
 ## Precedence
 
@@ -131,7 +132,7 @@ A `backendRef` or a certificate reference into another namespace needs a `Refere
 
 ## RBAC
 
-On top of `docs/ref/provider-kubernetes.md`, cluster-wide, read-only:
+On top of `docs/ref/provider-kubernetes.md`, cluster-wide, read:
 
 ```yaml
 - apiGroups: ["gateway.networking.k8s.io"]
@@ -145,8 +146,21 @@ On top of `docs/ref/provider-kubernetes.md`, cluster-wide, read-only:
   verbs: ["list", "watch"]
 ```
 
+With `gateway_status` (the default) the provider also writes status and holds a Lease (`docs/ref/provider-gateway-status.md`):
+
+```yaml
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status"]
+  verbs: ["update", "patch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"]
+```
+
+The Lease rule can be a `Role` in the Lease's namespace (`lease_namespace`) with `resourceNames` for `lease_name` on `get` and `update`; `create` cannot be limited by name.
+
 `gatewayclasses` and `namespaces` are cluster-scoped, so `gateway_api` needs a `ClusterRole` for them whatever `namespaces` says; the namespaced kinds follow `namespaces` as usual. The Gateway API CRDs (standard channel: `GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute` at `v1`, `ReferenceGrant` at `v1beta1`) must be installed.
 
 ## Not built
 
-Status of Gateways and routes and leader election; `TLSRoute`, `TCPRoute` and `UDPRoute`; `ExtensionRef` and the podgate objects; `BackendTLSPolicy`; listener conflict detection (two listeners that overlap are both used); the Gateway API's `500` for a single unresolvable backend of a weighted set.
+`TLSRoute`, `TCPRoute` and `UDPRoute`; `ExtensionRef` and the podgate objects; `BackendTLSPolicy`; the Gateway API's `500` for a single unresolvable backend of a weighted set.
