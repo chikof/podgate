@@ -358,12 +358,62 @@ fn site(id: &str, host: &str, up: &Up, config: &Value) -> Value {
 fn pushed(version: u64, apps: &[Value]) -> Value {
     let mut pushed = snapshot(version, apps);
     pushed["skew_secret"] = json!(SKEW);
+    // The test browser speaks plain HTTP: say that TLS ends in front of the entry point.
+    pushed["entry_points"] =
+        json!([{"name": "web", "forwarded_headers": {"trusted_ips": ["127.0.0.0/8"]}}]);
     pushed
 }
 
 async fn push(podgate: &Podgate, snapshot: &Value) {
     let response = podgate.push_snapshot(snapshot).await;
     assert_eq!(response.status, 200, "{response:?}");
+}
+
+/// The test browser talks plain http to an entry point that trusts the loopback proxy, which says
+/// it terminated TLS: the flow runs only over https.
+const TLS: (&str, &str) = ("X-Forwarded-Proto", "https");
+
+async fn h(podgate: &Podgate, host: &str, path: &str, headers: &[(&str, &str)]) -> Response {
+    let mut all = headers.to_vec();
+    all.push(TLS);
+    Podgate::get_with_headers(podgate, host, path, &all).await
+}
+
+async fn h0(podgate: &Podgate, host: &str, path: &str) -> Response {
+    h(podgate, host, path, &[]).await
+}
+
+async fn hr(
+    podgate: &Podgate,
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Response {
+    let mut all = headers.to_vec();
+    all.push(TLS);
+    Podgate::request(podgate, method, host, path, &all).await
+}
+
+#[tokio::test]
+async fn oidc_plain_request_without_trusted_https_refused() {
+    let podgate = Podgate::start().await;
+    let (idp, up) = (Idp::start().await, Up::start().await);
+    push(
+        &podgate,
+        &pushed(1, &[site("a", "a.test", &up, &config(&idp, &json!({})))]),
+    )
+    .await;
+    for path in ["/", "/_podgate/oidc/callback?code=x&state=y"] {
+        let plain = Podgate::get_with_headers(&podgate, "a.test", path, &HTML).await;
+        assert_eq!(
+            (plain.status, plain.body.as_str()),
+            (400, r#"{"error":"oidc requires https"}"#),
+            "{plain:?}"
+        );
+        assert!(set_cookies(&plain).is_empty() && plain.header("location").is_none());
+    }
+    assert!(idp.seen().is_empty() && up.requests() == 0);
 }
 
 fn rejection(response: &Response) -> Value {
@@ -409,7 +459,7 @@ struct Login {
 
 /// Asks for `path` as a browser does, expects the redirect to the provider and reads it.
 async fn begin(podgate: &Podgate, host: &str, path: &str) -> Login {
-    let response = podgate.get_with_headers(host, path, &HTML).await;
+    let response = h(podgate, host, path, &HTML).await;
     assert_eq!(response.status, 302, "{response:?}");
     let location = response.header("location").expect("location").to_owned();
     let query = query_of(&location);
@@ -426,9 +476,7 @@ async fn begin(podgate: &Podgate, host: &str, path: &str) -> Login {
 async fn callback(podgate: &Podgate, host: &str, login: &Login, code: &str) -> Response {
     let target = format!("{CALLBACK}?code={code}&state={}", login.state);
     let cookie = pair(&login.flow_cookie);
-    podgate
-        .get_with_headers(host, &target, &[("Cookie", cookie.as_str())])
-        .await
+    h(podgate, host, &target, &[("Cookie", cookie.as_str())]).await
 }
 
 /// A complete login of `ann`: the `name=value` of the session cookie it earned.
@@ -443,9 +491,13 @@ async fn sign_in(podgate: &Podgate, idp: &Idp, host: &str, extra: &Value) -> Str
 }
 
 async fn with_session(podgate: &Podgate, host: &str, path: &str, cookie: &str) -> Response {
-    podgate
-        .get_with_headers(host, path, &[("Cookie", cookie), ("Accept", "text/html")])
-        .await
+    h(
+        podgate,
+        host,
+        path,
+        &[("Cookie", cookie), ("Accept", "text/html")],
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -473,7 +525,7 @@ async fn oidc_login_redirect_has_pkce_state_nonce() {
     );
     assert_eq!(query["response_type"], "code");
     assert_eq!(query["client_id"], CLIENT);
-    assert_eq!(query["redirect_uri"], format!("http://a.test{CALLBACK}"));
+    assert_eq!(query["redirect_uri"], format!("https://a.test{CALLBACK}"));
     assert_eq!(query["scope"], "openid");
     assert_eq!(query["code_challenge_method"], "S256");
     // 128 random bits of state and nonce, 256 of verifier whose S256 is the challenge.
@@ -495,7 +547,7 @@ async fn oidc_login_redirect_has_pkce_state_nonce() {
         1,
         "the document is cached"
     );
-    let response = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let response = h(&podgate, "a.test", "/", &HTML).await;
     assert_eq!(response.header("cache-control"), Some("no-store"));
 }
 
@@ -508,7 +560,7 @@ async fn oidc_flow_cookie_attributes() {
         &pushed(1, &[site("a", "a.test", &up, &config(&idp, &json!({})))]),
     )
     .await;
-    let response = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let response = h(&podgate, "a.test", "/", &HTML).await;
     let cookie = cookie_named(&response, FLOW_COOKIE).expect("flow cookie");
     assert!(
         cookie.ends_with(&format!(
@@ -534,12 +586,12 @@ async fn oidc_flow_cookie_attributes() {
     // A configured callback path is the cookie's path.
     let custom = config(&idp, &json!({"redirect_path": "/auth/back"}));
     push(&podgate, &pushed(2, &[site("a", "a.test", &up, &custom)])).await;
-    let response = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let response = h(&podgate, "a.test", "/", &HTML).await;
     let cookie = cookie_named(&response, FLOW_COOKIE).expect("flow cookie");
     assert!(cookie.contains("; Path=/auth/back; "), "{cookie}");
     assert_eq!(
         query_of(response.header("location").expect("location"))["redirect_uri"],
-        "http://a.test/auth/back"
+        "https://a.test/auth/back"
     );
 }
 
@@ -594,7 +646,7 @@ async fn oidc_callback_sets_session() {
         .collect();
     assert_eq!(form["grant_type"], "authorization_code");
     assert_eq!(form["code"], "c1");
-    assert_eq!(form["redirect_uri"], format!("http://a.test{CALLBACK}"));
+    assert_eq!(form["redirect_uri"], format!("https://a.test{CALLBACK}"));
     let challenge = ring::digest::digest(&ring::digest::SHA256, form["code_verifier"].as_bytes());
     assert_eq!(URL_SAFE_NO_PAD.encode(challenge), login.challenge, "PKCE");
     let basic = STANDARD.encode("app1:s3cret%2Fwith+space%26odd");
@@ -641,33 +693,27 @@ async fn oidc_state_mismatch_refused() {
     let cookie = pair(&login.flow_cookie);
 
     let other = format!("{CALLBACK}?code=c1&state=somethingelse");
-    let wrong = podgate
-        .get_with_headers("a.test", &other, &[("Cookie", &cookie)])
-        .await;
+    let wrong = h(&podgate, "a.test", &other, &[("Cookie", &cookie)]).await;
     assert_eq!(
         (wrong.status, wrong.body.as_str()),
         (400, r#"{"error":"bad request"}"#)
     );
     let none = format!("{CALLBACK}?code=c1&state={}", login.state);
-    let no_cookie = podgate.get("a.test", &none).await;
+    let no_cookie = h0(&podgate, "a.test", &none).await;
     assert_eq!(no_cookie.status, 400, "{no_cookie:?}");
-    let no_state = podgate
-        .get_with_headers(
-            "a.test",
-            &format!("{CALLBACK}?code=c1"),
-            &[("Cookie", &cookie)],
-        )
-        .await;
+    let no_state = h(
+        &podgate,
+        "a.test",
+        &format!("{CALLBACK}?code=c1"),
+        &[("Cookie", &cookie)],
+    )
+    .await;
     assert_eq!(no_state.status, 400);
     let twice = format!("{CALLBACK}?code=c1&state={0}&state={0}", login.state);
-    let repeated = podgate
-        .get_with_headers("a.test", &twice, &[("Cookie", &cookie)])
-        .await;
+    let repeated = h(&podgate, "a.test", &twice, &[("Cookie", &cookie)]).await;
     assert_eq!(repeated.status, 400);
     let tampered = format!("{}x", cookie);
-    let altered = podgate
-        .get_with_headers("a.test", &none, &[("Cookie", tampered.as_str())])
-        .await;
+    let altered = h(&podgate, "a.test", &none, &[("Cookie", tampered.as_str())]).await;
     assert_eq!(altered.status, 400);
     for refused in [&wrong, &no_cookie, &no_state, &repeated, &altered] {
         assert!(cookie_named(refused, SESSION_COOKIE).is_none());
@@ -838,7 +884,7 @@ async fn oidc_issuer_mismatch_refused() {
     .await;
     // The document names another issuer: it is not used, and nobody is sent anywhere.
     *idp.state.doc_issuer.lock().expect("issuer") = "https://evil.test".to_owned();
-    let refused = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let refused = h(&podgate, "a.test", "/", &HTML).await;
     assert_eq!(
         (refused.status, refused.body.as_str()),
         (503, r#"{"error":"authentication unavailable"}"#)
@@ -879,7 +925,7 @@ async fn oidc_redirect_target_relative_only() {
     .into_iter()
     .enumerate()
     {
-        let response = podgate.get_with_headers("a.test", path, &HTML).await;
+        let response = h(&podgate, "a.test", path, &HTML).await;
         if response.status == 400 {
             // A request target the proxy itself refuses never starts a login.
             continue;
@@ -935,18 +981,18 @@ async fn oidc_session_passes_with_claims() {
     .await;
 
     let cookie = format!("theme=dark; {session}; other=1");
-    let page = podgate
-        .get_with_headers(
-            "a.test",
-            "/dash",
-            &[
-                ("Cookie", cookie.as_str()),
-                ("X-Email", "forged@evil.test"),
-                ("X-Groups", "root"),
-                ("Accept", "text/html"),
-            ],
-        )
-        .await;
+    let page = h(
+        &podgate,
+        "a.test",
+        "/dash",
+        &[
+            ("Cookie", cookie.as_str()),
+            ("X-Email", "forged@evil.test"),
+            ("X-Groups", "root"),
+            ("Accept", "text/html"),
+        ],
+    )
+    .await;
     assert_eq!(page.status, 200, "{page:?}");
     assert_eq!(
         header_of(&page.body, "x-email"),
@@ -965,13 +1011,13 @@ async fn oidc_session_passes_with_claims() {
     assert!(upstream_cookie.contains("theme=dark") && upstream_cookie.contains("other=1"));
 
     // A visitor with no session cannot present an identity.
-    let anonymous = podgate
-        .get_with_headers(
-            "a.test",
-            "/dash",
-            &[("X-User", "admin"), ("Accept", "text/html")],
-        )
-        .await;
+    let anonymous = h(
+        &podgate,
+        "a.test",
+        "/dash",
+        &[("X-User", "admin"), ("Accept", "text/html")],
+    )
+    .await;
     assert_eq!(anonymous.status, 302);
     assert_eq!(up.requests(), 1);
 
@@ -1096,9 +1142,14 @@ async fn oidc_logout_clears_cookie() {
     let session = sign_in(&podgate, &idp, "a.test", &json!({})).await;
 
     for (method, status) in [("GET", 302), ("POST", 303)] {
-        let out = podgate
-            .request(method, "a.test", "/logout", &[("Cookie", session.as_str())])
-            .await;
+        let out = hr(
+            &podgate,
+            method,
+            "a.test",
+            "/logout",
+            &[("Cookie", session.as_str())],
+        )
+        .await;
         assert_eq!(out.status, status, "{out:?}");
         assert_eq!(out.header("location"), Some("/"));
         let cleared = cookie_named(&out, SESSION_COOKIE).expect("the session cookie is cleared");
@@ -1109,7 +1160,7 @@ async fn oidc_logout_clears_cookie() {
     }
     assert_eq!(up.requests(), 0, "logout is answered by the middleware");
     // The browser drops the cookie: the next visit starts a login.
-    let again = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let again = h(&podgate, "a.test", "/", &HTML).await;
     assert_eq!(again.status, 302);
 }
 
@@ -1128,16 +1179,12 @@ async fn oidc_xhr_gets_401() {
         ("X-Requested-With", "XMLHttpRequest"),
     ];
     let cases = [
-        podgate
-            .get_with_headers("a.test", "/api", &json_accept)
-            .await,
-        podgate.get_with_headers("a.test", "/api", &xhr).await,
-        podgate
-            .get_with_headers("a.test", "/api", &[("Accept", "*/*")])
-            .await,
-        podgate.get("a.test", "/api").await,
-        podgate.request("POST", "a.test", "/api", &HTML).await,
-        podgate.request("DELETE", "a.test", "/api", &HTML).await,
+        h(&podgate, "a.test", "/api", &json_accept).await,
+        h(&podgate, "a.test", "/api", &xhr).await,
+        h(&podgate, "a.test", "/api", &[("Accept", "*/*")]).await,
+        h0(&podgate, "a.test", "/api").await,
+        hr(&podgate, "POST", "a.test", "/api", &HTML).await,
+        hr(&podgate, "DELETE", "a.test", "/api", &HTML).await,
     ];
     for response in &cases {
         assert_eq!(response.status, 401, "{response:?}");
@@ -1147,10 +1194,7 @@ async fn oidc_xhr_gets_401() {
     }
     // A request that cannot follow a redirect never starts a login.
     assert!(idp.seen().is_empty(), "no provider traffic for a script");
-    assert_eq!(
-        podgate.get_with_headers("a.test", "/", &HTML).await.status,
-        302
-    );
+    assert_eq!(h(&podgate, "a.test", "/", &HTML).await.status, 302);
     assert_eq!(up.requests(), 0);
 }
 
@@ -1168,9 +1212,7 @@ async fn oidc_callback_path_reserved() {
         idp.grant("c1", idp.claims(&login.nonce, &json!({})));
         let target = format!("/auth/back?code=c1&state={}", login.state);
         let cookie = pair(&login.flow_cookie);
-        let done = podgate
-            .get_with_headers("a.test", &target, &[("Cookie", cookie.as_str())])
-            .await;
+        let done = h(&podgate, "a.test", &target, &[("Cookie", cookie.as_str())]).await;
         assert_eq!(done.status, 302, "{done:?}");
         pair(&cookie_named(&done, SESSION_COOKIE).expect("session"))
     };
@@ -1178,7 +1220,7 @@ async fn oidc_callback_path_reserved() {
     for path in ["/auth/back", "/auth/back?code=x&state=y", "/auth/out"] {
         for cookie in [None, Some(session.as_str())] {
             let headers: Vec<(&str, &str)> = cookie.map(|c| ("Cookie", c)).into_iter().collect();
-            let answer = podgate.get_with_headers("a.test", path, &headers).await;
+            let answer = h(&podgate, "a.test", path, &headers).await;
             assert!(
                 matches!(answer.status, 302 | 303 | 400),
                 "{path}: {answer:?}"
@@ -1269,7 +1311,7 @@ async fn oidc_discovery_through_policy() {
     );
     let token_denied = site("b", "b.test", &up, &config(&named, &json!({})));
     push(&podgate, &pushed(1, &[lead, token_denied])).await;
-    let unreachable = podgate.get_with_headers("a.test", "/", &HTML).await;
+    let unreachable = h(&podgate, "a.test", "/", &HTML).await;
     assert_eq!(unreachable.status, 503, "{unreachable:?}");
     assert!(
         named.seen().is_empty(),
@@ -1319,7 +1361,7 @@ async fn oidc_provider_outage_keeps_sessions() {
         assert_eq!(header_of(&page.body, "x-user"), Some("ann"));
     }
     // A login that has to ask the provider for its document cannot start...
-    let cold = podgate.get_with_headers("b.test", "/", &HTML).await;
+    let cold = h(&podgate, "b.test", "/", &HTML).await;
     assert_eq!(
         (cold.status, cold.body.as_str()),
         (503, r#"{"error":"authentication unavailable"}"#),
@@ -1403,7 +1445,7 @@ async fn oidc_client_secret_redacted() {
         &json!({"client_secret": secret, "forward_claims": {"sub": "X-User"}}),
     );
     push(&podgate, &pushed(1, &[site("a", "a.test", &up, &config)])).await;
-    let explain = podgate.admin_get("/v1/explain?url=http://a.test/").await;
+    let explain = podgate.admin_get("/v1/explain?url=https://a.test/").await;
     assert_eq!(explain.status, 200, "{explain:?}");
     assert!(
         explain.body.contains("client_secret_basic"),
@@ -1437,6 +1479,32 @@ async fn oidc_client_secret_redacted() {
         !idp.asked("POST", "/token")[0].body.contains(secret),
         "only the header carries it"
     );
+}
+
+#[tokio::test]
+async fn oidc_refused_on_plain_entry_point() {
+    let podgate = Podgate::start().await;
+    let (idp, up) = (Idp::start().await, Up::start().await);
+    let guarded = site("a", "a.test", &up, &config(&idp, &json!({})));
+    let mut plain = snapshot(1, std::slice::from_ref(&guarded));
+    plain["skew_secret"] = json!(SKEW);
+    let refused = podgate.push_snapshot(&plain).await;
+    let entry = rejection(&refused);
+    assert_eq!(entry["code"], "invalid_middleware", "{refused:?}");
+    assert_eq!(entry["entry_point"], "web", "{entry}");
+}
+
+#[tokio::test]
+async fn oidc_allowed_when_plain_entry_point_redirects() {
+    let podgate = Podgate::start().await;
+    let (idp, up) = (Idp::start().await, Up::start().await);
+    let guarded = site("a", "a.test", &up, &config(&idp, &json!({})));
+    // The router is on every entry point; `web` redirects to `websecure` before routing, so no
+    // cookie is ever issued over plain http there.
+    let mut redirected = snapshot(1, &[guarded]);
+    redirected["skew_secret"] = json!(SKEW);
+    redirected["entry_points"] = json!([{"name": "web", "redirect": {"to": "websecure"}}]);
+    push(&podgate, &redirected).await;
 }
 
 #[tokio::test]
@@ -1476,8 +1544,8 @@ async fn oidc_before_admission() {
     let (held, others) = tokio::join!(with_session(&podgate, "a.test", "/slow", &session), async {
         sleep(Duration::from_millis(300)).await;
         // The tenant's only slot is taken: nobody who has no session needs one.
-        let browser = podgate.get_with_headers("a.test", "/other", &HTML).await;
-        let script = podgate.get_with_headers("a.test", "/other", &[]).await;
+        let browser = h(&podgate, "a.test", "/other", &HTML).await;
+        let script = h(&podgate, "a.test", "/other", &[]).await;
         let signed_in = with_session(&podgate, "a.test", "/other", &session).await;
         (browser, script, signed_in)
     });

@@ -262,6 +262,14 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             context.resolver(),
             snapshot.skew_secret.as_ref(),
         );
+        reject_oidc_on_plain_entry_points(
+            snapshot,
+            context,
+            app,
+            app_routers,
+            &stages,
+            &mut rejected,
+        );
         let max_buffer_bytes = snapshot
             .tenants
             .iter()
@@ -1154,6 +1162,60 @@ pub(crate) fn hash_of(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// Refuses an `oidc` stage on a router that a plain `http` entry point serves: its cookies are
+/// always `Secure`, so a browser that reached the route over plain HTTP drops them and loops
+/// through the login. An entry point is fine when the snapshot makes it redirect, or trusts
+/// `forwarded_headers` (TLS ends in front of it and the browser sees `https`). The operator puts
+/// the HTTPS redirect on the plain entry point.
+fn reject_oidc_on_plain_entry_points(
+    snapshot: &Snapshot,
+    context: &CompileContext,
+    app: &App,
+    routers: &[CompiledRouter],
+    stages: &[middleware::Named],
+    rejected: &mut Vec<Rejected>,
+) {
+    let covered = |name: &str| {
+        snapshot.entry_points.iter().any(|policy| {
+            &*policy.name == name
+                && (policy.redirect.is_some() || policy.forwarded_headers.is_some())
+        })
+    };
+    for router in routers {
+        let has_oidc = router.chain().iter().any(|index| {
+            matches!(
+                stages.get(*index).map(|named| &named.stage),
+                Some(middleware::Stage::Oidc(_))
+            )
+        });
+        if !has_oidc {
+            continue;
+        }
+        let plain = context
+            .entry_points()
+            .filter(|(name, protocol)| {
+                *protocol == crate::entry::Protocol::Http
+                    && router.listens_on(name)
+                    && !covered(name)
+            })
+            .map(|(name, _)| name)
+            .next();
+        if let Some(name) = plain {
+            rejected.push(Rejected::new(
+                app,
+                format!("router {}", router.name()),
+                Invalid::new(
+                    "invalid_middleware",
+                    format!(
+                        "oidc: router {} is served by the plain http entry point {name}, where the session cookie (always Secure) would be dropped by the browser; put a `redirect` to an https entry point on {name}, or list only https entry points",
+                        router.name()
+                    ),
+                )
+                .with("entry_point", name),
+            ));
+        }
+    }
+}
 #[cfg(test)]
 mod test {
     use super::*;

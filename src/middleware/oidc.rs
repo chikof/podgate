@@ -1256,6 +1256,14 @@ impl Kind for Oidc {
                 return Ok(Flow::Respond);
             }
         };
+        // The cookies are always Secure: over plain http a browser drops them and the login
+        // loops. Only a TLS connection, or a trusted proxy that says it terminated TLS, serves it.
+        if origin.scheme() != "https" {
+            let error = AppError::BadRequest("oidc requires https".into());
+            *cx.reason = Some("oidc_requires_https");
+            crate::respond::write_error(cx.session, &error).await?;
+            return Ok(Flow::Respond);
+        }
         let now = unix_secs();
         match self.place(cx.session.req_header().uri.path()) {
             Place::Callback => self.callback(cx, &origin, now).await,

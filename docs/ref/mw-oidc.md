@@ -30,7 +30,9 @@ Traefik has no OIDC outside Traefik Hub (and a community forward-auth pattern wi
 | `allow_subjects` | Optional list of admitted `sub` values (1 to 256). |
 | `transport` | A `servers_transport` of the app for the calls to the provider (CA, SNI, client certificate). |
 
-`skew_secret` must be in the snapshot (`invalid_middleware` otherwise). A tenant uses at most 4 distinct issuers, and its `max_buffer_bytes` must cover one call (about 270 KiB).
+The flow runs only over https: a request whose effective scheme is not https (not TLS, and no trusted proxy reporting `X-Forwarded-Proto: https`) gets `400 {"error":"oidc requires https"}` and no cookie.
+
+`skew_secret` must be in the snapshot (`invalid_middleware` otherwise). The cookies are always `Secure`, so a router that a plain `http` entry point serves is `invalid_middleware` (naming the entry point) unless the snapshot gives that entry point a `redirect` or trusts its `forwarded_headers` (TLS ends in front of it); put the HTTPS redirect on the plain entry point or list only https entry points. A tenant uses at most 4 distinct issuers, and its `max_buffer_bytes` must cover one call (about 270 KiB).
 
 ## The flow
 

@@ -693,6 +693,9 @@ fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
     let mut pushed = snapshot(1, &[a]);
     pushed["certificates"] = json!([cert.entry(&["a.test"])]);
     pushed["skew_secret"] = json!(skew);
+    // The `oidc` stage needs TLS in front of a plain entry point.
+    pushed["entry_points"] =
+        json!([{"name": "web", "forwarded_headers": {"trusted_ips": ["127.0.0.0/8"]}}]);
     pushed["acme"] = json!({
         "issuer_node": "some-other-node",
         "directory_url": "https://acme.invalid/directory",
