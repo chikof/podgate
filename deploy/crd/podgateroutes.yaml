@@ -3507,6 +3507,27 @@ spec:
                       Refuse a handshake for a name of this app that has no certificate, instead of serving the
                       default certificate.
                     type: boolean
+                  spiffe_client:
+                    description: |-
+                      Verify client certificates as SPIFFE X.509-SVIDs: against the live bundle of a
+                      trust domain, by SPIFFE ID. Only for a tenant the operator's SPIFFE policy allows
+                      `client_identity`. Excludes `client_ca_pem`. Absent: no SPIFFE client verification.
+                    nullable: true
+                    properties:
+                      allowed_ids:
+                        description: |-
+                          SPIFFE IDs, or patterns (`*` for one path segment, a final `**` for one or more), of which
+                          a client certificate must carry one. All are in `trust_domain`.
+                        items:
+                          type: string
+                        type: array
+                      trust_domain:
+                        description: The trust domain whose live bundle a client certificate must chain to.
+                        type: string
+                    required:
+                    - trust_domain
+                    - allowed_ids
+                    type: object
                 required:
                 - mode
                 type: object
@@ -3536,6 +3557,10 @@ spec:
                       read_timeout_secs:
                         maximum: 3600
                         minimum: 1
+                      spiffe:
+                        required:
+                        - ids
+                        - trust_domain
                       stream_close_delay_secs:
                         maximum: 86400
                         minimum: 1
@@ -3615,6 +3640,27 @@ spec:
                     server_name:
                       nullable: true
                       type: string
+                    spiffe:
+                      description: |-
+                        Mutual TLS by SPIFFE identity: `{"ids": [...], "trust_domain": "..."}`. Needs the
+                        operator's SPIFFE policy to allow the tenant.
+                      nullable: true
+                      properties:
+                        ids:
+                          description: |-
+                            SPIFFE IDs, or patterns (`*` for one path segment, a final `**` for one or more), of which
+                            the server's certificate must carry one. Each must fall under the tenant's
+                            `allowed_server_ids`.
+                          items:
+                            type: string
+                          type: array
+                        trust_domain:
+                          description: The trust domain whose bundle the server's certificate must chain to. Every ID is in it.
+                          type: string
+                      required:
+                      - ids
+                      - trust_domain
+                      type: object
                     stream_close_delay_secs:
                       description: |-
                         How long a tunnel lives on after its server was removed by a snapshot, in seconds
