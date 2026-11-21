@@ -611,7 +611,7 @@ fn valid_name(name: &str, dots: bool) -> bool {
 }
 
 /// An app, tenant or revision id.
-pub(super) fn identifier(key: &str, value: &str) -> Result<Box<str>, Rejection> {
+pub(crate) fn identifier(key: &str, value: &str) -> Result<Box<str>, Rejection> {
     let value = value.trim();
     if looks_like_address(value) {
         return Err(Rejection::address(key, value));

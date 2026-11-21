@@ -28,9 +28,9 @@
 //! The reference is `docs/ref/provider-docker.md`.
 
 mod apps;
-mod client;
+pub(crate) mod client;
 pub mod labels;
-mod model;
+pub(crate) mod model;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

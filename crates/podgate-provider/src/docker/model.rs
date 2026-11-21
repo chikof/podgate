@@ -162,7 +162,7 @@ impl Endpoint {
 }
 
 /// Parses `2026-11-20T12:00:00.123456789Z` (or a numeric offset) into unix seconds.
-fn parse_time(text: &str) -> Option<u64> {
+pub(crate) fn parse_time(text: &str) -> Option<u64> {
     let (date, rest) = text.split_once('T')?;
     let mut date = date.split('-');
     let year: i64 = date.next()?.parse().ok()?;

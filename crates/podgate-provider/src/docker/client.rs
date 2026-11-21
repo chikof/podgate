@@ -42,7 +42,7 @@ const EVENTS_QUERY: &str = "/events?filters=%7B%22type%22%3A%5B%22container%22%5
 
 /// What went wrong talking to the daemon.
 #[derive(Debug, Error)]
-pub(super) enum ClientError {
+pub(crate) enum ClientError {
     /// The socket cannot be connected to.
     #[error("cannot connect to {path}: {source}")]
     Connect {
@@ -76,7 +76,7 @@ pub(super) enum ClientError {
 
 /// A daemon event, reduced to what decides whether to look at the containers again.
 #[derive(Debug, Deserialize)]
-pub(super) struct Event {
+pub(crate) struct Event {
     #[serde(rename = "Type", default)]
     kind: Option<String>,
     #[serde(rename = "Action", default)]
@@ -106,12 +106,12 @@ impl Event {
 
 /// The daemon's socket.
 #[derive(Debug, Clone)]
-pub(super) struct Client {
+pub(crate) struct Client {
     socket: PathBuf,
 }
 
 impl Client {
-    pub(super) fn new(socket: PathBuf) -> Self {
+    pub(crate) fn new(socket: PathBuf) -> Self {
         Self { socket }
     }
 
@@ -139,7 +139,7 @@ impl Client {
     }
 
     /// Opens the event stream, filtered to the container events the source reacts to.
-    pub(super) async fn events(&self) -> Result<Events, ClientError> {
+    pub(crate) async fn events(&self) -> Result<Events, ClientError> {
         let (reader, head) = self.open(EVENTS_QUERY).await?;
         if head.status >= 400 {
             return Err(ClientError::Status {
@@ -356,7 +356,7 @@ impl Body {
 }
 
 /// The open `/events` stream.
-pub(super) struct Events {
+pub(crate) struct Events {
     body: Body,
     buffer: Vec<u8>,
 }
@@ -366,7 +366,7 @@ impl Events {
     ///
     /// Events are JSON values, one per line on Docker and Podman; the decoder does not rely on
     /// the newline, so a value split over chunks or two values in one chunk both work.
-    pub(super) async fn next(&mut self) -> Result<Option<Event>, ClientError> {
+    pub(crate) async fn next(&mut self) -> Result<Option<Event>, ClientError> {
         loop {
             let mut values =
                 serde_json::Deserializer::from_slice(&self.buffer).into_iter::<Event>();
