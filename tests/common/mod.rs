@@ -9,6 +9,7 @@
 //! - [`Upstream::start`]: a backend that answers every request with a fixed body.
 //! - [`snapshot`], [`TestCert`]: build snapshot JSON and self-signed certificates.
 //! - [`dns::Dns`]: a UDP DNS server whose answers, TTLs and failures a test controls.
+//! - [`grpc::Server`], [`grpc::Client`]: a gRPC upstream and client on the `h2` crate.
 //! - [`pebble::Pebble`]: `pebble` and `pebble-challtestsrv` for the ACME tests, with a private CA.
 //! - [`valkey::Valkey`]: a real `valkey-server` for the cluster rate limit tests.
 
@@ -16,6 +17,7 @@
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
 pub mod dns;
+pub mod grpc;
 pub mod pebble;
 pub mod valkey;
 pub mod ws;
