@@ -353,3 +353,59 @@ func TestLoopStopsBurningCPU(t *testing.T) {
 		t.Fatalf("the loop still burns CPU: %s in 500ms", burned)
 	}
 }
+
+// A call that waited for its turn behind a call whose deadline stopped the interpreter must fail,
+// not run on the stopped interpreter: the handler would return at once without calling next, which
+// would read as an answer.
+func TestCallQueuedBehindStoppedInstanceFails(t *testing.T) {
+	h := newTestHost(t, "chaos")
+	mustProcess(t, h, request{tenant: "t", config: `{}`}) // warm up: build the instance
+	looping := make(chan *callError, 1)
+	go func() {
+		_, err := process(h, request{tenant: "t", config: `{}`, headers: [][2]string{{"x-loop", "1"}}, timeout: 300 * time.Millisecond})
+		looping <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	d, err := process(h, request{tenant: "t", config: `{}`})
+	if err == nil {
+		t.Fatalf("a call queued behind a stopped instance was answered: %+v", d)
+	}
+	if err.code != codeUnavailable {
+		t.Fatalf("err = %v", err)
+	}
+	if loop := <-looping; loop == nil || loop.code != codeDeadlineExceeded {
+		t.Fatalf("the looping call: %v", loop)
+	}
+	if d := mustProcess(t, h, request{tenant: "t", config: `{}`}); d.Action != ActionContinue {
+		t.Fatalf("decision on the fresh instance = %+v", d)
+	}
+}
+
+func TestSandboxedSymbolsAreMissing(t *testing.T) {
+	load := func(use string) error {
+		src := "package plug\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\t\"os\"\n)\n\nvar _ = " + use + "\n\n" +
+			"type Config struct{}\n\nfunc CreateConfig() *Config { return &Config{} }\n\n" +
+			"func New(ctx context.Context, next http.Handler, c *Config, n string) (http.Handler, error) { return next, nil }\n"
+		dir := writePlugin(t, "type: middleware\nimport: github.com/acme/plug\n", map[string]string{"plug.go": src})
+		source, err := LoadSource(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", use, err)
+		}
+		_, err = NewHost("plug", source)
+		return err
+	}
+	for _, ok := range []string{"os.Stdout", "os.Getenv", "os.Environ", "os.Args", "http.StatusOK", "http.NewRequest", "http.Header{}"} {
+		if err := load(ok); err != nil {
+			t.Errorf("%s must be available: %v", ok, err)
+		}
+	}
+	for _, missing := range []string{
+		"os.ReadFile", "os.Exit", "os.Open", "os.Stdin", "os.Getpid",
+		"http.Get", "http.DefaultClient", "http.ListenAndServe", "http.FileServer", "http.Dir(\"/\")",
+	} {
+		err := load(missing)
+		if err == nil || !strings.Contains(err.Error(), "undefined") {
+			t.Errorf("%s: err = %v, want an undefined symbol", missing, err)
+		}
+	}
+}

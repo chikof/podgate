@@ -31,6 +31,7 @@ const (
 	codeDeadlineExceeded   = 4
 	codeFailedPrecondition = 9
 	codeUnimplemented      = 12
+	codeUnavailable        = 14
 	codeInternal           = 13
 )
 

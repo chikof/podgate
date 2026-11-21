@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 /// The built host: `<target dir>/yaegi-host/yaegi-host`, made by the build script once per test
-/// process (`go build` reuses its cache, so this costs a fraction of a second after the first).
+/// process (`go build` reuses its cache, so this costs a fraction of a second after the first; builds take turns (flock)).
 static HOST_BINARY: LazyLock<PathBuf> = LazyLock::new(|| {
     let exe = std::env::current_exe().expect("the test binary's path");
     let target = exe

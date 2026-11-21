@@ -140,7 +140,7 @@ A panic in the plugin is recovered and fails the call (`the plugin panicked whil
 request: ...`). The call's deadline (podgate's `grpc-timeout`, the middleware's `timeout_ms`) bounds
 the handler: when it passes the interpreter stops executing the plugin's code, including a `for {}`,
 the call fails, and the instance is dropped (a stopped interpreter cannot run again; the next call
-builds a fresh one). The host process does not exit and is not restarted. A plugin that spawns
+builds a fresh one; a call of that instance that was waiting for its turn fails with status 14 rather than run on the stopped interpreter). The host process does not exit and is not restarted. A plugin that spawns
 goroutines that spin outside the interpreter's control is bounded by the plugin entry's cgroup
 limits like any plugin.
 
@@ -160,7 +160,7 @@ plugin.go)`.
 | `encoding`, `encoding/{base32,base64,binary,csv,hex,json,pem,xml}`, `mime`, `mime/multipart`, `mime/quotedprintable` | |
 | `net/http` | without the client and the server: `Client`, `Transport`, `Get`, `Post`, `ListenAndServe`, `Serve`, `Server`, `DefaultClient`, `DefaultServeMux`, `Handle`, `Dir`, `FS`, `FileServer`, `ServeFile` and the like. Types and helpers for building requests and writing responses stay. |
 | `net/netip`, `net/textproto`, `net/url` | |
-| `os` | only `Stdout`, `Stderr` (the host's, so logs reach podgate's log), `Getenv` and `LookupEnv` (an empty environment), `ErrNotExist`, `ErrExist` |
+| `os` | `Stdout` and `Stderr` (the host's, so logs reach podgate's log), the interpreter's own virtual environment (`Getenv`, `LookupEnv`, `Environ`, `Setenv`: empty at the start, never the host's) and `Args` (one word), `ErrNotExist`, `ErrExist`. No file, directory, process or `Exit`; no `Stdin`. |
 | a package of the plugin's own module or its `vendor/` tree (the first element of the path has a dot) | its imports are checked like the plugin's |
 
 Refused with a reason: `unsafe`, cgo (`import "C"`), `os/exec`, `os/signal`, `os/user`, `syscall`,

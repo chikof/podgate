@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -26,6 +27,10 @@ type instance struct {
 	pending     func()
 	current     atomic.Pointer[exchange]
 	warnWrapped sync.Once
+	// dead is set when a deadline stopped the interpreter: it cannot run plugin code again, so a
+	// call that waited for its turn must not run on it (the handler would return at once, and
+	// its silence would read as "respond 200").
+	dead atomic.Bool
 }
 
 // newInstance loads the plugin's package into a fresh interpreter that can import only the
@@ -35,7 +40,12 @@ func newInstance(source *Source) (*instance, error) {
 	in.interp = interp.New(interp.Options{
 		GoPath:               goPath,
 		SourcecodeFilesystem: source.FS,
-		Env:                  []string{},
+		// The interpreter adds Stdin, Args and Environ to the os package itself: an empty
+		// environment, a one word command line, and a Stdin that is not a file, which it then
+		// leaves out (Stdout and Stderr stay the host's, so plugin logs reach podgate's log).
+		Env:   []string{},
+		Args:  []string{"yaegi-plugin"},
+		Stdin: strings.NewReader(""),
 	})
 	if err := in.interp.Use(exports()); err != nil {
 		return nil, fmt.Errorf("registering the allowed packages: %w", err)

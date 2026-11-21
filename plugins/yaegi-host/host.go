@@ -190,6 +190,9 @@ func (h *Host) Process(ctx context.Context, c *Call) (*Decision, *callError) {
 		return nil, failf(codeDeadlineExceeded, "the plugin is busy with another call of this tenant")
 	}
 	defer func() { <-inst.turn }()
+	if inst.dead.Load() {
+		return nil, failf(codeUnavailable, "the plugin instance was stopped by an earlier call that passed its deadline")
+	}
 	ex, cerr := newExchange(ctx, c)
 	if cerr != nil {
 		return nil, cerr
@@ -200,6 +203,7 @@ func (h *Host) Process(ctx context.Context, c *Call) (*Decision, *callError) {
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The interpreter stops the run, but the instance cannot run again.
+			inst.dead.Store(true)
 			h.evict(c.Tenant, c.Config, inst)
 		}
 		return nil, describe(err, "handling the request")
