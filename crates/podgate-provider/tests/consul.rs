@@ -878,7 +878,7 @@ async fn consul_unknown_tag_rejected() {
         "not JSON",
         "tag \"podgate.tls\": a podgate tag is written key=value",
         "tag podgate.host: given twice",
-        "podgate.port: not used with Consul",
+        "port 80 (podgate.port or a traefik server.port) is not the registered port 8080",
         "podgate.app: \"control\" is not the service's name",
         "names an address",
     ] {
@@ -892,6 +892,135 @@ async fn consul_unknown_tag_rejected() {
             "{service} in {report}"
         );
     }
+}
+
+#[tokio::test]
+async fn consul_traefik_tags_translate() {
+    let consul = FakeConsul::start().await;
+    // Tags as a Traefik Consul Catalog user writes them: no podgate.* tag at all, and the
+    // service is exposed by traefik.enable although exposed_by_default is off.
+    consul.register(Svc::new("shop-1", "shop", "10.4.0.1", 8080).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.shop.rule=Host(`shop.acme.test`) && PathPrefix(`/v1`)",
+        "traefik.http.routers.shop.priority=5",
+        "traefik.http.routers.shop.middlewares=strip",
+        "traefik.http.middlewares.strip.stripprefix.prefixes=/v1",
+        "traefik.http.services.shop.loadbalancer.server.port=8080",
+        "v2",
+    ]));
+    // A tag that cannot be translated leaves out its router and is reported; the rest stays.
+    consul.register(Svc::new("part-1", "part", "10.4.0.2", 8080).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.good.rule=Host(`good.acme.test`)",
+        "traefik.http.routers.bad.rule=Host(`bad.acme.test`)",
+        "traefik.http.routers.bad.tls.options=strict",
+    ]));
+    // The port is the registered one: a tag that says another is a rejection, not a redirect.
+    consul.register(Svc::new("port-1", "port", "10.4.0.3", 8080).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.p.rule=Host(`p.acme.test`)",
+        "traefik.http.services.p.loadbalancer.server.port=9000",
+    ]));
+    // traefik.enable=false hides, and so does it when exposed_by_default is on.
+    consul.register(Svc::new("hidden-1", "hidden", "10.4.0.4", 8080).tags(&[
+        "traefik.enable=false",
+        "traefik.http.routers.h.rule=Host(`h.acme.test`)",
+    ]));
+    // A tag that names an address is as fatal as a podgate.* one.
+    consul.register(Svc::new("addr-1", "addr", "10.4.0.5", 8080).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.a.rule=Host(`a.acme.test`)",
+        "traefik.http.services.a.loadbalancer.server.url=http://10.9.9.9:80",
+    ]));
+    // Both spellings on one instance.
+    consul.register(Svc::new("mix-1", "mix", "10.4.0.6", 8080).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.t.rule=Host(`t.acme.test`)",
+        "podgate.host=m.acme.test",
+    ]));
+    let mut watcher = Watcher::start(&consul_config(&consul.url(), "", ""));
+    let state = watcher
+        .wait_ids_and_report(&["mix", "part", "shop"], "instance addr-1")
+        .await;
+
+    let shop = app_json(&state, "shop");
+    assert_eq!(
+        shop["routers"],
+        json!([{
+            "name": "shop",
+            "entry_points": null,
+            "match": { "all": [{ "host": "shop.acme.test" }, { "path_prefix": "/v1" }] },
+            "priority": 5,
+            "chain": ["strip"],
+            "service": "shop",
+            "observability": null,
+            "declared_by": null,
+        }])
+    );
+    assert_eq!(
+        shop["middlewares"],
+        json!([{ "name": "strip", "type": "strip_prefix", "prefixes": ["/v1"] }])
+    );
+    assert_eq!(
+        servers_of(&state, "shop", "default"),
+        ["http://10.4.0.1:8080"]
+    );
+
+    let part = app_json(&state, "part");
+    let routers: Vec<&str> = part["routers"]
+        .as_array()
+        .expect("routers")
+        .iter()
+        .filter_map(|router| router["name"].as_str())
+        .collect();
+    assert_eq!(
+        routers,
+        ["good"],
+        "the untranslatable router is left out, not approximated"
+    );
+    let mix = app_json(&state, "mix");
+    let routers: BTreeSet<&str> = mix["routers"]
+        .as_array()
+        .expect("routers")
+        .iter()
+        .filter_map(|router| router["name"].as_str())
+        .collect();
+    assert_eq!(routers, BTreeSet::from(["default", "t"]));
+
+    let report = watcher.report().to_owned();
+    for needle in [
+        "service part instance part-1",
+        "traefik.http.routers.bad.tls.options",
+        "service port instance port-1",
+        "is not the registered port 8080",
+        "service addr instance addr-1",
+        "traefik.http.services.a.loadbalancer.server.url",
+    ] {
+        assert!(report.contains(needle), "{needle} in {report}");
+    }
+    assert!(
+        !report.contains("service hidden"),
+        "traefik.enable=false hides: {report}"
+    );
+    assert_eq!(
+        consul.health_paths().contains("/v1/health/service/hidden"),
+        false,
+        "a hidden service is not even read"
+    );
+
+    // With exposed_by_default the hidden service is still hidden.
+    let mut open = Watcher::start(&consul_config(
+        &consul.url(),
+        "",
+        "exposed_by_default = true",
+    ));
+    open.wait_ids_and_report(&["mix", "part", "shop"], "instance addr-1")
+        .await;
+    assert!(
+        !open.report().contains("service hidden"),
+        "{}",
+        open.report()
+    );
 }
 
 #[tokio::test]

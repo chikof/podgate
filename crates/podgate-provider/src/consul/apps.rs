@@ -73,7 +73,14 @@ pub(super) fn build(source: &str, settings: &Settings, services: &[Service<'_>])
         let mut candidates = Vec::new();
         for instance in wanted {
             match candidate(settings, service, instance) {
-                Ok(candidate) => candidates.push(candidate),
+                Ok(candidate) => {
+                    for problem in &candidate.labels.problems {
+                        built
+                            .reports
+                            .push(report(service.name, instance, &problem.to_string()));
+                    }
+                    candidates.push(candidate);
+                }
                 Err(why) => built.reports.push(report(service.name, instance, &why)),
             }
         }
@@ -169,11 +176,11 @@ fn candidate<'a>(
             service.name
         ));
     }
-    if labels.port.is_some() {
-        return Err(
-            "podgate.port: not used with Consul; the port of a server is the one the service registered"
-                .to_owned(),
-        );
+    if let Some(port) = labels.port.filter(|port| *port != instance.port) {
+        return Err(format!(
+            "port {port} (podgate.port or a traefik server.port) is not the registered port {}; the port of a server is the one the service registered",
+            instance.port
+        ));
     }
     if instance.port == 0 {
         return Err(

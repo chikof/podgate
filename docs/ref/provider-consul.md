@@ -29,7 +29,7 @@ resync_secs = 30
 | `tenant` | `default` | For `fixed`, the tenant of every instance. For `meta`, the tenant of an instance whose service names none. Not allowed with `namespace`. |
 | `namespace_tenants` | none | For `namespace` only: `{ "team-a" = "acme" }`. Every namespace in `namespaces` needs an entry and no other namespace may appear. |
 | `meta_key` | `podgate-tenant` | For `meta` only: the `Service.Meta` key that names the tenant. |
-| `exposed_by_default` | `false` | Whether an instance without `podgate.enable` counts. `podgate.enable=false` always excludes. |
+| `exposed_by_default` | `false` | Whether an instance without `podgate.enable` or `traefik.enable` counts. `podgate.enable=false` (or, when that is absent, `traefik.enable=false`) always excludes. |
 | `connect` | `false` | Whether Connect sidecar proxies (`Service.Kind = "connect-proxy"`) count. See [Connect](#connect). |
 | `stale` | `false` | Adds `stale` to every query, so any server answers, not only the leader. |
 | `resync_secs` | `30` | The longest the source goes without reading everything again, whatever the blocking queries said. At least `1`. |
@@ -52,10 +52,19 @@ podgate.middleware.strip.config={"prefixes": ["/v1"]}
 Tags that are not `key=value` (`v2`, `primary`) and tags of other keys are the deployer's own business and are skipped. Differences from Docker labels:
 
 - A `podgate.*` tag with no `=`, or the same `podgate.*` key twice, rejects the instance: which of two values counted would depend on tag order.
-- `podgate.port` is rejected. The port of a server is the one the service registered, never a tag.
+- A port in a tag (`podgate.port`, or a Traefik `loadbalancer.server.port`) must be the registered port, which is the port of every server; a tag that says another is a rejection, never a redirect.
 - `podgate.app` must be absent or the service's name. The app of a Consul service is its name; a tag cannot move an instance into another service's app.
 - `podgate.tenant` is not read. The tenant of an instance is decided by `tenant_from`.
 - Any other `podgate.*` key, a value that does not parse, a router without `match` and the rest of what rejects a container (`docs/ref/provider-docker.md ## Labels`) reject the instance, and the report names it.
+
+## Traefik tags
+
+Tags written for Traefik's Consul Catalog provider (`traefik.http.routers.web.rule=Host(`a.example`)`) are translated by the same function as the Docker source's `traefik.*` labels, `podgate_provider::traefik::translate`, called by `docker::labels::parse` with every tag pair split at the first `=`. The rules, the label tables and what is refused are in `docs/ref/provider-traefik.md`; a service may carry both spellings, and a name both define is a rejection. What is specific to Consul:
+
+- `traefik.enable=true` exposes an instance although `exposed_by_default` is off, and a service with such a tag is watched. `traefik.enable=false` hides it. `podgate.enable` wins when both are set.
+- The port of a server is `Service.Port` always. A `loadbalancer.server.port` that differs rejects the instance (the report says so); one that equals it changes nothing. Traefik's Consul provider lets that label override the service's port, which would here be a tag choosing an upstream port.
+- `loadbalancer.server.url` and `servers.*` are refused as address labels, as everywhere.
+- A tag that cannot be translated exactly leaves out its router (reported with its tag, the service and the instance) and the rest of the instance is used. The `traefik.consulcatalog.*` tags (`connect`, `canary`, and the rest) are reported as unsupported labels and not applied.
 
 ## The address rule
 
@@ -106,7 +115,7 @@ Loopback, link-local and the metadata addresses stay denied by the built-in list
 The source holds blocking queries open, `?index=<n>&wait=<wait_secs>s`, which Consul answers when the data changes or the wait ends:
 
 - one on `GET /v1/catalog/services` per namespace and partition, which says which services exist and which tags they carry;
-- one on `GET /v1/health/service/<name>?passing=true` for each service worth watching: those with a `podgate.enable` tag that is not `false`, or every service with `exposed_by_default`. A service that did not ask is not read at all.
+- one on `GET /v1/health/service/<name>?passing=true` for each service worth watching: those with a `podgate.enable` or `traefik.enable` tag that is not `false`, or every service with `exposed_by_default`. A service that did not ask is not read at all.
 
 A change reaches the source at once; the source then waits 50 ms for more changes and builds the state once. It reads everything again (a query with no index) every `resync_secs`, after every error, and when an index goes backwards, which happens after a restore from a snapshot or when `stale` reads reach another server; an index that is `0` is replaced by `1`, as Consul's guide for blocking queries says. After an error the query is repeated with a backoff of 100 ms doubling to 5 s, up to a quarter longer so that many watchers do not return together. A server that answers a blocking query at once with the index it was given is not blocking: the source pauses a second instead of spinning.
 

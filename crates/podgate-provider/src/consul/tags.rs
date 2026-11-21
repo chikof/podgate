@@ -10,6 +10,7 @@ use thiserror::Error;
 
 const PODGATE: &str = "podgate.";
 const ENABLE: &str = "podgate.enable";
+const TRAEFIK_ENABLE: &str = "traefik.enable";
 
 /// A tag the source cannot read.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -53,22 +54,32 @@ pub(super) fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, TagError> {
     Ok(pairs)
 }
 
+/// What the tags say about `key` (matched without regard to case when `fold`): `Some(false)`
+/// when any of them says `false`, `Some(true)` when one says anything else, `None` when none
+/// is there.
+fn enabled(tags: &[String], key: &str) -> Option<bool> {
+    let mut said = None;
+    for (found, value) in tags.iter().filter_map(|tag| split(tag)) {
+        if found.eq_ignore_ascii_case(key) {
+            if value.eq_ignore_ascii_case("false") {
+                return Some(false);
+            }
+            said = Some(true);
+        }
+    }
+    said
+}
+
 /// Whether one instance counts, by its own tags.
 ///
 /// `podgate.enable=false` always excludes (a duplicate counts, the safe way), any other value
-/// includes (the label parser rejects a value it does not know, with a report), and with no
-/// tag the source's `exposed_by_default` decides.
+/// includes (the label parser rejects a value it does not know, with a report). With no such
+/// tag, `traefik.enable` says the same, as it does for containers; with neither, the source's
+/// `exposed_by_default` decides.
 pub(super) fn exposed(tags: &[String], exposed_by_default: bool) -> bool {
-    let mut enabled = None;
-    for (key, value) in tags.iter().filter_map(|tag| split(tag)) {
-        if key == ENABLE {
-            if value == "false" {
-                return false;
-            }
-            enabled = Some(true);
-        }
-    }
-    enabled.unwrap_or(exposed_by_default)
+    enabled(tags, ENABLE)
+        .or_else(|| enabled(tags, TRAEFIK_ENABLE))
+        .unwrap_or(exposed_by_default)
 }
 
 /// Whether a service is worth watching, by the union of its instances' tags that the catalog
@@ -78,7 +89,10 @@ pub(super) fn worth_watching(union: &[String], exposed_by_default: bool) -> bool
         || union
             .iter()
             .filter_map(|tag| split(tag))
-            .any(|(key, value)| key == ENABLE && value != "false")
+            .any(|(key, value)| {
+                (key.eq_ignore_ascii_case(ENABLE) || key.eq_ignore_ascii_case(TRAEFIK_ENABLE))
+                    && !value.eq_ignore_ascii_case("false")
+            })
 }
 
 #[cfg(test)]
@@ -129,6 +143,19 @@ mod test {
         assert!(!exposed(&tags(&["podgate.host=a"]), false));
         assert!(exposed(&tags(&["podgate.host=a"]), true));
         assert!(exposed(&tags(&["podgate.enable=maybe"]), false));
+        assert!(exposed(&tags(&["traefik.enable=true"]), false));
+        assert!(!exposed(&tags(&["traefik.enable=false"]), true));
+        assert!(
+            exposed(
+                &tags(&["podgate.enable=true", "traefik.enable=false"]),
+                false
+            ),
+            "podgate.enable wins when both are set"
+        );
+        assert!(!exposed(
+            &tags(&["podgate.enable=false", "traefik.enable=true"]),
+            false
+        ));
     }
 
     #[test]
@@ -139,5 +166,7 @@ mod test {
         ));
         assert!(!worth_watching(&tags(&["podgate.enable=false"]), false));
         assert!(worth_watching(&tags(&[]), true));
+        assert!(worth_watching(&tags(&["traefik.enable=true"]), false));
+        assert!(!worth_watching(&tags(&["traefik.enable=false"]), false));
     }
 }
