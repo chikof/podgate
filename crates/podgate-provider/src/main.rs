@@ -13,6 +13,7 @@ use podgate_provider::kubernetes::KubernetesSource;
 use podgate_provider::kubernetes::crd::{SchemaSource, print, read_schema};
 use podgate_provider::nomad::NomadSource;
 use podgate_provider::quarantine::Verdict;
+use podgate_provider::swarm::SwarmSource;
 use podgate_provider::{Config, Engine, UpstreamPolicy};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -77,6 +78,7 @@ fn register_sources(
             "file" => engine.add_source(FileSource::from_config(source)?)?,
             "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,
             "nomad" => engine.add_source(NomadSource::from_config(source)?)?,
+            "swarm" => engine.add_source(SwarmSource::from_config(source)?)?,
             kind => bail!(
                 "source {:?}: kind {kind:?} is not built into this binary",
                 source.name

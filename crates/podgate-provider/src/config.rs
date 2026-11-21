@@ -102,7 +102,7 @@ pub struct TenantConfig {
 /// One `[[source]]` entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceConfig {
-    /// What kind of backend: `docker`, `kubernetes`, `nomad` or `file`.
+    /// What kind of backend: `docker`, `swarm`, `kubernetes`, `nomad` or `file`.
     pub kind: Box<str>,
     /// The unique name; the one in `declared_by`, app ids and `label_sources`.
     pub name: Box<str>,

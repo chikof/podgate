@@ -342,7 +342,7 @@ impl Drop for FakeDocker {
 }
 
 /// The path without a `/v1.43` or `/v4.0.0` prefix, which both engines accept.
-fn strip_version(path: &str) -> &str {
+pub fn strip_version(path: &str) -> &str {
     let Some(rest) = path.strip_prefix("/v") else {
         return path;
     };
@@ -362,7 +362,7 @@ impl Drop for StreamGuard {
     }
 }
 
-async fn read_request(stream: &mut UnixStream) -> Option<(String, String)> {
+pub async fn read_request(stream: &mut UnixStream) -> Option<(String, String)> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -378,7 +378,7 @@ async fn read_request(stream: &mut UnixStream) -> Option<(String, String)> {
     Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
 }
 
-async fn respond(stream: &mut UnixStream, flavor: Flavor, status: &str, body: &Value) {
+pub async fn respond(stream: &mut UnixStream, flavor: Flavor, status: &str, body: &Value) {
     let body = body.to_string();
     let engine = match flavor {
         Flavor::Docker => "Api-Version: 1.43\r\nServer: Docker/27.0 (linux)\r\n",

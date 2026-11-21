@@ -21,6 +21,8 @@
 //!   called by the sources next to their own labels.
 //! - [`nomad`]: the source that turns Nomad service registrations into apps through their
 //!   `podgate.*` tags.
+//! - [`swarm`]: the source that turns Docker Swarm services into apps through their `podgate.*`
+//!   service labels, taking servers from task addresses or the service's virtual IP.
 //! - [`traefik_file`]: the converter of Traefik dynamic configuration files (YAML or TOML), also the
 //!   `convert-traefik` command.
 //! - [`kv`]: the layer the key-value sources share: layouts, tenant mapping, the allowlist
@@ -47,6 +49,7 @@ pub mod policy;
 pub mod push;
 pub mod quarantine;
 pub mod source;
+pub mod swarm;
 mod tags;
 mod tls_client;
 pub mod traefik;

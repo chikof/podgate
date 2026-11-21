@@ -174,9 +174,9 @@ pub(crate) fn tenant_source(
                     .collect(),
             ))
         }
-        (TenantFrom::Network, _) => Err(
-            "tenant_from = \"network\" needs network_tenants and takes no tenant".to_owned(),
-        ),
+        (TenantFrom::Network, _) => {
+            Err("tenant_from = \"network\" needs network_tenants and takes no tenant".to_owned())
+        }
         (_, Some(_)) => Err("network_tenants: only for tenant_from = \"network\"".to_owned()),
     }
 }
@@ -209,11 +209,9 @@ impl TenantSource {
                     }
                 }
             }
-            Self::Label(mapped) => {
-                mapped
-                    .as_deref()
-                    .map_or_else(TenantClaim::none, TenantClaim::mapped)
-            }
+            Self::Label(mapped) => mapped
+                .as_deref()
+                .map_or_else(TenantClaim::none, TenantClaim::mapped),
         };
         Ok(match (self, label) {
             (Self::Label(_), Some(tenant)) => claim.with_label(tenant),
@@ -267,13 +265,8 @@ impl DockerSource {
         if resync_secs == 0 {
             return Err(invalid("resync_secs: must be at least 1".to_owned()));
         }
-        let tenants = tenant_source(
-            raw.tenant_from,
-            raw.tenant,
-            raw.network_tenants,
-            &networks,
-        )
-        .map_err(invalid)?;
+        let tenants = tenant_source(raw.tenant_from, raw.tenant, raw.network_tenants, &networks)
+            .map_err(invalid)?;
         Ok(Self {
             name: config.name.clone(),
             settings: Settings {
@@ -287,14 +280,27 @@ impl DockerSource {
     }
 }
 
-/// Holds the event stream open and wakes the main loop on every container change, and once
+/// Which event stream a source follows.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Stream {
+    /// The container events of the Docker and Podman source.
+    Containers,
+    /// The service and node events of the Swarm source.
+    Swarm,
+}
+
+/// Holds the event stream open and wakes the main loop on every change `stream` names, and once
 /// per (re)connect: a change between the last list and the connect would otherwise be seen only
 /// at the next resync.
-async fn watch(client: Client, wake: Arc<Notify>) {
+pub(crate) async fn watch(client: Client, wake: Arc<Notify>, stream: Stream) {
     let mut backoff = Backoff::new(MIN_RETRY, MAX_RETRY);
     let mut failing = false;
     loop {
-        match client.events().await {
+        let opened = match stream {
+            Stream::Containers => client.events().await,
+            Stream::Swarm => client.swarm_events().await,
+        };
+        match opened {
             Ok(mut events) => {
                 if failing {
                     debug!("the daemon's event stream is back");
@@ -304,7 +310,10 @@ async fn watch(client: Client, wake: Arc<Notify>) {
                 loop {
                     match events.next().await {
                         Ok(Some(event)) => {
-                            if event.changes_containers() {
+                            if match stream {
+                                Stream::Containers => event.changes_containers(),
+                                Stream::Swarm => event.changes_swarm(),
+                            } {
                                 wake.notify_one();
                             }
                         }
@@ -389,7 +398,11 @@ impl Source for DockerSource {
     async fn run(self, updates: Sender<Update>) {
         let client = Client::new(self.settings.socket.clone());
         let wake = Arc::new(Notify::new());
-        let _watcher = Abort(tokio::spawn(watch(client.clone(), Arc::clone(&wake))));
+        let _watcher = Abort(tokio::spawn(watch(
+            client.clone(),
+            Arc::clone(&wake),
+            Stream::Containers,
+        )));
         let mut first_seen = BTreeMap::new();
         let mut sent: Option<Sent> = None;
         let mut retry = Backoff::new(MIN_RETRY, MAX_RETRY);

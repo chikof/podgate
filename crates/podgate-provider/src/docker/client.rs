@@ -21,6 +21,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use super::model::{Container, Inspect, Listed, NetworkName};
+use crate::swarm::model::{
+    Network, NetworkEntry, Node, NodeEntry, Service, ServiceEntry, Task, TaskEntry,
+};
 
 /// The longest a request, from connect to the last byte of its body, may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,6 +42,11 @@ const READ_CHUNK: usize = 16 * 1024;
 
 /// The event names the source reacts to (`docs/ref/provider-docker.md`).
 const EVENTS_QUERY: &str = "/events?filters=%7B%22type%22%3A%5B%22container%22%5D%2C%22event%22%3A%5B%22start%22%2C%22stop%22%2C%22die%22%2C%22health_status%22%2C%22destroy%22%5D%7D";
+
+/// The Swarm events the source reacts to: services created, updated or removed, and nodes that
+/// change state (`docs/ref/provider-swarm.md`).
+const SWARM_EVENTS_QUERY: &str =
+    "/events?filters=%7B%22type%22%3A%5B%22service%22%2C%22node%22%5D%7D";
 
 /// What went wrong talking to the daemon.
 #[derive(Debug, Error)]
@@ -102,6 +110,14 @@ impl Event {
             None => true,
         }
     }
+
+    /// Whether the event can change which services or tasks serve: any service or node event.
+    /// As above, an event of a shape this code does not know counts.
+    pub(crate) fn changes_swarm(&self) -> bool {
+        self.kind
+            .as_deref()
+            .is_none_or(|kind| matches!(kind, "service" | "node"))
+    }
 }
 
 /// The daemon's socket.
@@ -140,7 +156,42 @@ impl Client {
 
     /// Opens the event stream, filtered to the container events the source reacts to.
     pub(crate) async fn events(&self) -> Result<Events, ClientError> {
-        let (reader, head) = self.open(EVENTS_QUERY).await?;
+        self.stream(EVENTS_QUERY).await
+    }
+
+    /// Opens the event stream, filtered to the service and node events of a Swarm manager.
+    pub(crate) async fn swarm_events(&self) -> Result<Events, ClientError> {
+        self.stream(SWARM_EVENTS_QUERY).await
+    }
+
+    /// The services of a Swarm manager (`GET /services`).
+    pub(crate) async fn swarm_services(&self) -> Result<Vec<Service>, ClientError> {
+        let listed: Vec<ServiceEntry> = self.json("/services").await?;
+        Ok(listed.into_iter().map(ServiceEntry::into_service).collect())
+    }
+
+    /// The tasks of every service (`GET /tasks`), including the ones that stopped: the source
+    /// decides by state which of them serve.
+    pub(crate) async fn swarm_tasks(&self) -> Result<Vec<Task>, ClientError> {
+        let listed: Vec<TaskEntry> = self.json("/tasks").await?;
+        Ok(listed.into_iter().map(TaskEntry::into_task).collect())
+    }
+
+    /// The nodes of the swarm (`GET /nodes`).
+    pub(crate) async fn swarm_nodes(&self) -> Result<Vec<Node>, ClientError> {
+        let listed: Vec<NodeEntry> = self.json("/nodes").await?;
+        Ok(listed.into_iter().map(NodeEntry::into_node).collect())
+    }
+
+    /// The networks with their ids (`GET /networks`): a service's virtual IP names its network
+    /// by id.
+    pub(crate) async fn swarm_networks(&self) -> Result<Vec<Network>, ClientError> {
+        let listed: Vec<NetworkEntry> = self.json("/networks").await?;
+        Ok(listed.into_iter().map(NetworkEntry::into_network).collect())
+    }
+
+    async fn stream(&self, query: &str) -> Result<Events, ClientError> {
+        let (reader, head) = self.open(query).await?;
         if head.status >= 400 {
             return Err(ClientError::Status {
                 status: head.status,
