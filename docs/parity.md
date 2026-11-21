@@ -140,8 +140,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
 | TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | Built: `ClientIP`, `HostSNI`, `HostSNIRegexp`, `ALPN` and passthrough or termination |
-| TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | Load balancing with half-close, idle timeout and connect failover built; proxy protocol out and termination delay 0061 |
-| TCP middlewares | `inFlightConn`, `ipAllowList` | none | 0061 |
+| TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | built: load balancing with half-close, idle timeout and connect failover; PROXY v1/v2 towards servers, TLS to servers through a `servers_transport`, `termination_delay_ms`; `docs/ref/l4-tcp.md`, `docs/ref/l4-middleware.md` |
+| TCP middlewares | `inFlightConn`, `ipAllowList` | none | built: `in_flight_conn` per source with the bounded table of `in_flight_req`, `ip_allow_list` on the peer or PROXY source, run before the tenant's slot and any dial; `docs/ref/l4-middleware.md` |
 | TCP health checks | `healthCheck` (v3) | `layer4` passive | built (connect, `send`/`expect` including a banner, TLS, other port, PROXY v2 header, thresholds, `unhealthy_interval_secs`; `no_healthy_server` refusal) |
 | UDP routers and services | `udp.*` | `layer4` | built (sessions, idle timeout, bounded table, tenant buffer charge, eviction of one-datagram sessions, optional reply byte ratio) |
 
