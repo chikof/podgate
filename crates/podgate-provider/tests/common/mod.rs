@@ -9,6 +9,7 @@
 
 pub mod broker;
 pub mod daemon;
+pub mod dns_server;
 pub mod pebble;
 
 use std::collections::{BTreeMap, VecDeque};

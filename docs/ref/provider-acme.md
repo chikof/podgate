@@ -35,6 +35,7 @@ max_pending = 100
 | `[acme.eab]` | none | `key_id` and `hmac_key_file` (the base64url key, mode `0600`) for a CA that needs external account binding. Excludes an account key: a CA binds only when it creates the account, so podgate makes the account itself. |
 | `challenge_lead_ms` | `0` | How long an HTTP-01 or TLS-ALPN-01 answer waits in the shared directory before the broker pushes it to its own podgate. With followers, set it above a follower's poll (1 s) plus its debounce, so every node has the answer before the issuer starts validating. |
 | `[acme.on_demand]` | 10 an hour, 100 pending | `max_per_tenant_per_hour`, `max_pending`. At least 1 each. |
+| `[[acme.dns]]` | none | One table per DNS zone the broker may publish DNS-01 records in: an RFC 2136 update or a webhook. See `docs/ref/provider-acme-dns.md`. |
 
 Secrets are files, never values: an inline key is an unknown key, a key file that group or others can read stops the load, and the keys never reach a log or `print`.
 

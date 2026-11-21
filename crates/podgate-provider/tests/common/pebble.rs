@@ -105,9 +105,15 @@ impl Pebble {
     /// the probe and the bind (and `cargo test` runs tests as threads of one process), so a
     /// process that exits at start is retried with fresh ports.
     pub async fn start(pki: Pki, ports: Validation) -> Self {
+        Self::start_with_dns(pki, ports, None).await
+    }
+
+    /// Like [`Pebble::start`], with pebble resolving every name through `dns` instead of
+    /// challtestsrv: for DNS-01, whose TXT records the test serves itself.
+    pub async fn start_with_dns(pki: Pki, ports: Validation, dns: Option<SocketAddr>) -> Self {
         let mut failures = Vec::new();
         for attempt in 1..=START_ATTEMPTS {
-            match Self::try_start(pki.clone(), ports).await {
+            match Self::try_start(pki.clone(), ports, dns).await {
                 Ok(started) => return started,
                 Err(reason) => failures.push(format!("attempt {attempt}: {reason}")),
             }
@@ -115,7 +121,11 @@ impl Pebble {
         panic!("pebble did not start:\n{}", failures.join("\n"));
     }
 
-    async fn try_start(pki: Pki, validation: Validation) -> Result<Self, String> {
+    async fn try_start(
+        pki: Pki,
+        validation: Validation,
+        external_dns: Option<SocketAddr>,
+    ) -> Result<Self, String> {
         let ports = super::free_ports(5);
         let (acme, management, spare) = (ports[0], ports[1], ports[2]);
         let (dns, challtest_management) = (ports[3], ports[4]);
@@ -162,7 +172,10 @@ impl Pebble {
         let pebble = Command::new("pebble")
             .arg("-config")
             .arg(&config_path)
-            .args(["-dnsserver", &format!("127.0.0.1:{dns}")])
+            .args([
+                "-dnsserver",
+                &external_dns.map_or_else(|| format!("127.0.0.1:{dns}"), |addr| addr.to_string()),
+            ])
             .env("PEBBLE_VA_NOSLEEP", "1")
             .env("PEBBLE_AUTHZREUSE", "0")
             // pebble answers badNonce to 5% of requests by default; instant-acme retries a

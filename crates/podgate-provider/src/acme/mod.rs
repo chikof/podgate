@@ -11,12 +11,14 @@
 //!   before it can appear in a [`BrokerView`].
 //! - [`approve`] decides on-demand requests under the tenant trust rule and its limits.
 //! - [`settings`] is the `[acme]` configuration section.
+//! - [`dns`] publishes DNS-01 records (RFC 2136 or a webhook) for the broker's solver hook.
 //!
 //! The engine reads the [`BrokerView`] (a `tokio::sync::watch` value) when it merges, and
 //! publishes [`Claims`] (what the merged apps claim) for the broker's approvals and pruning. The
 //! reference is `docs/ref/provider-acme.md`.
 
 pub mod approve;
+pub mod dns;
 pub mod events;
 mod follower;
 pub mod settings;

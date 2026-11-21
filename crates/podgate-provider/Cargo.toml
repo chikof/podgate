@@ -12,7 +12,15 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+bytes = "1.12.2"
+hickory-proto = { version = "0.26.3", features = ["dnssec-ring"] }
+hickory-resolver = "0.26.3"
+http = "1.5.0"
+http-body-util = "0.1"
 httparse = "1.10.1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "tls12", "rustls-platform-verifier", "ring"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
 podgate-model = { version = "0.1.0", path = "../podgate-model" }
 rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }
 serde = { version = "1.0.229", features = ["derive"] }

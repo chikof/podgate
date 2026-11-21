@@ -14,6 +14,10 @@
 //! [acme.on_demand]
 //! max_per_tenant_per_hour = 10
 //! max_pending = 100
+//!
+//! [[acme.dns]]                        # DNS-01, see `docs/ref/provider-acme-dns.md`
+//! zone = "example.com"
+//! kind = "rfc2136"                    # or "webhook"
 //! ```
 //!
 //! Secrets (`account_key_file`, the EAB HMAC key) are paths, never values: an inline key is an
@@ -24,6 +28,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::dns::{self, RawZone, ZoneSettings};
 use crate::config::ConfigError;
 
 /// What this provider does for ACME.
@@ -86,6 +91,8 @@ pub struct AcmeSettings {
     /// How long a new HTTP-01 or TLS-ALPN-01 answer stays in the shared directory before the
     /// broker pushes it to its own podgate, so that followers hold it first (the issuer last).
     pub challenge_lead: Duration,
+    /// The zones DNS-01 records are published in, empty when there are none.
+    pub dns: Vec<ZoneSettings>,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +124,8 @@ pub(crate) struct RawAcme {
     account_key_file: Option<PathBuf>,
     on_demand: Option<RawOnDemand>,
     challenge_lead_ms: Option<u64>,
+    #[serde(default)]
+    dns: Vec<RawZone>,
 }
 
 fn required<T>(field: &str, value: Option<T>) -> Result<T, ConfigError> {
@@ -192,5 +201,6 @@ pub(crate) fn parse(raw: Option<RawAcme>) -> Result<Option<AcmeSettings>, Config
         account_key_file: raw.account_key_file,
         on_demand,
         challenge_lead: Duration::from_millis(raw.challenge_lead_ms.unwrap_or(0)),
+        dns: dns::parse(raw.dns)?,
     }))
 }

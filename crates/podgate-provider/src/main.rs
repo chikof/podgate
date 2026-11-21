@@ -87,7 +87,8 @@ async fn execute(command: Command, config_path: PathBuf) -> anyhow::Result<ExitC
     register_sources(&mut engine, &config)?;
     match command {
         Command::Run => {
-            engine.run(shutdown()).await?;
+            let solver = podgate_provider::acme::dns::solver(&config)?;
+            engine.with_dns_solver(solver).run(shutdown()).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Print => {
