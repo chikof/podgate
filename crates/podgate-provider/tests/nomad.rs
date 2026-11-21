@@ -237,10 +237,9 @@ async fn nomad_services_to_apps() {
     let state = watcher.wait_ids(&["default.shop"]).await;
     let app = app_of(&state, "default.shop");
     assert_eq!(&*app.origin.object, "default.shop");
-    assert!(
-        app.origin.first_seen > 1_700_000_000,
-        "the time the source first saw the app, not a raft index: {}",
-        app.origin.first_seen
+    assert_eq!(
+        app.origin.first_seen, 0,
+        "a registration has no time, only a raft index"
     );
     assert_eq!(app.tenant.mapped.as_deref(), Some("default"));
     assert_eq!(app.tenant.label, None);
@@ -529,6 +528,50 @@ namespaces = ["default", "team-a", "team-b"]
 namespace_tenants = { team-a = "acme", team-b = "globex" }
 "#;
 
+#[tokio::test]
+async fn nomad_conflict_winner_survives_restart() {
+    // Two services claim one host. Which of them stays when podgate rejects the pair is decided
+    // by the order of (first_seen, source, object) (`merge.rs`), so that order must not depend
+    // on when the provider started or in which order Nomad lists the registrations: a restart
+    // would otherwise move the host to the other app.
+    let mut rounds = Vec::new();
+    for order in [["alpha", "beta"], ["beta", "alpha"]] {
+        let nomad = FakeNomad::start().await;
+        for (n, service) in order.iter().enumerate() {
+            let ip = format!("10.4.0.{}", n + 1);
+            nomad.add(web(service, &ip, 80, "contested.acme.test"));
+        }
+        // A new source instance each round, as after a restart of the provider.
+        let config = nomad_config(
+            &nomad.address(),
+            TENANTS,
+            "namespace_tenants = { default = \"acme\" }",
+        );
+        let mut watcher = Watcher::start(&config);
+        let state = watcher.wait_ids(&["default.alpha", "default.beta"]).await;
+        let keys: Vec<_> = state
+            .apps
+            .iter()
+            .map(|app| (app.origin.first_seen, app.origin.object.clone()))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [(0, "default.alpha".into()), (0, "default.beta".into())],
+            "no backend time is known, so none is made up: the app name decides"
+        );
+        let merged = merge(&config, UpstreamPolicy::builtin(), state);
+        let declared: Vec<String> = merged
+            .snapshot()
+            .apps
+            .iter()
+            .map(|app| format!("{}:{}", app.id, app.declared_by))
+            .collect();
+        rounds.push((sorted, declared));
+    }
+    assert_eq!(rounds[0], rounds[1], "the same order after a restart");
+}
 #[tokio::test]
 async fn nomad_namespace_tenant() {
     let nomad = FakeNomad::start().await;

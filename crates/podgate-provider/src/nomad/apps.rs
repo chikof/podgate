@@ -6,7 +6,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::docker::labels::{self, Labels, Member};
 use crate::source::{Origin, SourceApp, TenantClaim};
@@ -94,24 +93,9 @@ fn app_name(name: &str) -> Result<Box<str>, String> {
     Ok(name.into())
 }
 
-fn now() -> u64 {
-    // A clock before 1970 gives 0, which only makes the app count as the oldest one.
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
 /// Builds the apps of `instances`, which belong to the services Nomad lists.
 ///
-/// `first_seen` remembers when this source first saw each app, so an older app keeps its place in
-/// a conflict across passes; it keeps only the apps of this pass. Nomad's own indexes are raft
-/// indexes, not times, and cannot be ordered against the other sources' apps.
-pub(super) fn build(
-    source: &str,
-    settings: &Settings,
-    instances: &[Instance],
-    first_seen: &mut BTreeMap<Box<str>, u64>,
-) -> Built {
+pub(super) fn build(source: &str, settings: &Settings, instances: &[Instance]) -> Built {
     let mut built = Built::default();
     let mut ordered: Vec<&Instance> = instances.iter().collect();
     ordered.sort_by(|a, b| (a.created, &a.alloc).cmp(&(b.created, &b.alloc)));
@@ -133,8 +117,6 @@ pub(super) fn build(
         }
     }
 
-    let mut seen = BTreeMap::new();
-    let observed = now();
     for (id, candidates) in groups {
         let members: Vec<Member<'_>> = candidates
             .iter()
@@ -162,19 +144,16 @@ pub(super) fn build(
                 .reports
                 .push(report(candidates[*index].instance, &why.to_string()));
         }
-        let first = *first_seen.get(&id).unwrap_or(&observed);
-        seen.insert(id.clone(), first);
         built.apps.push(SourceApp {
             origin: Origin {
                 source: source.into(),
                 object: id,
-                first_seen: first,
+                first_seen: 0,
             },
             tenant: assembled.claim,
             app: assembled.app,
         });
     }
-    *first_seen = seen;
     built
 }
 

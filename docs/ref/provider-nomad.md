@@ -75,7 +75,7 @@ With this policy a job in acme's namespace that advertises `10.5.0.7:80` is drop
 - Instances of one app (the same `podgate.app` or service name in one namespace) are the servers of its services. Two services of one job can name the same `podgate.app` and form one app.
 - The instances of one revision must agree on their routing, services and revision state; the oldest instance (by Nomad's create index, then allocation id) is the reference, and one that differs is left out and reported. This is the same rule as for Docker containers.
 - Revision: one revision `default`. Nomad's rolling updates remove allocations that fail their health checks from the registration, so no revision states are produced. A job that wants explicit revisions uses `podgate.revision` and `podgate.revision.state` tags, exactly as with Docker labels.
-- An app's `first_seen` is the time the source first saw it (unix seconds), kept while the app exists. Nomad's own indexes are raft indexes, not times, and cannot be ordered against another source's apps. After a restart of the provider, apps count as new.
+- An app's `first_seen` is `0`: a service registration carries only raft indexes (`CreateIndex`), which are not times and cannot be ordered against another source's apps, and the allocation's `CreateTime` would cost one `GET /v1/allocation/<id>` per allocation. A conflict between two apps over a host is therefore decided by source name, then app id (`<namespace>.<app>`), which is the same after every restart of the provider and independent of the order Nomad lists registrations in.
 
 ## Tenants
 

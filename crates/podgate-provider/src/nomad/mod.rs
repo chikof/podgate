@@ -290,10 +290,7 @@ enum Sent {
 
 impl NomadSource {
     /// Lists the registrations and builds the state; the error is Nomad's.
-    async fn sync(
-        &self,
-        first_seen: &mut BTreeMap<Box<str>, u64>,
-    ) -> Result<(State, Option<Box<str>>), ClientError> {
+    async fn sync(&self) -> Result<(State, Option<Box<str>>), ClientError> {
         let client = &self.settings.client;
         let mut instances: Vec<Instance> = Vec::new();
         for namespace in &self.settings.namespaces {
@@ -305,7 +302,7 @@ impl NomadSource {
                 instances.extend(client.instances(namespace, &service.name).await?);
             }
         }
-        let built = apps::build(&self.name, &self.settings, &instances, first_seen);
+        let built = apps::build(&self.name, &self.settings, &instances);
         for line in &built.reports {
             debug!(source = %self.name, "{line}");
         }
@@ -339,7 +336,6 @@ impl Source for NomadSource {
                 )))
             })
             .collect();
-        let mut first_seen = BTreeMap::new();
         let mut sent: Option<Sent> = None;
         let mut retry = Backoff::new();
         let mut wait = Duration::ZERO;
@@ -348,7 +344,7 @@ impl Source for NomadSource {
                 () = tokio::time::sleep(wait) => {}
                 () = wake.notified() => tokio::time::sleep(EVENT_QUIET).await,
             }
-            let observed = match self.sync(&mut first_seen).await {
+            let observed = match self.sync().await {
                 Ok((state, report)) => {
                     retry.reset();
                     wait = self.settings.resync;
