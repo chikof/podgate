@@ -137,6 +137,11 @@ impl Options {
                 "cannot be enforced per app: tickets are listener wide and stay on",
             ));
         }
+        if tls.http3 == Some(true)
+            && let Some(reason) = crate::h3::alt_svc::conflict(tls)
+        {
+            problems.push(unsupported("http3", format!("cannot be true: {reason}")));
+        }
         let min_version = tls.min_version.unwrap_or(floor);
         if min_version < floor {
             problems.push(unsupported(

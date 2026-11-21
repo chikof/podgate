@@ -336,6 +336,12 @@ pub struct TlsPolicy {
     /// Not enforceable per app: the compiler rejects it with `unsupported_setting`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tickets: Option<bool>,
+    /// Whether HTTP/3 may serve this app. Absent: yes, unless the app has a
+    /// `client_ca_pem` or `client_auth`, `cipher_suites`, or an `alpn` without `h2`, which HTTP/3
+    /// cannot honour. `true` together with one of those is rejected with `unsupported_setting`.
+    /// Only matters on an HTTPS entry point with the `;http3` option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http3: Option<bool>,
 }
 
 #[allow(
@@ -362,6 +368,7 @@ impl TlsPolicy {
             && self.alpn == other.alpn
             && self.sni_strict == other.sni_strict
             && self.session_tickets == other.session_tickets
+            && self.http3 == other.http3
     }
 }
 

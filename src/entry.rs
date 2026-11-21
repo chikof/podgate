@@ -2,8 +2,8 @@
 //!
 //! Where an entry point listens is process configuration, because Pingora binds its sockets
 //! before it runs; what it allows is snapshot data ([`podgate_model::EntryPointPolicy`]).
-//! `ENTRY_POINTS` lists the listeners (`name=address/protocol[;proxy_protocol]`); `PROXY_ADDR`
-//! and `PROXY_TLS_ADDR` stay as the shorthand for `web` and `websecure`.
+//! `ENTRY_POINTS` lists the listeners (`name=address/protocol[;proxy_protocol][;http3[=port]]`);
+//! `PROXY_ADDR` and `PROXY_TLS_ADDR` stay as the shorthand for `web` and `websecure`.
 //!
 //! - [`EntryPoint`], [`Protocol`] and [`parse_list`]: one configured listener, and the parser of
 //!   the `ENTRY_POINTS` value.
@@ -20,6 +20,7 @@ pub mod policy;
 pub mod proxy_protocol;
 
 use std::net::SocketAddr;
+use std::num::NonZeroU16;
 
 use pingora::http::RequestHeader;
 use pingora::proxy::Session;
@@ -84,10 +85,24 @@ impl Protocol {
             _ => None,
         }
     }
+}
 
-    /// The transport the socket binds: a port can carry TCP and UDP at once, not two of one.
-    fn is_datagram(self) -> bool {
-        self == Self::Udp
+impl EntryPoint {
+    /// Whether the address is bound for TCP and for UDP: a port can carry one of each, not two of
+    /// one. An `https` entry point with `;http3` binds both.
+    fn transports(&self) -> (bool, bool) {
+        match self.protocol {
+            Protocol::Udp => (false, true),
+            Protocol::Https if self.http3.is_some() => (true, true),
+            _ => (true, false),
+        }
+    }
+
+    /// Whether `self` and `other` would bind the same transport on the same address.
+    fn clashes_with(&self, other: &Self) -> bool {
+        let (stream, datagram) = self.transports();
+        let (other_stream, other_datagram) = other.transports();
+        self.addr == other.addr && ((stream && other_stream) || (datagram && other_datagram))
     }
 }
 
@@ -102,8 +117,12 @@ pub struct EntryPoint {
     pub protocol: Protocol,
     /// Whether peers send a PROXY protocol header first (`;proxy_protocol`).
     pub proxy_protocol: bool,
+    /// The port `Alt-Svc` advertises for HTTP/3 (`;http3` is the entry point's own port,
+    /// `;http3=<port>` another, for a mapped port), when the entry point also serves HTTP/3 over
+    /// QUIC on its address. Only an `https` entry point has it.
+    pub http3: Option<NonZeroU16>,
 }
-// 56: name (16) + SocketAddr (32) + protocol and flag, padded to 8.
+// 56: name (16) + SocketAddr (32) + protocol, flag and advertised port, padded to 8.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<EntryPoint>() == 56);
 
@@ -126,6 +145,7 @@ impl EntryPoint {
             addr,
             protocol,
             proxy_protocol: false,
+            http3: None,
         }
     }
 }
@@ -147,13 +167,14 @@ impl ParseError {
     }
 }
 
-/// Parses the value of `ENTRY_POINTS`: `name=address/protocol[;proxy_protocol]`, comma
-/// separated. `protocol` is `http`, `https`, `tcp` or `udp`.
+/// Parses the value of `ENTRY_POINTS`: `name=address/protocol[;proxy_protocol][;http3[=port]]`,
+/// comma separated. `protocol` is `http`, `https`, `tcp` or `udp`.
 ///
 /// # Errors
 ///
 /// [`ParseError`] naming the first entry that is empty, malformed, repeats a name or an address
-/// on the same transport, or sets an option other than `proxy_protocol`.
+/// on the same transport, sets an option other than `proxy_protocol` and `http3`, or sets `http3`
+/// on anything but an `https` entry point or together with `proxy_protocol`.
 pub fn parse_list(raw: &str) -> Result<Vec<EntryPoint>, ParseError> {
     let mut parsed: Vec<EntryPoint> = Vec::new();
     for entry in raw.split(',').map(str::trim) {
@@ -164,9 +185,7 @@ pub fn parse_list(raw: &str) -> Result<Vec<EntryPoint>, ParseError> {
                 format!("the name {} is already used", point.name),
             ));
         }
-        if let Some(other) = parsed.iter().find(|other| {
-            other.addr == point.addr && other.protocol.is_datagram() == point.protocol.is_datagram()
-        }) {
+        if let Some(other) = parsed.iter().find(|other| other.clashes_with(&point)) {
             return Err(ParseError::new(
                 entry,
                 format!("{} is already the address of {}", point.addr, other.name),
@@ -210,19 +229,39 @@ fn parse_entry(entry: &str) -> Result<EntryPoint, ParseError> {
         ))
     })?;
     let mut proxy_protocol = false;
+    let mut http3 = None;
     for option in parts {
-        if option != "proxy_protocol" {
-            return Err(bad(format!(
-                "{option:?} is not an option: only proxy_protocol is known"
-            )));
+        match option {
+            "proxy_protocol" => proxy_protocol = true,
+            "http3" => http3 = NonZeroU16::new(addr.port()),
+            _ => match option.strip_prefix("http3=") {
+                Some(port) => {
+                    http3 = Some(port.trim().parse().map_err(|err| {
+                        bad(format!("http3={port:?} is not a port in 1..=65535 ({err})"))
+                    })?);
+                }
+                None => {
+                    return Err(bad(format!(
+                        "{option:?} is not an option: proxy_protocol and http3 are known"
+                    )));
+                }
+            },
         }
-        proxy_protocol = true;
+    }
+    if http3.is_some() && protocol != Protocol::Https {
+        return Err(bad("http3 needs an https entry point".to_owned()));
+    }
+    if http3.is_some() && proxy_protocol {
+        return Err(bad(
+            "http3 and proxy_protocol cannot be combined: QUIC carries no PROXY protocol header, so HTTP/3 clients would all appear to come from the load balancer".to_owned(),
+        ));
     }
     Ok(EntryPoint {
         name: name.into(),
         addr,
         protocol,
         proxy_protocol,
+        http3,
     })
 }
 
@@ -569,6 +608,38 @@ mod test {
             ]
         );
         assert_eq!(parsed[1].addr, "[::1]:443".parse().expect("addr"));
+    }
+
+    #[test]
+    fn the_http3_option_names_the_advertised_port() {
+        let parsed = parse_list(
+            "web=0.0.0.0:80/http,a=0.0.0.0:443/https;http3,b=0.0.0.0:8443/https;http3=443,c=0.0.0.0:9443/https",
+        )
+        .expect("parses");
+        let ports: Vec<_> = parsed
+            .iter()
+            .map(|point| point.http3.map(NonZeroU16::get))
+            .collect();
+        assert_eq!(ports, [None, Some(443), Some(443), None]);
+    }
+
+    #[test]
+    fn http3_is_for_https_without_proxy_protocol_and_binds_udp() {
+        for bad in [
+            "web=0.0.0.0:80/http;http3",
+            "db=0.0.0.0:5432/tcp;http3",
+            "a=0.0.0.0:443/https;http3;proxy_protocol",
+            "a=0.0.0.0:443/https;http3=0",
+            "a=0.0.0.0:443/https;http3=https",
+            // The UDP port of the QUIC front is taken.
+            "a=0.0.0.0:443/https;http3,dns=0.0.0.0:443/udp",
+            "dns=0.0.0.0:443/udp,a=0.0.0.0:443/https;http3",
+        ] {
+            let err = parse_list(bad).expect_err(bad);
+            assert!(err.to_string().starts_with("entry \""), "{bad}: {err}");
+        }
+        // Without the option the port is free for a `udp` entry point, as before.
+        assert!(parse_list("a=0.0.0.0:443/https,dns=0.0.0.0:443/udp").is_ok());
     }
 
     #[test]

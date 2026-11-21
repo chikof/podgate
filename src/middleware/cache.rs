@@ -67,8 +67,10 @@ const DEFAULT_COLLAPSE_TIMEOUT_MS: u64 = 3000;
 const MAX_COLLAPSE_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_STATUSES: [u16; 7] = [200, 203, 204, 301, 308, 404, 410];
 
-/// Headers that belong to one hop, or that this stage writes itself on every hit.
-const NOT_STORED: [&str; 11] = [
+/// Headers that belong to one hop, or that this stage writes itself on every hit. `alt-svc` names
+/// where this entry point speaks HTTP/3, so a copy stored through one entry point
+/// must not reach clients of another; a hit gets the live entry point's own.
+const NOT_STORED: [&str; 12] = [
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -80,6 +82,7 @@ const NOT_STORED: [&str; 11] = [
     "content-length",
     "age",
     "cache-status",
+    "alt-svc",
 ];
 
 /// What a `304` carries over from the entry: the validators and the freshness headers.
@@ -934,6 +937,9 @@ impl Cache {
         head.insert_header("age", standing.age.to_string())?;
         head.append_header("cache-status", format!("podgate; {result}"))?;
         skew::set_cookie(cx.session, cx.table, Some(cx.selected), &mut head)?;
+        if let Some(alt_svc) = cx.alt_svc {
+            alt_svc.apply(&mut head, cx.app);
+        }
         // As on a miss, the stages before the cache add their headers last: the stored copy
         // never held them, so HSTS, CSP, frame options and CORS follow this request.
         earlier.response(&mut head)?;

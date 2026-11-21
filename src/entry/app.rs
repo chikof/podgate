@@ -35,6 +35,22 @@ pub struct Policed {
     entry_point: Arc<str>,
 }
 
+/// The application of the entry point `entry_point` for `gateway`: the stock `HttpProxy` with the
+/// live policy applied per connection.
+#[must_use]
+pub fn policed(
+    conf: &Arc<ServerConf>,
+    gateway: Gateway,
+    table: TableHandle,
+    entry_point: &str,
+) -> Policed {
+    Policed {
+        inner: Arc::new(http_proxy(conf, gateway)),
+        table,
+        entry_point: Arc::from(entry_point),
+    }
+}
+
 /// The service for the entry point `gateway` serves; add its listeners to it as to any
 /// `http_proxy_service`. `gate` is the PROXY protocol check of a plaintext entry point with
 /// `;proxy_protocol` (a TLS entry point checks in its pre-TLS hook instead).
@@ -47,11 +63,7 @@ pub fn service(
     name: &str,
     gate: Option<Gate>,
 ) -> Service<Fronted<Policed>> {
-    let policed = Policed {
-        inner: Arc::new(http_proxy(conf, gateway)),
-        table,
-        entry_point: Arc::from(entry_point),
-    };
+    let policed = policed(conf, gateway, table, entry_point);
     Service::new(name.to_owned(), Fronted::new(gate, policed))
 }
 

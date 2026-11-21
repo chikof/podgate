@@ -70,6 +70,7 @@ use crate::events::EventFeed;
 use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::forwarded;
+use crate::h3::AltSvc;
 use crate::inflight::{Inflight, InflightGuard};
 use crate::middleware::{self, Failure, Flow, RequestCx, RoutedCx, errors, retry};
 use crate::observe::access_log::{self, AccessLog};
@@ -192,6 +193,7 @@ pub struct Gateway {
     cache: Cache,
     auth_client: middleware::forward_auth::Client,
     rate_limit_stores: crate::ratelimit_store::Stores,
+    alt_svc: Option<AltSvc>,
 }
 
 impl Gateway {
@@ -223,6 +225,7 @@ impl Gateway {
             tracer: trace::Tracer::default(),
             node: None,
             cache: Cache::new(),
+            alt_svc: None,
         }
     }
 
@@ -348,6 +351,15 @@ impl Gateway {
         self
     }
 
+    /// Advertises HTTP/3 on every response of an app that allows it, as `alt_svc` says (spec
+    /// 0086). Set it only on the gateway of an `https` entry point with `;http3`: a response
+    /// over HTTP/3 itself, or over plain HTTP, never advertises it.
+    #[must_use]
+    pub fn with_alt_svc(mut self, alt_svc: AltSvc) -> Self {
+        self.alt_svc = Some(alt_svc);
+        self
+    }
+
     /// Refuses the connection to `selected.upstream` unless the upstream address policy lets the
     /// app's tenant dial it. `upstream_peer` calls this before anything is dialled, so it also
     /// covers addresses the compiler never saw.
@@ -453,6 +465,7 @@ impl Gateway {
             entry_point: &entry_point,
             tenant: tenant.as_ref(),
             cache: &self.cache,
+            alt_svc: self.alt_svc.as_ref(),
             original: None,
             pages: Vec::new(),
             credentialed: false,
@@ -897,6 +910,12 @@ impl ProxyHttp for Gateway {
         // Last, so a Cache-Control that the chain set counts: see `shared_cacheable`.
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
+        if let (Some(alt_svc), Some((app, _))) = (
+            &self.alt_svc,
+            ctx.matched.and_then(|matched| ctx.table.router(matched)),
+        ) {
+            alt_svc.apply(upstream_response, app);
+        }
         Ok(())
     }
 

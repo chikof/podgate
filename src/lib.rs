@@ -39,6 +39,7 @@
 //! - [`observe::tracing`]: OpenTelemetry tracing: W3C trace context to the upstream, spans exported over OTLP/HTTP
 //!   to the operator's collector from a bounded queue, a node-wide rate cap on what gets traced.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
+//! - [`h3`]: HTTP/3 over QUIC for HTTPS entry points with `;http3`: a quinn endpoint that bridges each request into the entry point's pipeline over an internal HTTP/2 connection, with per-connection and per-tenant memory budgets and the QUIC denial-of-service defences.
 //! - [`tls::ocsp`]: OCSP stapling: verified responses fetched through the upstream address policy and stapled to the certificates the listener serves.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
@@ -61,6 +62,7 @@ pub mod explain;
 pub mod failures;
 pub mod fairq;
 pub mod forwarded;
+pub mod h3;
 pub mod host;
 pub mod inflight;
 pub mod l4;
@@ -209,9 +211,13 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         let gate = point
             .proxy_protocol
             .then(|| entry::proxy_protocol::hook::Gate::new(table.clone(), &point.name));
+        let mut entry_gateway = gateway.clone().with_entry_point(&point.name);
+        if let Some(port) = point.http3 {
+            entry_gateway = entry_gateway.with_alt_svc(h3::AltSvc::new(port));
+        }
         let mut proxy = entry::app::service(
             &server.configuration,
-            gateway.clone().with_entry_point(&point.name),
+            entry_gateway,
             table.clone(),
             &point.name,
             &format!("entry point {}", point.name),
@@ -230,6 +236,33 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                         )
                     })?;
                 proxy.add_tls_with_settings(&addr, None, settings);
+                if point.http3.is_some() {
+                    // The front reaches the pipeline of this entry point over its own gateway,
+                    // which never advertises HTTP/3: a response over HTTP/3 carries no `Alt-Svc`.
+                    let pipeline = entry::app::policed(
+                        &server.configuration,
+                        gateway.clone().with_entry_point(&point.name),
+                        table.clone(),
+                        &point.name,
+                    );
+                    let front = h3::Service::new(
+                        &point.name,
+                        point.addr,
+                        h3::link_path(&config.admin_socket, &point.name),
+                        pipeline,
+                        h3::Parts {
+                            table: table.clone(),
+                            budgets: budgets.clone(),
+                            settings: config.h3.clone(),
+                            staples: staples.clone(),
+                        },
+                    )
+                    .with_context(|| format!("cannot bind the HTTP/3 front of {}", point.name))?;
+                    let mut service =
+                        background_service(&format!("http3 entry point {}", point.name), front);
+                    service.threads = std::thread::available_parallelism().ok().map(usize::from);
+                    server.add_service(service);
+                }
                 let hello =
                     clientauth::ClearDecision(tls::PreHandshake::new(acme.clone(), table.clone()));
                 // The PROXY header comes first on the wire, so its gate runs before the

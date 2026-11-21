@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pingora::listeners::TlsAccept;
-use pingora::protocols::tls::TlsRef;
+use pingora::protocols::tls::{SslDigest, TlsRef};
 use pingora::proxy::Session;
 
 use crate::clientauth::ClientChain;
@@ -60,17 +60,21 @@ impl TlsAccept for CaptureServerName {
     }
 }
 
+/// The server name a TLS connection negotiated, from its digest: what [`CaptureServerName`]
+/// stored, or, on the internal connection of the QUIC front, the name the front read
+/// from the QUIC handshake and carried in the PROXY header (see [`crate::h3::bridge`]).
+fn negotiated_name(tls: &SslDigest) -> Option<&str> {
+    match tls.extension.get::<NegotiatedServerName>() {
+        Some(negotiated) => negotiated.0.as_deref(),
+        None if crate::h3::bridge::is_front_link(tls) => tls.organization.as_deref(),
+        None => None,
+    }
+}
+
 /// The server name the client sent in the handshake of the session's TLS connection, normalized;
 /// `None` on plain HTTP and when it sent none.
 pub(crate) fn server_name(session: &Session) -> Option<&str> {
-    session
-        .digest()?
-        .ssl_digest
-        .as_ref()?
-        .extension
-        .get::<NegotiatedServerName>()?
-        .0
-        .as_deref()
+    negotiated_name(session.digest()?.ssl_digest.as_ref()?)
 }
 
 /// The client certificate chain of the session's TLS connection; `None` on plain HTTP and when
@@ -109,14 +113,16 @@ pub fn check(
     else {
         return Ok(());
     };
-    let sni = tls
-        .extension
-        .get::<NegotiatedServerName>()
-        .and_then(|name| name.0.as_deref());
-    let fronting_allowed = matched
-        .and_then(|matched| table.app(matched.app))
-        .is_some_and(CompiledApp::allow_domain_fronting);
-    verify(sni, session.req_header(), fronting_allowed)
+    let app = matched.and_then(|matched| table.app(matched.app));
+    // A request over HTTP/3 reaches only apps that allow it, so `http3: false` holds even for
+    // a host named through a connection another app's name opened.
+    if crate::h3::bridge::is_front_link(tls)
+        && app.is_some_and(|app| !crate::h3::alt_svc::allowed(app.tls()))
+    {
+        return Err(AppError::Misdirected);
+    }
+    let fronting_allowed = app.is_some_and(CompiledApp::allow_domain_fronting);
+    verify(negotiated_name(tls), session.req_header(), fronting_allowed)
 }
 
 /// The comparison behind [`check`]: `sni` is the connection's normalized SNI.

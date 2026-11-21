@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::acme;
 use crate::entry::{self, EntryPoint};
+use crate::h3;
 use crate::middleware::basic_auth::Htpasswd;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
@@ -67,7 +68,7 @@ const _: () =
 ///
 /// | Variable | Default | Meaning |
 /// |---|---|---|
-/// | `ENTRY_POINTS` | unset | Named listeners, `name=address/protocol[;proxy_protocol]` comma separated, protocol `http`, `https`, `tcp` or `udp`. Replaces `PROXY_ADDR` and `PROXY_TLS_ADDR`; setting both is an error. |
+/// | `ENTRY_POINTS` | unset | Named listeners, `name=address/protocol[;proxy_protocol][;http3[=port]]` comma separated, protocol `http`, `https`, `tcp` or `udp`. `;http3` also serves the `https` entry point over HTTP/3 on the same UDP port and advertises it with `Alt-Svc`; `=port` advertises another port. Replaces `PROXY_ADDR` and `PROXY_TLS_ADDR`; setting both is an error. |
 /// | `PROXY_ADDR` | `127.0.0.1:8080` | Shorthand for the entry point `web=<addr>/http`. |
 /// | `PROXY_TLS_ADDR` | unset | Shorthand for the entry point `websecure=<addr>/https`; unset means no TLS listener. |
 /// | `ADMIN_SOCKET` | `/run/podgate/admin.sock` | Unix socket of the admin API. |
@@ -107,6 +108,12 @@ const _: () =
 /// | `DNS_MAX_STALE_SECS` | `300` | How long after its TTL ran out the last good answer is still used while resolution fails, 0..=86400. Then the name has no address and its requests get `503`. |
 /// | `DNS_MAX_QUERIES_PER_SEC` | `200` | Lookups a second this node sends in all, 1..=100000. |
 /// | `OCSP_ALLOWED_HOSTS` | unset | Comma-separated host suffixes (`ocsp.example.com`, `.example.com`) an OCSP responder URL must match. Unset: any host the upstream address policy allows. The URL itself is read from the certificate and is never part of a snapshot. |
+/// | `H3_MAX_CONNECTIONS` | `10000` | QUIC connections the node serves at once, handshakes included, 1..=1000000. Past it new connections are turned away. |
+/// | `H3_MAX_HANDSHAKES` | `256` | QUIC handshakes in flight at once, 1..=65536. Past it new connections are turned away. |
+/// | `H3_RETRY` | `on_load` | When a client whose address is not proven must send a retry token: `always`, `on_load` (handshakes in flight past half of `H3_MAX_HANDSHAKES` or connections past 80% of `H3_MAX_CONNECTIONS`) or `never`. |
+/// | `H3_UDP_RECV_BUFFER` | `2097152` | Kernel receive buffer asked for the HTTP/3 UDP sockets, in bytes, 65536..=268435456; the kernel caps it at `net.core.rmem_max`. |
+/// | `H3_MAX_STREAMS` | `100` | Request streams one HTTP/3 connection may have open, 1..=1000. |
+/// | `H3_CONNECTION_WINDOW` | `262144` | Bytes of QUIC flow control per connection, for receiving and for sending, 131072..=16777216. A connection reserves twice this plus 65535 bytes of its tenant's `max_buffer_bytes` (`docs/ref/http3.md`). |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -184,6 +191,8 @@ pub struct Config {
     /// Host suffixes an OCSP responder must match (`OCSP_ALLOWED_HOSTS`). Empty: any host the
     /// upstream address policy allows.
     pub ocsp_allowed_hosts: Vec<Box<str>>,
+    /// HTTP/3 limits (`H3_*`), used by the entry points with `;http3`.
+    pub h3: h3::Settings,
 }
 
 impl Default for Config {
@@ -218,6 +227,7 @@ impl Default for Config {
             upstream_pool_size: DEFAULT_UPSTREAM_POOL,
             dns: resolve::Settings::default(),
             ocsp_allowed_hosts: Vec::new(),
+            h3: h3::Settings::default(),
         }
     }
 }
@@ -617,6 +627,7 @@ impl Config {
                 .map(Box::from)
                 .collect();
         }
+        config.h3 = h3::Settings::from_lookup(&lookup)?;
         Ok(config)
     }
 }
@@ -674,6 +685,12 @@ mod test {
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
             ("CACHE_TENANT_MAX_PERCENT", "40"),
             ("OCSP_ALLOWED_HOSTS", "OCSP.Example.com, .Digicert.com,,"),
+            ("H3_MAX_CONNECTIONS", "50"),
+            ("H3_MAX_HANDSHAKES", "8"),
+            ("H3_RETRY", "always"),
+            ("H3_UDP_RECV_BUFFER", "1048576"),
+            ("H3_MAX_STREAMS", "10"),
+            ("H3_CONNECTION_WINDOW", "524288"),
         ]);
         assert_eq!(
             parsed,
@@ -719,6 +736,14 @@ mod test {
                 dashboard_hosts: vec!["dash.example".into(), "ops.example".into()],
                 cache_tenant_max_percent: 40,
                 ocsp_allowed_hosts: vec!["ocsp.example.com".into(), "digicert.com".into()],
+                h3: h3::Settings {
+                    max_connections: 50,
+                    max_handshakes: 8,
+                    retry: h3::Retry::Always,
+                    udp_recv_buffer: 1_048_576,
+                    max_streams: 10,
+                    connection_window: 524_288,
+                },
             })
         );
     }

@@ -172,6 +172,9 @@ pub struct RoutedCx<'a> {
     pub tenant: Option<&'a Arc<TenantBudget>>,
     /// The response cache registry (see [`crate::cache`]).
     pub cache: &'a Cache,
+    /// How a response on this entry point advertises HTTP/3; `None` when it does not.
+    /// A stage that answers from its own store writes it, since the answer skips `response_filter`.
+    pub alt_svc: Option<&'a crate::h3::AltSvc>,
     /// The request head as it arrived, before any middleware changed it. Set only when the chain
     /// has a stage that needs it (`cache`, to replay the request as a subrequest).
     pub original: Option<RequestHeader>,

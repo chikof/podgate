@@ -74,6 +74,7 @@ pub fn render(
     out.push_str(&crate::l4::health::render(&live));
     crate::l4::udp::render(&mut out);
     out.push_str(&crate::middleware::oidc::render(&live));
+    crate::h3::render(&mut out);
     table.metrics().render(&mut out, &live);
     out
 }

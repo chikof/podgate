@@ -959,6 +959,13 @@ impl RoutingTable {
         self.index.may_serve(&self.apps, host)
     }
 
+    /// The tenant that claims `host` (normalized) with a literal host, if any; see
+    /// [`Index::claimant`]. The QUIC front charges a connection to it.
+    #[must_use]
+    pub fn claimant(&self, host: &str) -> Option<&str> {
+        self.index.claimant(&self.apps, host)
+    }
+
     /// The declared wildcard nearest to `host`, for explaining a miss; see
     /// [`Index::nearest_wildcard`].
     #[must_use]
