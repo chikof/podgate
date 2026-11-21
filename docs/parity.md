@@ -56,8 +56,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | built (`passive` on `loadbalancer`; connect failures, timeouts, 5xx and slow responses eject a server for a growing time, capped by a percentage and never the last available server; see `docs/ref/svc-outlier.md`) |
 | Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | built (0035 done: connect errors for any method; a dead reused connection only for listed methods and a replayable body; no retry on a response status) |
 | Sticky sessions | `sticky.cookie` | `lb_policy cookie` | built (HMAC cookie on `loadbalancer`, falls back and re-pins when the server is gone, unhealthy or ejected; see `docs/ref/svc-sticky.md`) |
-| Weighted service of services | `weighted` | none | 0037 |
-| Failover service | `failover` | `lb_try_duration` partly | 0037 |
+| Weighted service of services | `weighted` | none | built (children `name` or `name@revision`, dead and asleep children skipped by one eligibility rule, sticky by cookie on the parent, depth 4, `service_cycle`; see `docs/ref/svc-weighted-failover.md`) |
+| Failover service | `failover` | `lb_try_duration` partly | built (fallback while the main service has no healthy server, `fallback_hold_secs` against flapping, a main service with no server wakes the app instead; see `docs/ref/svc-weighted-failover.md`) |
 | Mirroring | `mirroring` | none in core | built (copies of a percentage to loadbalancers of the same app, `name@revision` for the successor release, body copy capped at `max_body_size` and charged to the tenant before it exists, shed first and never queued, marker `x-podgate-mirrored`, credentials off by default; see `docs/ref/svc-mirroring.md`) |
 | Pass host header | `passHostHeader` | `header_up Host` | model (`pass_host_header`), 0022 |
 | Revision-aware rollout, canary, skew pinning | weighted services by hand | none | built |
