@@ -878,3 +878,216 @@ async fn mirror_config_refusals_at_compile() {
         "the schema describes the service"
     );
 }
+
+#[tokio::test]
+async fn plan_lists_mirroring_changes() {
+    let podgate = Podgate::start().await;
+    let main = Server::start("main", Delay::Never).await;
+    let shadow = Server::start("shadow", Delay::Never).await;
+    let other = Server::start("other", Delay::Never).await;
+    let services = [
+        service("shadow", &[shadow.addr]),
+        service("other", &[other.addr]),
+    ];
+    let candidate = |version: u64, mirrors: &[(&str, f64)], config: Value| {
+        snapshot(
+            version,
+            &[mirrored_app(
+                main.addr,
+                &services,
+                mirroring(mirrors, config),
+            )],
+        )
+    };
+    push(
+        &podgate,
+        1,
+        mirrored_app(
+            main.addr,
+            &services,
+            mirroring(&[("shadow", 10.0)], json!({})),
+        ),
+    )
+    .await;
+    let kinds = |plan: Value| -> Vec<String> {
+        plan["posture_changes"]
+            .as_array()
+            .expect("list")
+            .iter()
+            .map(|change| {
+                assert_eq!(change["host"], "a.test");
+                change["kind"].as_str().expect("kind").to_owned()
+            })
+            .collect()
+    };
+    let plan = |version: u64, mirrors: &[(&str, f64)], config: Value| {
+        let body = candidate(version, mirrors, config);
+        let podgate = &podgate;
+        async move {
+            let response = podgate.admin_post("/v1/snapshot/plan", &body).await;
+            assert_eq!(response.status, 200, "{}", response.body);
+            kinds(response.json())
+        }
+    };
+    let none: Vec<String> = Vec::new();
+    assert_eq!(plan(2, &[("shadow", 10.0)], json!({})).await, none);
+    assert_eq!(
+        plan(2, &[("shadow", 5.0)], json!({})).await,
+        none,
+        "less is not listed"
+    );
+    assert_eq!(plan(2, &[("shadow", 0.0)], json!({})).await, none);
+    assert_eq!(
+        plan(2, &[("shadow", 10.5)], json!({})).await,
+        ["mirror_percent_raised"]
+    );
+    assert_eq!(
+        plan(2, &[("shadow", 10.0), ("other", 1.0)], json!({})).await,
+        ["mirror_added"]
+    );
+    assert_eq!(
+        plan(2, &[("shadow", 10.0), ("other", 0.0)], json!({})).await,
+        none,
+        "a mirror that copies nothing exposes nothing"
+    );
+    assert_eq!(
+        plan(2, &[("other", 10.0)], json!({})).await,
+        ["mirror_added"],
+        "moving the copies to another service is a new mirror"
+    );
+    assert_eq!(
+        plan(
+            2,
+            &[("shadow", 10.0)],
+            json!({ "forward_credentials": true })
+        )
+        .await,
+        ["mirror_credentials_forwarded"]
+    );
+    assert_eq!(
+        plan(
+            2,
+            &[("shadow", 20.0), ("other", 5.0)],
+            json!({ "forward_credentials": true })
+        )
+        .await,
+        [
+            "mirror_credentials_forwarded",
+            "mirror_added",
+            "mirror_percent_raised"
+        ]
+    );
+
+    // Credentials already forwarded stay unlisted; turning them off is a tightening.
+    push(
+        &podgate,
+        2,
+        mirrored_app(
+            main.addr,
+            &services,
+            mirroring(&[("shadow", 10.0)], json!({ "forward_credentials": true })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        plan(
+            3,
+            &[("shadow", 10.0)],
+            json!({ "forward_credentials": true })
+        )
+        .await,
+        none
+    );
+    assert_eq!(plan(3, &[("shadow", 10.0)], json!({})).await, none);
+}
+
+/// An auth service that answers `401` to a request with `x-deny` and else `200` with
+/// `X-User: ann`.
+async fn auth_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                while find(&seen, b"\r\n\r\n").is_none() {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+                let reply: &[u8] = if head.contains("x-deny") {
+                    b"HTTP/1.1 401 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nX-User: ann\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                drop(stream.write_all(reply).await);
+                drop(stream.shutdown().await);
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn mirror_identity_from_forward_auth() {
+    let podgate = Podgate::start().await;
+    let auth = auth_server().await;
+    let main = Server::start("main", Delay::Never).await;
+    let shadow = Server::start("shadow", Delay::Never).await;
+    let site = |config: Value| {
+        common::with_forward_auth(
+            mirrored_app(
+                main.addr,
+                &[service("shadow", &[shadow.addr])],
+                mirroring(&[("shadow", 100.0)], config),
+            ),
+            auth,
+            &json!({ "response_headers": ["x-user"] }),
+        )
+    };
+    push(&podgate, 1, site(json!({}))).await;
+
+    let response = podgate
+        .get_with_headers(
+            "a.test",
+            "/ok",
+            &[("Authorization", "Bearer t"), ("X-User", "forged")],
+        )
+        .await;
+    assert_eq!((response.status, response.body.as_str()), (200, "main"));
+    eventually("the copy", || shadow.count() == 1).await;
+    assert_eq!(
+        main.requests()[0].header("x-user"),
+        Some("ann"),
+        "the main service sees the identity"
+    );
+    let copy = shadow.requests()[0].clone();
+    assert!(
+        copy.header("x-user").is_none() && copy.header("authorization").is_none(),
+        "the identity forward_auth added is a credential too: {}",
+        copy.head
+    );
+
+    // A request the auth service refused is answered by the chain and never mirrored.
+    let denied = podgate
+        .get_with_headers("a.test", "/denied", &[("X-Deny", "1")])
+        .await;
+    assert_eq!(denied.status, 401);
+    assert_eq!(settled(&shadow).await, 1);
+    assert_eq!(main.count(), 1);
+
+    push(&podgate, 2, site(json!({ "forward_credentials": true }))).await;
+    podgate
+        .get_with_headers("a.test", "/with", &[("Authorization", "Bearer t")])
+        .await;
+    eventually("the second copy", || shadow.count() == 2).await;
+    let copy = shadow.requests()[1].clone();
+    assert_eq!(copy.header("x-user"), Some("ann"));
+    assert_eq!(copy.header("authorization"), Some("Bearer t"));
+}

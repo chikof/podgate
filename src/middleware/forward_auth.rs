@@ -635,6 +635,10 @@ impl Kind for ForwardAuth {
         kinds
     }
 
+    fn carries_identity(&self, name: &HeaderName) -> bool {
+        self.copies(name)
+    }
+
     /// The address without its query string, which may carry a key for the auth service.
     fn describe(&self) -> Value {
         let scheme = if self.0.server.tls { "https" } else { "http" };

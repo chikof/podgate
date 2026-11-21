@@ -348,6 +348,12 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Whether the stage copies the header `name` into the request as an identity (a user, groups):
+    /// what a copy of the request sent to a mirror drops unless it is meant to carry credentials.
+    fn carries_identity(&self, _name: &http::HeaderName) -> bool {
+        false
+    }
+
     /// What explain shows for this stage besides its type.
     fn describe(&self) -> Value {
         Value::Null
@@ -425,6 +431,14 @@ macro_rules! kinds {
             pub fn kind(&self) -> &'static str {
                 match self {
                     $( Self::$variant(_) => $ty, )*
+                }
+            }
+
+            /// Whether the stage copies the header `name` into the request as an identity.
+            #[must_use]
+            pub fn carries_identity(&self, name: &http::HeaderName) -> bool {
+                match self {
+                    $( Self::$variant(kind) => $crate::middleware::Kind::carries_identity(kind, name), )*
                 }
             }
 

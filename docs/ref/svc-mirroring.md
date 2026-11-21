@@ -38,6 +38,7 @@ exactly as if the router had named `service`.
   budget: the head allowance (16 KiB) plus, with `mirror_body`, `max_body_size`, against the
   tenant's `max_buffer_bytes`. The default cap of 1 MiB needs a tenant budget above 1 MiB plus
   16 KiB.
+- Posture: a plan lists `mirror_added`, `mirror_percent_raised` and `mirror_credentials_forwarded`.
 - Every literal server address of a mirror's service passes the upstream address policy like any
   other server (`upstream_forbidden`).
 - Unknown fields are `invalid_service`; so is `max_body_size` without `mirror_body`.
@@ -68,7 +69,8 @@ The copy is sent after the request was routed, from its own task:
 - It is the request that goes to the main service (every middleware rewrite included), with
   the connection-level headers (`Connection` and the headers it names, `Keep-Alive`, `TE`,
   `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`, `Proxy-*`) removed, `Content-Length`
-  set by the sender, credentials removed unless `forward_credentials`, and
+  set by the sender, credentials and the identity headers a middleware put in (`forward_auth`'s
+  copied headers) removed unless `forward_credentials`, and
   **`x-podgate-mirrored: 1`** added so the shadow can avoid side effects (Traefik adds nothing).
   A request that already carries the marker is itself a copy and is not mirrored again.
 - It is plain HTTP/1.1 with `Connection: close`, dialled through the connect path of the proxy,

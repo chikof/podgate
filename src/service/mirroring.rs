@@ -23,6 +23,7 @@
 mod run;
 mod send;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -411,6 +412,77 @@ impl Mirroring {
             ))),
         }
     }
+}
+
+/// A mirror was added to a service a router uses, or an existing one now copies to a service it
+/// did not copy to before.
+pub const ADDED: &str = "mirror_added";
+/// A mirror of a service a router uses now copies a larger share of the requests.
+pub const PERCENT_RAISED: &str = "mirror_percent_raised";
+/// Users' `Authorization`, `Cookie` and identity headers now go to the mirrors of a service a
+/// router uses (`forward_credentials: true`).
+pub const CREDENTIALS_FORWARDED: &str = "mirror_credentials_forwarded";
+
+/// What an app's routed `mirroring` services copy: `(service, mirror as declared) -> share`, and
+/// the services that copy credentials to at least one mirror.
+fn exposure(app: &crate::table::CompiledApp) -> (BTreeMap<(&str, String), u32>, BTreeSet<&str>) {
+    let routed: BTreeSet<&str> = app
+        .routers()
+        .iter()
+        .map(|router| router.service())
+        .collect();
+    let mut shares = BTreeMap::new();
+    let mut credentials = BTreeSet::new();
+    let services = app.services().iter().chain(
+        app.revisions()
+            .iter()
+            .flat_map(|revision| revision.services().iter()),
+    );
+    for named in services.filter(|named| routed.contains(&*named.name)) {
+        let Some(mirroring) = named.service.as_mirroring() else {
+            continue;
+        };
+        for mirror in &mirroring.mirrors {
+            let label = match &mirror.revision {
+                Some(revision) => format!("{}@{revision}", mirror.name),
+                None => mirror.name.to_string(),
+            };
+            let share = shares.entry((&*named.name, label)).or_insert(0);
+            *share = (*share).max(mirror.share);
+            if mirror.share > 0 && mirroring.settings.forward_credentials {
+                credentials.insert(&*named.name);
+            }
+        }
+    }
+    (shares, credentials)
+}
+
+/// What a plan lists when `candidate` replaces `live` for the same host: mirroring that sends more
+/// of what users send to more places. Removing or lowering a mirror is never listed.
+pub(crate) fn relaxations(
+    live: &crate::table::CompiledApp,
+    candidate: &crate::table::CompiledApp,
+) -> Vec<&'static str> {
+    let (old, old_credentials) = exposure(live);
+    let (new, new_credentials) = exposure(candidate);
+    let mut kinds = Vec::new();
+    if new_credentials
+        .iter()
+        .any(|name| !old_credentials.contains(name))
+    {
+        kinds.push(CREDENTIALS_FORWARDED);
+    }
+    for (key, share) in &new {
+        match old.get(key) {
+            _ if *share == 0 => {}
+            None if !kinds.contains(&ADDED) => kinds.push(ADDED),
+            Some(before) if share > before && !kinds.contains(&PERCENT_RAISED) => {
+                kinds.push(PERCENT_RAISED);
+            }
+            _ => {}
+        }
+    }
+    kinds
 }
 
 #[cfg(test)]

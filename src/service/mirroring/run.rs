@@ -315,8 +315,14 @@ fn head_weight(request: &RequestHeader) -> u64 {
 }
 
 /// The copy of `request` a mirror gets: no connection-level header, no credentials unless
-/// `credentials`, no length (the sender sets it), and the marker.
-fn copy_of(request: &RequestHeader, credentials: bool) -> Option<RequestHeader> {
+/// `credentials`, no length (the sender sets it), and the marker. `identity` says which headers a
+/// middleware of the request's chain put in as an identity (`forward_auth`'s answer); they are
+/// credentials too and go only with `credentials`.
+fn copy_of(
+    request: &RequestHeader,
+    credentials: bool,
+    identity: &dyn Fn(&HeaderName) -> bool,
+) -> Option<RequestHeader> {
     let mut copy = request.clone();
     let mut remove: Vec<HeaderName> = copy
         .headers
@@ -332,6 +338,9 @@ fn copy_of(request: &RequestHeader, credentials: bool) -> Option<RequestHeader> 
         .chain(CREDENTIALS.iter().filter(|_| !credentials))
     {
         remove.push(HeaderName::from_static(name));
+    }
+    if !credentials {
+        remove.extend(copy.headers.keys().filter(|name| identity(name)).cloned());
     }
     for name in &remove {
         copy.remove_header(name);
@@ -405,7 +414,17 @@ pub fn begin(
     let Some(reserved) = Reservation::new(&tenant, HEAD_ALLOWANCE) else {
         return refuse(Dropped::Budget);
     };
-    let Some(head) = copy_of(upstream_request, settings.forward_credentials) else {
+    let chain = ctx.matched.and_then(|matched| table.router(matched));
+    let identity = |name: &HeaderName| {
+        chain.is_some_and(|(app, router)| {
+            router
+                .chain()
+                .iter()
+                .filter_map(|index| app.stages().get(*index))
+                .any(|named| named.stage.carries_identity(name))
+        })
+    };
+    let Some(head) = copy_of(upstream_request, settings.forward_credentials, &identity) else {
         return refuse(Dropped::HeadTooLarge);
     };
     if copies_body {
@@ -603,11 +622,12 @@ mod test {
             ("authorization", "Bearer t"),
             ("cookie", "sid=1"),
             ("accept", "text/plain"),
+            ("x-user", "ann"),
             (MARKER, "spoofed"),
         ] {
             request.insert_header(name, value).expect("header");
         }
-        let bare = copy_of(&request, false).expect("copy");
+        let bare = copy_of(&request, false, &|name| name.as_str() == "x-user").expect("copy");
         let names: Vec<&str> = bare.headers.keys().map(HeaderName::as_str).collect();
         assert_eq!(bare.headers.get(MARKER).expect("marker"), "1");
         for gone in [
@@ -620,8 +640,12 @@ mod test {
             assert!(!names.contains(&gone), "{gone} stays out: {names:?}");
         }
         assert!(names.contains(&"host") && names.contains(&"accept"));
-        let with = copy_of(&request, true).expect("copy");
+        let with = copy_of(&request, true, &|name| name.as_str() == "x-user").expect("copy");
         assert!(with.headers.contains_key("authorization") && with.headers.contains_key("cookie"));
+        assert!(
+            with.headers.contains_key("x-user"),
+            "identity goes with credentials"
+        );
         assert!(!with.headers.contains_key("connection"));
     }
 
