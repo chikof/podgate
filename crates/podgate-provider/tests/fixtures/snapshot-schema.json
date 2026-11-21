@@ -3059,6 +3059,134 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.plugin": {
+      "additionalProperties": false,
+      "description": "The configuration of a `plugin` middleware.",
+      "properties": {
+        "body": {
+          "additionalProperties": false,
+          "description": "Required by, and only with, the `request_body` phase.",
+          "properties": {
+            "max_bytes": {
+              "description": "The largest body that is buffered and sent; a larger one is refused with `413`.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "max_bytes"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "config": {
+          "default": null,
+          "description": "Passed to the plugin as it is; at most 16 KiB of JSON. The plugin must treat it as\nuntrusted input."
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_plugin_error": {
+          "anyOf": [
+            {
+              "description": "What a failed call means for the request.",
+              "oneOf": [
+                {
+                  "const": "fail_closed",
+                  "description": "The request is answered `503`.",
+                  "type": "string"
+                },
+                {
+                  "const": "fail_open",
+                  "description": "The request goes on without the plugin.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`fail_closed` (the default) or `fail_open`."
+        },
+        "phases": {
+          "description": "The phases to ask the plugin at: `request_headers` (the default), `request_body`,\n`response_headers`.",
+          "items": {
+            "description": "A phase of a request a middleware asks its plugin about.",
+            "oneOf": [
+              {
+                "const": "request_headers",
+                "description": "The request head.",
+                "type": "string"
+              },
+              {
+                "const": "request_body",
+                "description": "The request head and the buffered body.",
+                "type": "string"
+              },
+              {
+                "const": "response_headers",
+                "description": "The upstream's response head.",
+                "type": "string"
+              }
+            ]
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "plugin": {
+          "description": "The plugin's name in the operator's `PLUGINS_FILE`.",
+          "type": "string"
+        },
+        "request_headers": {
+          "default": null,
+          "description": "The request headers to send. Without it all but `authorization`, `proxy-authorization`\nand `cookie`; with it exactly these.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "response_headers": {
+          "default": null,
+          "description": "The response headers to send at `response_headers`. Without it all but `set-cookie`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout_ms": {
+          "default": null,
+          "description": "The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "plugin"
+        }
+      },
+      "required": [
+        "plugin",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.rate_limit": {
       "additionalProperties": false,
       "description": "The configuration of a `rate_limit` middleware.",
@@ -5097,6 +5225,7 @@
       "jwt_auth": "#/$defs/middleware.jwt_auth",
       "oidc": "#/$defs/middleware.oidc",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
+      "plugin": "#/$defs/middleware.plugin",
       "rate_limit": "#/$defs/middleware.rate_limit",
       "redirect_regex": "#/$defs/middleware.redirect_regex",
       "redirect_scheme": "#/$defs/middleware.redirect_scheme",

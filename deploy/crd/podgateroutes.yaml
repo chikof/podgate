@@ -277,6 +277,25 @@ spec:
                     required:
                     - type
                   - properties:
+                      on_plugin_error:
+                        enum:
+                        - fail_closed
+                        - fail_open
+                      phases:
+                        items:
+                          enum:
+                          - request_headers
+                          - request_body
+                          - response_headers
+                      timeout_ms:
+                        minimum: 0
+                      type:
+                        enum:
+                        - plugin
+                    required:
+                    - type
+                    - plugin
+                  - properties:
                       average:
                         minimum: 0
                       burst:
@@ -443,8 +462,7 @@ spec:
                       minimum: 0
                       type: integer
                     body:
-                      nullable: true
-                      type: string
+                      x-kubernetes-preserve-unknown-fields: true
                     buffer_request:
                       description: |-
                         Holds the whole request body before the upstream request starts. Needs
@@ -478,6 +496,11 @@ spec:
                       minimum: 0
                       nullable: true
                       type: integer
+                    config:
+                      description: |-
+                        Passed to the plugin as it is; at most 16 KiB of JSON. The plugin must treat it as
+                        untrusted input.
+                      x-kubernetes-preserve-unknown-fields: true
                     cors:
                       description: CORS; absent means the middleware does nothing about `Origin`.
                       nullable: true
@@ -785,6 +808,13 @@ spec:
                     normalize_query:
                       description: Sort the query parameters before they are part of the key; default `false`.
                       type: boolean
+                    on_plugin_error:
+                      description: '`fail_closed` (the default) or `fail_open`.'
+                      enum:
+                      - fail_closed
+                      - fail_open
+                      nullable: true
+                      type: string
                     on_store_error:
                       description: What a request does when the store gives no verdict.
                       enum:
@@ -805,6 +835,22 @@ spec:
                     permanent:
                       description: '`301` instead of `302`.'
                       type: boolean
+                    phases:
+                      description: |-
+                        The phases to ask the plugin at: `request_headers` (the default), `request_body`,
+                        `response_headers`.
+                      items:
+                        description: A phase of a request a middleware asks its plugin about.
+                        enum:
+                        - request_headers
+                        - request_body
+                        - response_headers
+                        type: string
+                      nullable: true
+                      type: array
+                    plugin:
+                      description: The plugin's name in the operator's `PLUGINS_FILE`.
+                      type: string
                     port:
                       description: The port to redirect to; a port that is the scheme's default is not written in the URL.
                       maximum: 65535
@@ -960,9 +1006,7 @@ spec:
                       minimum: 0
                       type: integer
                     response_headers:
-                      items:
-                        type: string
-                      type: array
+                      x-kubernetes-preserve-unknown-fields: true
                     response_headers_regex:
                       nullable: true
                       type: string
@@ -1069,6 +1113,11 @@ spec:
                       description: The response header that lists purge tags (for example `Cache-Tag`).
                       nullable: true
                       type: string
+                    timeout_ms:
+                      description: The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.
+                      minimum: 0
+                      nullable: true
+                      type: integer
                     timeout_secs:
                       minimum: 0
                       nullable: true
@@ -1185,6 +1234,7 @@ spec:
                       - jwt_auth
                       - oidc
                       - pass_tls_client_cert
+                      - plugin
                       - rate_limit
                       - redirect_regex
                       - redirect_scheme
