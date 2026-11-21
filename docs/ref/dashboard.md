@@ -23,7 +23,7 @@ A second TCP listener, like `METRICS_ADDR` (`docs/ref/metrics.md`), because a br
 
 Not served here, ever: `/v1/events` (it carries certificate private keys), failed-request records, the snapshot, the plan and validate endpoints, the purge endpoint, the metrics, `/healthz` and `/readyz`. They are not routes, so they answer `404`; no page can show them because they do not exist on this listener.
 
-`POST /api/explain` takes at most 16 KiB (`413` above) and only `application/json` (`400` otherwise). Parsing, validation and answers are the admin endpoint's: the handler is the same function.
+`POST /api/explain` takes at most 16 KiB (`413` above) and only `Content-Type: application/json`, parameters such as `; charset=utf-8` allowed. Any other type, a missing one or two of them is `415 {"error": "content-type must be application/json"}` before the body is read. This is a cross-site guard: a page on another site can send a `POST` with `text/plain` or a form encoding without a CORS preflight, and the browser would attach cached Basic credentials to it; `application/json` forces a preflight, which the dashboard never answers (`OPTIONS` is `405`, and sends no CORS header). Parsing, validation and answers are the admin endpoint's: the handler is the same function.
 
 At most 4 API requests (overview and explain together) run at once; a fifth gets `503 {"error": "dashboard is busy"}` with `retry-after: 1`. That is half the admin API's cap of 8 overview computations, so a busy browser cannot take every slot. Each request ends with `408` after `REQUEST_TIMEOUT_SECS`.
 
@@ -139,7 +139,7 @@ Screenshots of a running daemon with a sample snapshot (three apps, two tenants,
 
 ## Tests
 
-`tests/dashboard.rs`: `dashboard_off_by_default`, `dashboard_serves_assets_and_apis`, `dashboard_never_serves_events`, `dashboard_only_read_routes`, `dashboard_rejects_non_get`, `dashboard_non_loopback_requires_auth`, `dashboard_basic_auth_and_throttle`, `dashboard_security_headers`, `dashboard_host_check`, `dashboard_no_inline_script`, `dashboard_overview_equals_admin`, `dashboard_explain_equals_admin`, `dashboard_assets_embedded_match_files`, `dashboard_no_external_references`.
+`tests/dashboard.rs`: `dashboard_off_by_default`, `dashboard_serves_assets_and_apis`, `dashboard_never_serves_events`, `dashboard_only_read_routes`, `dashboard_rejects_non_get`, `dashboard_non_loopback_requires_auth`, `dashboard_basic_auth_and_throttle`, `dashboard_security_headers`, `dashboard_host_check`, `dashboard_no_inline_script`, `dashboard_overview_equals_admin`, `dashboard_explain_equals_admin`, `dashboard_explain_requires_json_content_type`, `dashboard_assets_embedded_match_files`, `dashboard_no_external_references`.
 
 ## Against Traefik and Caddy
 

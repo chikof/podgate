@@ -912,24 +912,57 @@ async fn dashboard_explain_equals_admin() {
     assert_eq!(fields("[1, 2]").await.status, 400);
     assert_eq!(fields("{").await.status, 400);
     assert_eq!(fields("").await.status, 400);
-    let host = addr.to_string();
-    let form = raw(
-        addr,
-        &request(
-            "POST",
-            "/api/explain",
-            &host,
-            "Content-Type: application/x-www-form-urlencoded\r\n",
-            "url=http%3A%2F%2Fa.test%2F",
-        ),
-    )
-    .await
-    .expect("answer");
-    assert_eq!(form.status, 400, "JSON only");
     let large = format!(r#"{{"url": "http://a.test/{}"}}"#, "a".repeat(17 * 1024));
     let refused = fields(&large).await;
     assert_eq!(refused.status, 413, "{}", refused.text());
     assert_eq!(refused.json(), json!({ "error": "request body too large" }));
     let just_fits = format!(r#"{{"url": "http://a.test/{}"}}"#, "a".repeat(15 * 1024));
     assert_eq!(fields(&just_fits).await.status, 200);
+}
+
+#[tokio::test]
+async fn dashboard_explain_requires_json_content_type() {
+    let (podgate, addr) = start(&[]).await;
+    let _backend = with_snapshot(&podgate).await;
+    let host = addr.to_string();
+    let body = r#"{"url": "http://a.test/"}"#;
+    let post = |extra: String| {
+        let request = request("POST", "/api/explain", &host, &extra, body);
+        async move { raw(addr, &request).await.expect("answer") }
+    };
+    // What a page on another site can send without a preflight, and near misses.
+    for content_type in [
+        "text/plain",
+        "text/plain;charset=UTF-8",
+        "application/x-www-form-urlencoded",
+        "multipart/form-data; boundary=x",
+        "application/jsonx",
+        "application/json-seq",
+        "application/vnd.api+json",
+        "text/json",
+        "json",
+        "",
+    ] {
+        let reply = post(format!("Content-Type: {content_type}\r\n")).await;
+        assert_eq!(reply.status, 415, "{content_type:?}");
+        assert_eq!(
+            reply.json(),
+            json!({ "error": "content-type must be application/json" }),
+            "{content_type:?}"
+        );
+    }
+    let none = post(String::new()).await;
+    assert_eq!(none.status, 415, "no Content-Type");
+    let twice =
+        post("Content-Type: application/json\r\nContent-Type: text/plain\r\n".to_owned()).await;
+    assert_eq!(twice.status, 415, "two Content-Type headers");
+    for content_type in [
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/json;charset=utf-8",
+        "Application/JSON",
+    ] {
+        let reply = post(format!("Content-Type: {content_type}\r\n")).await;
+        assert_eq!(reply.status, 200, "{content_type:?}: {}", reply.text());
+    }
 }

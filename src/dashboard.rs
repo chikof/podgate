@@ -429,6 +429,11 @@ impl From<ExplainBody> for explain::Params {
 /// `GET /api/explain?url=...` as `GET /v1/explain`, or `POST /api/explain` with the same
 /// parameters as a JSON body of at most [`MAX_BODY_BYTES`]. Both answer from the live table and
 /// change nothing; the body is for URLs a query string handles badly.
+///
+/// A `POST` whose `Content-Type` is not `application/json` is `415` before the body is read: a
+/// page on another site can send `text/plain` or a form without a CORS preflight, and the browser
+/// would attach cached Basic credentials to it; `application/json` forces a preflight that the
+/// dashboard never answers.
 async fn explain_entry(
     State(state): State<AppState>,
     request: Request,
@@ -437,6 +442,13 @@ async fn explain_entry(
         Method::GET => Query::<explain::Params>::try_from_uri(request.uri())
             .map(|Query(params)| params)
             .map_err(|err| AppError::BadRequest(format!("invalid query: {err}").into()))?,
+        Method::POST if !is_json(request.headers()) => {
+            return Ok((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({ "error": "content-type must be application/json" })),
+            )
+                .into_response());
+        }
         Method::POST => Json::<ExplainBody>::from_request(request, &())
             .await
             .map(|Json(body)| body.into())
@@ -444,6 +456,21 @@ async fn explain_entry(
         _ => return Ok(method_not_allowed("GET, POST")),
     };
     explain::answer(&state, &params)
+}
+
+/// Whether the request has exactly one `Content-Type` and it is `application/json`, parameters
+/// such as `; charset=utf-8` allowed.
+fn is_json(headers: &axum::http::HeaderMap) -> bool {
+    let mut values = headers.get_all(CONTENT_TYPE).iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        return false;
+    };
+    value.to_str().is_ok_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"))
+    })
 }
 
 fn body_error(rejection: &JsonRejection) -> AppError {
