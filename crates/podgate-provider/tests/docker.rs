@@ -6,7 +6,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::docker::{Ctr, FakeDocker, Flavor};
 use common::{DEADLINE, config};
@@ -937,6 +937,24 @@ async fn events_trigger_update() {
         .await
         .expect("a destroy event removes the app");
 
+    // The destroy event's own list may still be pending (the start event's permit, or a resync,
+    // can already have shown the app gone): wait until the list count holds still for longer than
+    // the source's quiet window plus a list, then count.
+    let settle = async {
+        let mut last = docker.lists();
+        let mut since = Instant::now();
+        while since.elapsed() < Duration::from_millis(150) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let now = docker.lists();
+            if now != last {
+                last = now;
+                since = Instant::now();
+            }
+        }
+    };
+    tokio::time::timeout(DEADLINE, settle)
+        .await
+        .expect("the list count settles");
     // Events that cannot change which containers serve do not cause a list.
     let lists = docker.lists();
     docker.emit(&json!({ "Type": "network", "Action": "connect" }));
