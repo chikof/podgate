@@ -18,17 +18,18 @@ pub(super) fn routes() -> Router<AppState> {
     Router::new().route("/v1/explain", get(get_explain))
 }
 
+/// What is asked. The admin endpoint reads it from the query, the dashboard from a JSON body.
 #[derive(Debug, Deserialize)]
-struct Params {
+pub(crate) struct Params {
     /// The request URL: absolute, `http` or `https`. Scheme, host, path and query are read.
-    url: String,
+    pub(crate) url: String,
     /// The request method. Absent: `GET`.
-    method: Option<String>,
+    pub(crate) method: Option<String>,
     /// The entry point the request arrives on. Absent: the bound entry points of the URL's scheme
     /// are tried in order (`web` for `http` and `websecure` for `https` by default).
-    entry_point: Option<String>,
+    pub(crate) entry_point: Option<String>,
     /// The resolved client address to match `client_ip` routers against. Absent: none matches.
-    client_ip: Option<IpAddr>,
+    pub(crate) client_ip: Option<IpAddr>,
 }
 
 /// `200` with the app, tenant, declaring source, matched router, the routers it shadows, the
@@ -42,6 +43,12 @@ async fn get_explain(
 ) -> Result<Response, AppError> {
     let Query(params) =
         params.map_err(|err| AppError::BadRequest(format!("invalid query: {err}").into()))?;
+    answer(&state, &params)
+}
+
+/// The answer to `params` from the live routing table; the one code both `GET /v1/explain` and
+/// the dashboard's `/api/explain` run.
+pub(crate) fn answer(state: &AppState, params: &Params) -> Result<Response, AppError> {
     let table = state.table().load();
     let allow_encoded_slash = params
         .entry_point

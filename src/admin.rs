@@ -8,11 +8,11 @@
 
 mod cache;
 mod events;
-mod explain;
+pub(crate) mod explain;
 mod failures;
 mod health;
 mod metrics;
-mod overview;
+pub(crate) mod overview;
 mod plan;
 pub(crate) mod schema;
 mod snapshot;

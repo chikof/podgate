@@ -554,6 +554,87 @@ fn credentials(value: &[u8]) -> Option<(String, String)> {
 }
 
 impl BasicAuth {
+    /// Builds the middleware from its parsed configuration; `fingerprint` is the digest of the
+    /// declaration the registry keys state by.
+    fn from_config(config: Config, fingerprint: u64) -> Result<Self, Invalid> {
+        if config.users.is_empty() {
+            return Err(invalid(
+                "`users` is empty; a chain that admits nobody is a mistake",
+            ));
+        }
+        if config.users.len() > MAX_USERS {
+            return Err(invalid(format!("more than {MAX_USERS} users")));
+        }
+        let mut users = HashMap::with_capacity(config.users.len());
+        let mut dummy = None;
+        for line in &config.users {
+            let (user, hash) = line
+                .split_once(':')
+                .ok_or_else(|| invalid("a user entry is not `user:hash`"))?;
+            if user.is_empty()
+                || user.len() > MAX_USER_BYTES
+                || user.chars().any(char::is_control)
+                || user.starts_with(' ')
+                || user.ends_with(' ')
+            {
+                return Err(invalid(format!("{user:?} is not a usable user name")));
+            }
+            let entry = Arc::new(classify(user, hash).map_err(invalid)?);
+            dummy.get_or_insert_with(|| Arc::clone(&entry));
+            if users.insert(Box::<str>::from(user), entry).is_some() {
+                return Err(invalid(format!("user {user:?} is declared twice")));
+            }
+        }
+        let dummy = dummy.ok_or_else(|| invalid("`users` is empty"))?;
+        let realm = config.realm.unwrap_or_else(|| DEFAULT_REALM.to_owned());
+        if realm.is_empty()
+            || realm
+                .chars()
+                .any(|c| c.is_control() || c == '"' || c == '\\')
+        {
+            return Err(invalid(
+                "`realm` must be non-empty and free of control characters, `\"` and `\\`",
+            ));
+        }
+        let challenge = HeaderValue::from_bytes(
+            format!("Basic realm=\"{realm}\", charset=\"UTF-8\"").as_bytes(),
+        )
+        .map_err(|_| invalid("`realm` is not a valid header value"))?;
+        let header_field = config
+            .header_field
+            .as_deref()
+            .map(|raw| {
+                let name = HeaderName::from_bytes(raw.as_bytes())
+                    .map_err(|_| invalid(format!("`header_field` {raw:?} is not a header name")))?;
+                if headers::FORBIDDEN.contains(&name.as_str())
+                    || name.as_str().starts_with("proxy-")
+                    || name == AUTHORIZATION
+                {
+                    return Err(invalid(format!(
+                        "`header_field` {name} cannot carry the user name: it belongs to the connection or to authorization"
+                    )));
+                }
+                Ok(name)
+            })
+            .transpose()?;
+        let mut key = [0_u8; 32];
+        getrandom::fill(&mut key).map_err(|_| invalid("the system has no randomness"))?;
+        Ok(Self(Box::new(Parts {
+            realm: realm.into(),
+            challenge,
+            header_field,
+            remove_header: config.remove_header,
+            users,
+            dummy,
+            runtime: Arc::new(Runtime {
+                key,
+                cache: Mutex::new(Cache::default()),
+                failures: Mutex::new(Failures::default()),
+            }),
+            fingerprint,
+        })))
+    }
+
     fn digest(&self, user: &str, password: &str) -> Option<Digest> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.runtime.key).ok()?;
         mac.update(&u32::try_from(user.len()).ok()?.to_be_bytes());
@@ -632,88 +713,86 @@ impl BasicAuth {
     }
 }
 
+/// An htpasswd file checked outside the middleware chain, for the dashboard. It is a
+/// `basic_auth` middleware with the same hashes, cost caps, [`Pool`] bound, cache and failed
+/// attempt delay, so the two cannot drift apart.
+#[derive(Debug)]
+pub struct Htpasswd {
+    auth: BasicAuth,
+    pool: Pool,
+}
+
+impl Htpasswd {
+    /// Parses `text`: one `user:hash` per line, blank lines and `#` comments skipped. The
+    /// challenge names `realm`; verifications run in `pool`.
+    ///
+    /// # Errors
+    ///
+    /// The reason the entries are refused: no user, a weak or malformed hash, a cost over the
+    /// cap. It never repeats a hash.
+    pub fn parse(text: &str, realm: &str, pool: Pool) -> Result<Self, String> {
+        let users = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+        let config = Config {
+            users,
+            realm: Some(realm.to_owned()),
+            header_field: None,
+            remove_header: false,
+        };
+        let auth = BasicAuth::from_config(config, 0).map_err(|invalid| invalid.message)?;
+        Ok(Self { auth, pool })
+    }
+
+    /// The `www-authenticate` value of a refusal.
+    #[must_use]
+    pub fn challenge(&self) -> &HeaderValue {
+        &self.auth.challenge
+    }
+
+    /// Whether `headers` carry Basic credentials of a listed user. `source` is the peer the
+    /// failed-attempt counter charges. A missing, repeated or malformed `Authorization` is
+    /// `false` without any hashing.
+    ///
+    /// # Errors
+    ///
+    /// [`AppError::AuthBusy`] when no verification worker is free within the wait.
+    pub async fn check(
+        &self,
+        source: Option<IpAddr>,
+        headers: &http::HeaderMap,
+    ) -> Result<bool, AppError> {
+        let mut values = headers.get_all(AUTHORIZATION).iter();
+        let header = values.next();
+        let header = if values.next().is_some() {
+            None
+        } else {
+            header
+        };
+        let who = Who {
+            pool: &self.pool,
+            tenant: "dashboard",
+            budget: None,
+            source,
+        };
+        let verdict = self
+            .auth
+            .authenticate(&who, header.map(HeaderValue::as_bytes))
+            .await?;
+        Ok(matches!(verdict, Verdict::Allow(_)))
+    }
+}
+
 impl Kind for BasicAuth {
     type State = ();
 
     fn compile(declared: &Declared, _cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
         let config: Config =
             serde_json::from_value(Value::Object(declared.config.clone())).map_err(invalid)?;
-        if config.users.is_empty() {
-            return Err(invalid(
-                "`users` is empty; a chain that admits nobody is a mistake",
-            ));
-        }
-        if config.users.len() > MAX_USERS {
-            return Err(invalid(format!("more than {MAX_USERS} users")));
-        }
-        let mut users = HashMap::with_capacity(config.users.len());
-        let mut dummy = None;
-        for line in &config.users {
-            let (user, hash) = line
-                .split_once(':')
-                .ok_or_else(|| invalid("a user entry is not `user:hash`"))?;
-            if user.is_empty()
-                || user.len() > MAX_USER_BYTES
-                || user.chars().any(char::is_control)
-                || user.starts_with(' ')
-                || user.ends_with(' ')
-            {
-                return Err(invalid(format!("{user:?} is not a usable user name")));
-            }
-            let entry = Arc::new(classify(user, hash).map_err(invalid)?);
-            dummy.get_or_insert_with(|| Arc::clone(&entry));
-            if users.insert(Box::<str>::from(user), entry).is_some() {
-                return Err(invalid(format!("user {user:?} is declared twice")));
-            }
-        }
-        let dummy = dummy.ok_or_else(|| invalid("`users` is empty"))?;
-        let realm = config.realm.unwrap_or_else(|| DEFAULT_REALM.to_owned());
-        if realm.is_empty()
-            || realm
-                .chars()
-                .any(|c| c.is_control() || c == '"' || c == '\\')
-        {
-            return Err(invalid(
-                "`realm` must be non-empty and free of control characters, `\"` and `\\`",
-            ));
-        }
-        let challenge = HeaderValue::from_bytes(
-            format!("Basic realm=\"{realm}\", charset=\"UTF-8\"").as_bytes(),
-        )
-        .map_err(|_| invalid("`realm` is not a valid header value"))?;
-        let header_field = config
-            .header_field
-            .as_deref()
-            .map(|raw| {
-                let name = HeaderName::from_bytes(raw.as_bytes())
-                    .map_err(|_| invalid(format!("`header_field` {raw:?} is not a header name")))?;
-                if headers::FORBIDDEN.contains(&name.as_str())
-                    || name.as_str().starts_with("proxy-")
-                    || name == AUTHORIZATION
-                {
-                    return Err(invalid(format!(
-                        "`header_field` {name} cannot carry the user name: it belongs to the connection or to authorization"
-                    )));
-                }
-                Ok(name)
-            })
-            .transpose()?;
-        let mut key = [0_u8; 32];
-        getrandom::fill(&mut key).map_err(|_| invalid("the system has no randomness"))?;
-        Ok(Self(Box::new(Parts {
-            realm: realm.into(),
-            challenge,
-            header_field,
-            remove_header: config.remove_header,
-            users,
-            dummy,
-            runtime: Arc::new(Runtime {
-                key,
-                cache: Mutex::new(Cache::default()),
-                failures: Mutex::new(Failures::default()),
-            }),
-            fingerprint: state::fingerprint(declared),
-        })))
+        Self::from_config(config, state::fingerprint(declared))
     }
 
     async fn request(&self, cx: &mut RequestCx<'_>, _state: &mut ()) -> pingora::Result<Flow> {

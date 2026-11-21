@@ -22,7 +22,7 @@ pub(super) fn routes() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct Params {
+pub(crate) struct Params {
     /// Only this tenant.
     tenant: Option<String>,
     /// Only this app.
@@ -60,7 +60,7 @@ impl Params {
 
 /// `GET` only. axum's own `get` route would answer `HEAD` too, and the overview takes nothing
 /// but `GET`, so the method is checked here and anything else is `405` with `allow: GET`.
-async fn entry(
+pub(crate) async fn entry(
     method: Method,
     state: State<AppState>,
     params: Result<Query<Params>, QueryRejection>,

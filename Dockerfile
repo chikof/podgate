@@ -19,6 +19,8 @@ RUN mkdir src crates/podgate-model/src \
     && rm -rf src crates/podgate-model/src
 COPY src ./src
 COPY crates ./crates
+# The dashboard's files are compiled into the binary (include_bytes!).
+COPY dashboard ./dashboard
 # Touch so cargo sees the real sources as newer than the stub build.
 RUN touch src/main.rs src/lib.rs crates/podgate-model/src/lib.rs && cargo build --release --locked
 # The runtime image has no shell, so the admin socket directory is made here and copied over.

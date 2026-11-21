@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>podgate dashboard</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<header>
+<h1>podgate</h1>
+<nav id="tabs" aria-label="Pages">
+<a href="#summary" data-page="summary">Summary</a>
+<a href="#apps" data-page="apps">Apps and routes</a>
+<a href="#services" data-page="services">Services and servers</a>
+<a href="#certificates" data-page="certificates">Certificates</a>
+<a href="#explain" data-page="explain">Explain</a>
+</nav>
+<div class="refresh">
+<span id="status" role="status">loading</span>
+<button id="pause" type="button">Pause</button>
+</div>
+</header>
+<main id="view"></main>
+<noscript><p class="empty">The dashboard needs JavaScript. For the same data without it, read <code>GET /api/overview</code>.</p></noscript>
+</body>
+</html>

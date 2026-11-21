@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::acme;
 use crate::entry::{self, EntryPoint};
+use crate::middleware::basic_auth::Htpasswd;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::tracing::ExportConfig;
 use crate::service::StaticRoots;
@@ -84,6 +85,9 @@ const _: () =
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
 /// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
 /// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
+/// | `DASHBOARD_ADDR` | unset | TCP address of the read-only dashboard (a web UI over the overview and explain APIs). Unset: no dashboard. A non-loopback address needs `DASHBOARD_AUTH_FILE` or startup stops. Reference: `docs/ref/dashboard.md`. |
+/// | `DASHBOARD_AUTH_FILE` | unset | htpasswd file (`user:hash` lines, bcrypt or argon2, the limits of `basic_auth`) the dashboard asks for. Read once at startup; a bad entry stops startup. Only valid with `DASHBOARD_ADDR`. |
+/// | `DASHBOARD_HOSTS` | unset | Comma-separated host names the dashboard's `Host` header may carry besides its bound address and, on a loopback or wildcard bind, `localhost`. Needed when the dashboard is reached under a name, such as through podgate itself. Only valid with `DASHBOARD_ADDR`. |
 /// | `TLS_MIN_VERSION` | `1.2` | Lowest TLS version the HTTPS entry points serve, `1.2` or `1.3`. Pingora builds one rustls config per listener, so a connection below it is refused after the handshake (`421`), or at the ClientHello when the client offers no TLS 1.3 suite. An app's `tls.min_version` can only raise it. |
 /// | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of an OTLP/HTTP collector, `http://` or `https://`; spans are POSTed to `<endpoint>/v1/traces` as protobuf. Unset: nothing is exported (requests are still sampled and their trace context propagated). Never part of a snapshot. |
 /// | `OTEL_EXPORTER_OTLP_HEADERS` | unset | `name=value,...` sent with every export, such as an API key. Values are used as written and never logged. |
@@ -147,6 +151,14 @@ pub struct Config {
     /// Series each tenant may own for its routers, services and servers before they collapse
     /// into `other` (see [`crate::observe::metrics`]).
     pub metrics_series_per_tenant: NonZeroU32,
+    /// TCP address of the read-only dashboard. Absent: no dashboard.
+    pub dashboard_addr: Option<SocketAddr>,
+    /// htpasswd file the dashboard checks credentials against; required unless
+    /// [`Self::dashboard_addr`] is loopback. Read once at startup by [`Config::dashboard_auth`].
+    pub dashboard_auth_file: Option<PathBuf>,
+    /// Host names besides the bound address the dashboard's `Host` header may carry
+    /// (`DASHBOARD_HOSTS`).
+    pub dashboard_hosts: Vec<Box<str>>,
     /// Lowest TLS version served (`TLS_MIN_VERSION`); the floor of every app's `tls.min_version`.
     pub tls_min_version: TlsVersion,
     /// Where traces go and how many a node allows; see [`ExportConfig`]. No endpoint: nothing is
@@ -189,6 +201,9 @@ impl Default for Config {
             access_log_file: None,
             metrics_addr: None,
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
+            dashboard_addr: None,
+            dashboard_auth_file: None,
+            dashboard_hosts: Vec::new(),
             tls_min_version: TlsVersion::V1_2,
             otel: ExportConfig::default(),
             static_roots_file: None,
@@ -223,7 +238,53 @@ fn parse_addr(var: &'static str, raw: &str) -> Result<SocketAddr, ConfigError> {
     })
 }
 
+/// The dashboard has no write action but it shows the whole fleet, so a reachable one asks for a
+/// password; and a password file or host list without a dashboard is a mistake worth stopping for.
+fn check_dashboard(config: &Config) -> Result<(), ConfigError> {
+    match (&config.dashboard_addr, &config.dashboard_auth_file) {
+        (Some(addr), None) if !addr.ip().to_canonical().is_loopback() => Err(ConfigError {
+            var: "DASHBOARD_ADDR",
+            reason: format!(
+                "{addr} is not a loopback address, so DASHBOARD_AUTH_FILE is required (htpasswd lines, bcrypt or argon2); set it, or bind a loopback address and expose the dashboard through podgate"
+            )
+            .into(),
+        }),
+        (None, Some(_)) => Err(ConfigError {
+            var: "DASHBOARD_AUTH_FILE",
+            reason: "is set but DASHBOARD_ADDR is not; the dashboard is off without an address"
+                .into(),
+        }),
+        (None, None) if !config.dashboard_hosts.is_empty() => Err(ConfigError {
+            var: "DASHBOARD_HOSTS",
+            reason: "is set but DASHBOARD_ADDR is not; the dashboard is off without an address"
+                .into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 impl Config {
+    /// Loads the dashboard's credentials: the htpasswd file named by `DASHBOARD_AUTH_FILE`, or
+    /// `None` for a loopback dashboard without one.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] naming `DASHBOARD_ADDR` and `DASHBOARD_AUTH_FILE` when the address is not
+    /// loopback and there is no file, and naming `DASHBOARD_AUTH_FILE` when the file cannot be
+    /// read or holds a refused entry (never repeating a hash).
+    pub fn dashboard_auth(&self) -> Result<Option<Htpasswd>, ConfigError> {
+        check_dashboard(self)?;
+        let Some(path) = &self.dashboard_auth_file else {
+            return Ok(None);
+        };
+        crate::dashboard::load_auth(path, self.basic_auth_max_concurrent.get())
+            .map(Some)
+            .map_err(|reason| ConfigError {
+                var: "DASHBOARD_AUTH_FILE",
+                reason: format!("{}: {reason}", path.display()).into(),
+            })
+    }
+
     /// Loads the static roots: the directories named by `STATIC_ROOTS_FILE`, each opened as a
     /// directory handle, or none when it is unset.
     ///
@@ -489,6 +550,18 @@ impl Config {
                     .into(),
             })?;
         }
+        if let Some(raw) = non_empty("DASHBOARD_ADDR")? {
+            config.dashboard_addr = Some(parse_addr("DASHBOARD_ADDR", &raw)?);
+        }
+        config.dashboard_auth_file = non_empty("DASHBOARD_AUTH_FILE")?.map(PathBuf::from);
+        if let Some(raw) = non_empty("DASHBOARD_HOSTS")? {
+            config.dashboard_hosts =
+                crate::dashboard::parse_hosts(&raw).map_err(|reason| ConfigError {
+                    var: "DASHBOARD_HOSTS",
+                    reason: reason.into(),
+                })?;
+        }
+        check_dashboard(&config)?;
         if let Some(raw) = non_empty("TLS_MIN_VERSION")? {
             config.tls_min_version = match raw.as_str() {
                 "1.2" => TlsVersion::V1_2,
@@ -569,6 +642,9 @@ mod test {
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
             ("METRICS_ADDR", "127.0.0.1:9100"),
             ("METRICS_SERIES_PER_TENANT", "50"),
+            ("DASHBOARD_ADDR", "127.0.0.1:9200"),
+            ("DASHBOARD_AUTH_FILE", "/etc/podgate/dashboard.htpasswd"),
+            ("DASHBOARD_HOSTS", "dash.example, Ops.Example"),
             ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
             ("CACHE_TENANT_MAX_PERCENT", "40"),
@@ -612,6 +688,9 @@ mod test {
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
+                dashboard_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9200))),
+                dashboard_auth_file: Some(PathBuf::from("/etc/podgate/dashboard.htpasswd")),
+                dashboard_hosts: vec!["dash.example".into(), "ops.example".into()],
                 cache_tenant_max_percent: 40,
                 ocsp_allowed_hosts: vec!["ocsp.example.com".into(), "digicert.com".into()],
             })
@@ -669,6 +748,13 @@ mod test {
             ("METRICS_ADDR", " "),
             ("METRICS_SERIES_PER_TENANT", "0"),
             ("METRICS_SERIES_PER_TENANT", "many"),
+            ("DASHBOARD_ADDR", "nope"),
+            ("DASHBOARD_ADDR", " "),
+            ("DASHBOARD_ADDR", "0.0.0.0:9200"),
+            ("DASHBOARD_AUTH_FILE", " "),
+            ("DASHBOARD_AUTH_FILE", "/etc/podgate/dashboard.htpasswd"),
+            ("DASHBOARD_HOSTS", "a:80"),
+            ("DASHBOARD_HOSTS", "dash.example"),
             ("OTEL_EXPORTER_OTLP_ENDPOINT", "nope"),
             ("OTEL_MAX_SPANS_PER_SEC", "0"),
         ] {

@@ -23,6 +23,7 @@
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
 //! - [`admin`]: the admin API router and its background service.
+//! - [`dashboard`]: the read-only web UI on `DASHBOARD_ADDR`, over the overview and explain APIs, with the assets compiled in.
 //! - [`observe::metrics`]: Prometheus series per entry point, router and service, with a series cap per tenant, rendered by `GET /metrics` on the admin socket and on `METRICS_ADDR`.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
@@ -52,6 +53,7 @@ pub mod compile;
 pub mod compress;
 pub mod config;
 pub mod conflict;
+pub mod dashboard;
 pub mod entry;
 pub mod error;
 pub mod events;
@@ -119,13 +121,15 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE` or `STATIC_ROOTS_FILE` is invalid, an entry point is `tcp`
-/// or `udp` (not built yet), a TLS listener cannot be configured, the
-/// admin socket cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
+/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE` or `DASHBOARD_AUTH_FILE` is invalid, a
+/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, an entry point is `tcp` or `udp`
+/// (not built yet), a TLS listener cannot be configured, the admin socket or the dashboard
+/// address cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
     let static_roots = config.static_roots()?;
+    let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
             .with_catch_all_tenants(config.catch_all_tenants.iter().map(AsRef::as_ref))
@@ -284,6 +288,34 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             config.health_max_concurrent,
         ),
     ));
+    let admin_state = AppState::new(table.clone(), events, inflight)
+        .with_budgets(budgets)
+        .with_cache(cache)
+        .with_backends(backends)
+        .with_failures(failures)
+        .with_access_log(access_log)
+        .with_tracer(tracer)
+        .with_upstream_policy(upstream_policy.clone())
+        .with_outcomes(outcomes)
+        .with_entry_points(config.entry_points.clone())
+        .with_metrics_addr(config.metrics_addr);
+    if let Some(addr) = config.dashboard_addr {
+        let listener =
+            dashboard::bind(addr).with_context(|| format!("cannot bind DASHBOARD_ADDR {addr}"))?;
+        server.add_service(background_service(
+            "dashboard",
+            dashboard::DashboardService::new(
+                listener,
+                dashboard::Access {
+                    addr,
+                    hosts: config.dashboard_hosts.clone(),
+                    auth: dashboard_auth,
+                },
+                admin_state.clone(),
+                timeout,
+            ),
+        ));
+    }
     server.add_service(background_service(
         "dns resolver",
         service::resolve::ResolveService::new(resolver.clone(), table.clone()),
@@ -302,21 +334,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     ));
     server.add_service(background_service(
         "admin API",
-        AdminService::new(
-            admin_listener,
-            AppState::new(table, events, inflight)
-                .with_budgets(budgets)
-                .with_cache(cache)
-                .with_backends(backends)
-                .with_failures(failures)
-                .with_access_log(access_log)
-                .with_tracer(tracer)
-                .with_upstream_policy(upstream_policy)
-                .with_outcomes(outcomes)
-                .with_entry_points(config.entry_points.clone())
-                .with_metrics_addr(config.metrics_addr),
-            timeout,
-        ),
+        AdminService::new(admin_listener, admin_state, timeout),
     ));
 
     tracing::info!(
