@@ -94,6 +94,11 @@ const _: () =
 /// | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of an OTLP/HTTP collector, `http://` or `https://`; spans are POSTed to `<endpoint>/v1/traces` as protobuf. Unset: nothing is exported (requests are still sampled and their trace context propagated). Never part of a snapshot. |
 /// | `OTEL_EXPORTER_OTLP_HEADERS` | unset | `name=value,...` sent with every export, such as an API key. Values are used as written and never logged. |
 /// | `OTEL_EXPORTER_OTLP_CERTIFICATE` | unset | PEM file with the roots to trust for an `https` collector instead of the platform's. |
+/// | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | `http/protobuf` or `grpc`. With `grpc` the endpoint is `http://host:4317` or `https://host:4317` without a path and spans go as the unary `TraceService/Export` call; a plaintext endpoint must be on loopback unless `OTEL_EXPORTER_OTLP_INSECURE=true`. Never part of a snapshot. Reference: `docs/ref/tracing-grpc.md`. |
+/// | `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | unset | PEM client certificate chain and key for mutual TLS to a `grpc` collector; set together. |
+/// | `OTEL_EXPORTER_OTLP_COMPRESSION` | `none` | `gzip` or `none`; `grpc` only. |
+/// | `OTEL_EXPORTER_OTLP_INSECURE` | `false` | `true` allows a plaintext `grpc` endpoint that is not on loopback (logged at warn level at startup); `grpc` only. |
+/// | `OTEL_EXPORTER_OTLP_TIMEOUT` | `3000` | Milliseconds one export may take, connecting included, 1..=10000. |
 /// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |

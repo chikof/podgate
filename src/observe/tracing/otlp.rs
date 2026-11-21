@@ -15,6 +15,25 @@ pub struct ExportTraceServiceRequest {
     pub resource_spans: Vec<ResourceSpans>,
 }
 
+/// `ExportTraceServiceResponse`: what a collector answers an export with.
+#[derive(Clone, PartialEq, Message)]
+pub struct ExportTraceServiceResponse {
+    /// Present when the collector kept only some of the spans.
+    #[prost(message, optional, tag = "1")]
+    pub partial_success: Option<ExportTracePartialSuccess>,
+}
+
+/// The spans a collector refused out of an export it otherwise took.
+#[derive(Clone, PartialEq, Message)]
+pub struct ExportTracePartialSuccess {
+    /// How many spans were refused.
+    #[prost(int64, tag = "1")]
+    pub rejected_spans: i64,
+    /// Why, for a human.
+    #[prost(string, tag = "2")]
+    pub error_message: String,
+}
+
 /// Spans of one resource.
 #[derive(Clone, PartialEq, Message)]
 pub struct ResourceSpans {

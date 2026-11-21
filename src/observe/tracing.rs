@@ -1,4 +1,4 @@
-//! OpenTelemetry tracing: W3C trace context to the upstream, spans to an OTLP/HTTP collector,
+//! OpenTelemetry tracing: W3C trace context to the upstream, spans to an OTLP collector (HTTP or gRPC),
 //! sampling that a client cannot turn into unbounded work. Reference: `docs/ref/tracing.md`.
 //!
 //! The collector is process configuration (`OTEL_EXPORTER_OTLP_ENDPOINT`, see
@@ -13,7 +13,7 @@
 //! - `tracer`: the handle the request path and the exporter share: the per-node rate cap, a
 //!   bounded queue that drops new spans when full, the counters.
 //! - `otlp` and `export`: the protobuf messages and the background service that batches the
-//!   queue and POSTs it, never on the request path.
+//!   queue and sends it over HTTP or, in `grpc`, gRPC; never on the request path.
 //!
 //! A request is traced when its router's effective [`Policy`] exists. The verdict: with
 //! `parent_based` (the default) a valid incoming `traceparent` decides by its sampled flag, but only
@@ -26,6 +26,7 @@
 
 mod context;
 mod export;
+mod grpc;
 mod otlp;
 mod policy;
 mod span;
@@ -47,7 +48,7 @@ use crate::route;
 use context::{SpanId, TraceId};
 use span::{Kind, Span, Value};
 
-pub use export::{ExportConfig, TraceService};
+pub use export::{ExportConfig, Protocol, TraceService};
 pub use policy::{Policy, compile, effective, router_override};
 pub use tracer::{DEFAULT_MAX_SPANS_PER_SEC, QUEUE_CAPACITY, Tracer};
 

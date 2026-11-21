@@ -1,6 +1,6 @@
 # Tracing
 
-podgate continues W3C trace context, tells the upstream a child span, and exports spans over OTLP/HTTP to a collector the operator names. Tracing never waits for the collector, and a client cannot make a node export more than the operator allows. Code: `src/observe/tracing.rs` and `src/observe/tracing/{context,policy,tracer,export,otlp,span}.rs`.
+podgate continues W3C trace context, tells the upstream a child span, and exports spans over OTLP/HTTP, or OTLP/gRPC (`docs/ref/tracing-grpc.md`), to a collector the operator names. Tracing never waits for the collector, and a client cannot make a node export more than the operator allows. Code: `src/observe/tracing.rs` and `src/observe/tracing/{context,policy,tracer,export,grpc,otlp,span}.rs`.
 
 ## Process configuration
 
@@ -8,6 +8,7 @@ The collector is configured on the node, never in a snapshot: a snapshot is tena
 
 |Variable|Default|Meaning|
 |---|---|---|
+|`OTEL_EXPORTER_OTLP_PROTOCOL`|`http/protobuf`|`http/protobuf` or `grpc`. With `grpc` the endpoint, headers, TLS, compression and timeout settings are those of `docs/ref/tracing-grpc.md`.|
 |`OTEL_EXPORTER_OTLP_ENDPOINT`|unset|Base URL, `http://` or `https://`, without credentials or query. Spans are POSTed to `<endpoint>/v1/traces` as `application/x-protobuf`. Unset: no span is recorded; requests are still sampled and their context propagated.|
 |`OTEL_EXPORTER_OTLP_HEADERS`|unset|`name=value,name2=value2` sent with every export. Values are used as written (no percent-decoding) and never logged.|
 |`OTEL_EXPORTER_OTLP_CERTIFICATE`|unset|PEM roots to trust for an `https` endpoint instead of the platform's.|
@@ -18,7 +19,7 @@ An invalid value stops startup with an error naming the variable. The endpoint i
 
 ## Snapshot settings
 
-`observability.tracing` is an object (or `true` for the defaults); a router overrides it with `observability: {"tracing": false}` (or `true`). Tracing is off until a snapshot or a router turns it on. gRPC OTLP is not built.
+`observability.tracing` is an object (or `true` for the defaults); a router overrides it with `observability: {"tracing": false}` (or `true`). Tracing is off until a snapshot or a router turns it on. The wire (`OTEL_EXPORTER_OTLP_PROTOCOL`) is process configuration, never a snapshot setting.
 
 ```json
 "observability": {
@@ -81,4 +82,4 @@ Because the request path only takes a token and pushes into the queue under a sh
 
 ## Compared with Traefik and Caddy
 
-Traefik's `tracing.otlp.http {endpoint, headers, tls}` is `OTEL_EXPORTER_OTLP_ENDPOINT`, `_HEADERS` and `_CERTIFICATE` here; `sampleRate` is `sample_percent`; `serviceName` is `OTEL_SERVICE_NAME`; `capturedRequestHeaders` is `attribute_headers`. Not built: `capturedResponseHeaders`, `safeQueryParams` (the query is never recorded), gRPC, and Caddy's per-route `span` name.
+Traefik's `tracing.otlp.http {endpoint, headers, tls}` is `OTEL_EXPORTER_OTLP_ENDPOINT`, `_HEADERS` and `_CERTIFICATE` here (`tracing.otlp.grpc` is in `docs/ref/tracing-grpc.md`); `sampleRate` is `sample_percent`; `serviceName` is `OTEL_SERVICE_NAME`; `capturedRequestHeaders` is `attribute_headers`. Not built: `capturedResponseHeaders`, `safeQueryParams` (the query is never recorded), and Caddy's per-route `span` name.
