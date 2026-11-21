@@ -472,6 +472,36 @@ fn certificate_hosts_follow_the_trust_rule() {
 }
 
 #[test]
+fn the_merged_fingerprint_is_a_digest_that_follows_the_content() {
+    let merger = merger(TENANTS);
+    let fingerprint = |key: &str| {
+        let mut cert = certificate("local", "own", &["shop.acme.test"]);
+        cert.tenant = podgate_provider::TenantClaim::mapped("acme");
+        cert.certificate.key_pem = key.into();
+        let state = State {
+            apps: Vec::new(),
+            certificates: vec![cert],
+        };
+        let mut by_source = BTreeMap::new();
+        by_source.insert(Box::from("local"), state);
+        merger
+            .merge(&by_source, &BTreeSet::new())
+            .fingerprint()
+            .to_owned()
+    };
+    let first = fingerprint("key one\n");
+    assert_eq!(first, fingerprint("key one\n"));
+    assert_ne!(first, fingerprint("key two\n"));
+    assert_eq!(first.len(), 64);
+    assert!(
+        first
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert!(!first.contains("BEGIN"));
+}
+
+#[test]
 fn catch_all_needs_an_exclusive_entry_point_or_the_operator() {
     let extra = format!(
         "[[tenant]]\nid = \"wide\"\nhosts = [\"wide.test\"]\ncatch_all = true\n\n[[tenant]]\nid = \"alone\"\nhosts = [\"alone.test\"]\nexclusive_entry_points = [\"private\"]\n\n{TENANTS}"

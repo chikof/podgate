@@ -70,7 +70,7 @@ pub struct Merged {
     claims: Arc<Claims>,
 }
 
-/// The fingerprint is the canonical snapshot text, private keys included: `Debug` leaves it out.
+/// `Debug` leaves the snapshot out: it holds private keys.
 impl std::fmt::Debug for Merged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Merged")
@@ -107,7 +107,8 @@ impl Merged {
         &self.claims
     }
 
-    /// The canonical text of the snapshot at version `0`. Equal text, equal snapshot.
+    /// The SHA-256 (lowercase hex) of the canonical snapshot text at version `0`. Equal digest, equal
+    /// snapshot; the text itself, private keys included, is not kept.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -590,7 +591,7 @@ impl Run {
             ..Snapshot::default()
         };
         Merged {
-            fingerprint: canonical(&snapshot).into(),
+            fingerprint: crate::source::digest(canonical(&snapshot).as_bytes()),
             snapshot,
             findings: self.findings,
             included: self.included,

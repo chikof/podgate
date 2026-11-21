@@ -148,8 +148,12 @@ fn fingerprint(value: &impl Serialize) -> Box<str> {
     // Serializing plain data into a string cannot fail; an empty text would only make two
     // different objects compare equal, which `merge` then reports as unchanged, never wrongly
     // accepted.
-    let text = serde_json::to_vec(value).unwrap_or_default();
-    Sha256::digest(&text)
+    digest(&serde_json::to_vec(value).unwrap_or_default())
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex characters.
+pub(crate) fn digest(bytes: &[u8]) -> Box<str> {
+    Sha256::digest(bytes)
         .iter()
         .fold(String::with_capacity(64), |mut hex, byte| {
             let _ = write!(hex, "{byte:02x}");
