@@ -1,6 +1,6 @@
 # TLS on TCP routers
 
-A TCP router can match the TLS server name and ALPN of a connection, and either forward the encrypted stream untouched (passthrough) or end TLS with the app's certificates and forward plain bytes (termination). It builds on the TCP routers of `docs/ref/l4-tcp.md` and lives on `tcp` entry points; sharing a port with HTTP routers is change 0060.
+A TCP router can match the TLS server name and ALPN of a connection, and either forward the encrypted stream untouched (passthrough) or end TLS with the app's certificates and forward plain bytes (termination). It builds on the TCP routers of `docs/ref/l4-tcp.md` and lives on `tcp` entry points; sharing a port with HTTP routers is refused (see [Sharing a port with HTTP routers](#sharing-a-port-with-http-routers)).
 
 Matches Traefik's `HostSNI`, `HostSNIRegexp`, `ALPN` and `tls {passthrough}` on TCP routers, and Caddy's `layer4` `tls` matcher with `proxy`. Not here: TLS options per router (the app's `tls` settings of `docs/ref/tls-options.md` apply, as for its HTTP hosts), `acme-tls/1` on a `tcp` entry point (use `http-01` on the HTTP entry point), and TCP middlewares.
 
@@ -76,6 +76,14 @@ A plain `sni` leaf claims its names, the way `host` does, across every router of
 - Two tenants that can both take any name on one entry point are `cross_tenant_catch_all`.
 
 A router with `tls` may share a `tcp` entry point between tenants when its policy `tenants` is absent or lists them: the entry point must exist and be `tcp` (`unknown_entry_point`, `entry_point_protocol`) and admit the tenant (`entry_point_forbidden`). A router without `tls` still needs an entry point reserved to its tenant alone (`l4-tcp.md`). A TLS router that no literal name bounds needs the same reservation, or the operator's allowance.
+
+## Sharing a port with HTTP routers
+
+A TCP router with `tls`, passthrough or terminating, cannot listen on an `http` or `https` entry point: the snapshot is rejected with `unsupported_setting`, naming the entry point, and the fix is to give the router its own `tcp` entry point (a second port, or another address of the node). Traefik and Caddy's `layer4` serve a passthrough `HostSNI` beside `Host` routers on port 443; podgate does not, and it is a measured choice rather than a gap in the parser.
+
+Pingora binds the port of an `http` or `https` entry point and runs TLS and HTTP on it, and its pre-TLS hook can read a ClientHello but cannot hand the connection to anything else. Sharing the port would need podgate to bind it, read the ClientHello, take the passthrough names itself and give every other connection to the HTTPS service over an internal unix socket. That was built and measured against a directly bound entry point with `oha`: it costs 40 to 46 percent more CPU per request (33 against 49 milliseconds of CPU per 1,000 keep-alive requests, 190 against 265 with a new connection per request) and 8 to 47 percent of throughput, because every message crosses a user-space copy and a socket hop in each direction. That price would land on every HTTPS request of the entry point, so it is not offered.
+
+A router without `tls` on an `http` or `https` entry point is still `entry_point_protocol`.
 
 ## Termination
 

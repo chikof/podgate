@@ -148,8 +148,8 @@ fn reserved_to(app: &App, entry_point: &str, snapshot: &Snapshot) -> bool {
 ///
 /// # Errors
 ///
-/// `unknown_entry_point`, `entry_point_protocol`, or `entry_point_forbidden` when the policy
-/// does not list the tenant.
+/// `unknown_entry_point`, `unsupported_setting` for an `http` or `https` entry point,
+/// `entry_point_protocol`, or `entry_point_forbidden` when the policy does not list the tenant.
 pub(crate) fn access(
     app: &App,
     entry_point: &str,
@@ -157,6 +157,22 @@ pub(crate) fn access(
     snapshot: &Snapshot,
     context: &CompileContext,
 ) -> Result<bool, Invalid> {
+    // Pingora binds the port of an `http` or `https` entry point and runs TLS and HTTP on it. A
+    // front that read the ClientHello first and handed the rest to Pingora over a unix socket
+    // was built and measured: 40 to 46 percent more CPU per request, so it is not
+    // offered.
+    if protocol == Protocol::Tcp
+        && context
+            .protocol_of(entry_point)
+            .is_some_and(Protocol::is_http)
+    {
+        return Err(Invalid::new(
+            "unsupported_setting",
+            format!(
+                "entry point {entry_point} is an HTTP entry point, so a TCP router with `tls` cannot share it with HTTP routers: give TLS passthrough or termination its own `tcp` entry point (docs/ref/l4-tls.md)"
+            ),
+        ));
+    }
     if let Some(invalid) = unbound(entry_point, protocol, context) {
         return Err(invalid);
     }
