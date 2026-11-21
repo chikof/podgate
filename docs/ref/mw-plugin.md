@@ -14,8 +14,9 @@ asks it about requests and applies what it answers.
 | Can be bounded in memory, CPU and processes | no | no | yes (cgroup v2) |
 | Who may load one | the operator | the builder | the operator; a snapshot names, never loads |
 
-In-process filters with fuel and memory limits remain available as the `wasm` middleware. Spec
-0113 hosts Traefik's Go plugins as one of these plugins.
+In-process filters with fuel and memory limits remain available as the `wasm` middleware. Traefik's
+Go plugins run as one of these plugins, through the Yaegi host (built): see
+[`plugin-yaegi.md`](plugin-yaegi.md).
 
 ## Threat model
 
