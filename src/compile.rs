@@ -30,6 +30,7 @@ use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
+use crate::service::graph;
 use crate::service::mirroring::{Plan as MirrorPlan, Scope as MirrorScope, Scopes as MirrorScopes};
 use crate::service::resolve::{NameBudget, Resolver};
 use crate::service::upstream_policy::UpstreamPolicy;
@@ -918,6 +919,52 @@ fn services_of(
         shared: &shared,
         revisions: &scopes,
     };
+    // `weighted` and `failover` children are resolved the same way, then every graph is walked
+    // for cycles, depth and size.
+    let (links, graph_problems) = graph::resolve(&scoped);
+    let graphs_resolved = graph_problems.is_empty();
+    if resolvable {
+        for (at, invalid) in graph_problems {
+            rejected.push(Rejected::new(app, at, invalid));
+        }
+    }
+    let compiling = graph::Compiling {
+        scopes: &scoped,
+        links: &links,
+    };
+    if resolvable && graphs_resolved {
+        for (at, scope) in scopes.iter().enumerate() {
+            let own = scope
+                .own
+                .iter()
+                .enumerate()
+                .map(|(index, named)| (ServiceRef::Own(index), named));
+            let shared = shared
+                .iter()
+                .enumerate()
+                .map(|(index, named)| (ServiceRef::App(index), named));
+            for (service, named) in own
+                .chain(shared)
+                .filter(|(_, named)| named.service.is_graph())
+            {
+                let node = graph::Node {
+                    revision: at,
+                    service,
+                };
+                if let Err(invalid) = graph::validate(&compiling, node) {
+                    let place = match service {
+                        ServiceRef::Own(_) => {
+                            format!("revision {} service {}", scope.id, named.name)
+                        }
+                        ServiceRef::App(_) => {
+                            format!("service {} revision {}", named.name, scope.id)
+                        }
+                    };
+                    rejected.push(Rejected::new(app, place, invalid));
+                }
+            }
+        }
+    }
     let mut wiring = Vec::with_capacity(app.revisions.len());
     for (at, revision) in app.revisions.iter().enumerate() {
         let own = &owns[at];
@@ -959,11 +1006,11 @@ fn services_of(
             mirrors.push(plan);
         }
         let backed = routes.iter().flatten().any(|route| {
-            match route {
-                ServiceRef::Own(index) => own.get(*index),
-                ServiceRef::App(index) => shared.get(*index),
-            }
-            .is_some_and(|named| named.service.is_backed())
+            let node = graph::Node {
+                revision: at,
+                service: *route,
+            };
+            graph::backed(&compiling, node, 0)
         });
         wiring.push((routes, mirrors, backed));
     }
@@ -971,9 +1018,10 @@ fn services_of(
         .revisions
         .iter()
         .zip(owns)
+        .zip(links)
         .zip(wiring)
-        .map(|((revision, own), (routes, mirrors, backed))| {
-            CompiledRevision::new(revision, own, routes, mirrors, backed)
+        .map(|(((revision, own), links), (routes, mirrors, backed))| {
+            CompiledRevision::new(revision, own, routes, mirrors, links, backed)
         })
         .collect();
     (shared, revisions)

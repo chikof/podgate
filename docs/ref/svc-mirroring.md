@@ -18,7 +18,7 @@ exactly as if the router had named `service`.
 
 | Field | Meaning |
 |---|---|
-| `service` | The service that answers: a `loadbalancer` of the revision the request picked, else of the app. |
+| `service` | The service that answers: a `loadbalancer`, `weighted` or `failover` service of the revision the request picked, else of the app. |
 | `mirrors[].service` | Where a copy goes: a `loadbalancer` of the same app, `name` (in the revision the request picked, else the app) or `name@revision` (in that revision, else the app), with no `h2c://` server (a copy is HTTP/1.1). One to eight entries. |
 | `mirrors[].percent` | The share of requests copied, `0` to `100`, with up to four decimals (`0.1` is one in a thousand). `0` copies nothing and `100` copies everything, exactly. Each mirror is sampled on its own. |
 | `mirror_body` | Send the request body to the mirrors too. Default `false`: the copy has the method, path and headers, and an empty body. |
@@ -28,7 +28,7 @@ exactly as if the router had named `service`.
 
 ## Compile-time rules
 
-- `service` and every mirror must be a `loadbalancer`. A `static` service is `invalid_service`
+- `service` must be a `loadbalancer`, `weighted` or `failover` service, every mirror a `loadbalancer` (copies are made by dialling one server; a `weighted` or `failover` service as a mirror is `invalid_service`). A `static` service is `invalid_service`
   both as the mirrored service and as a mirror: a copy of a request needs a server to dial.
   Another `mirroring` service is `invalid_service`, one that mirrors to itself `service_cycle`.
 - Names resolve per revision when the snapshot compiles. A name nothing defines is

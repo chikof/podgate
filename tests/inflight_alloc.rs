@@ -73,6 +73,7 @@ fn inflight_no_alloc() {
         router: 0,
         revision: 0,
         upstream: "127.0.0.1:9000".parse().expect("addr"),
+        path: podgate::service::graph::Path::default(),
         pinned: false,
     };
     // Warm up: first use may initialise lazily.

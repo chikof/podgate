@@ -48,6 +48,7 @@ use arc_swap::ArcSwap;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::graph::Readiness;
 use super::health::{self, Check};
 use super::lb::{Balancer, MAX_SERVICE_POINTS, PickCx};
 use super::outlier::Passive;
@@ -575,6 +576,28 @@ impl LoadBalancer {
     #[must_use]
     pub fn skips_tls_verification(&self) -> bool {
         self.transport.insecure_skip_verify() && self.entries.iter().any(|entry| entry.tls)
+    }
+
+    /// How the service can take `cx`: `Ready` when some server that has a weight is allowed,
+    /// `Asleep` when it declares no server at all, `Down` when it declares servers and none may
+    /// take the request. A server named by DNS whose name has no address yet is declared: the
+    /// service is `Down` (it answers `503` and wakes nothing), as `is_backed` says. The rule a
+    /// `weighted` or `failover` parent and the revision split share.
+    #[must_use]
+    pub fn readiness(&self, cx: PickCx<'_>) -> Readiness {
+        if self.entries.is_empty() {
+            Readiness::Asleep
+        } else if self
+            .live
+            .load()
+            .servers
+            .iter()
+            .any(|server| server.weight > 0 && cx.allows(server))
+        {
+            Readiness::Ready
+        } else {
+            Readiness::Down
+        }
     }
 
     /// The address of the server a new request goes to, with the [`Lease`] that counts the

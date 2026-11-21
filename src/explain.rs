@@ -17,8 +17,9 @@ use crate::entry::Protocol;
 use crate::host;
 use crate::pipeline;
 use crate::router::{Candidate, Matched as RouterMatch, View, path};
-use crate::service::TransportSummary;
+use crate::service::graph;
 use crate::service::outlier;
+use crate::service::{PickCx, TransportSummary};
 use crate::table::RoutingTable;
 
 /// What a caller asks about: a request as the proxy would see it.
@@ -193,6 +194,12 @@ struct RevisionView<'a> {
     /// The servers of the matched router's service in this revision; empty when the revision
     /// does not define it.
     servers: Vec<ServerView<'a>>,
+    /// For a `weighted` or `failover` service: the path a request would take through its graph
+    /// now (`weighted -> failover -> web-v2`) and every node with its weight, its effective
+    /// weight and whether it is ready. The servers are those of the `loadbalancer`
+    /// services in the graph, listed in `GET /v1/overview`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<graph::Described<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -423,6 +430,7 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
                             .collect()
                     })
                     .unwrap_or_default(),
+                graph: app.describe_graph(index, best.matched.router, PickCx::new(&request)),
             })
             .collect(),
         canary: app.canary(),

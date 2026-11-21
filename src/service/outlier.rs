@@ -227,7 +227,10 @@ impl Passive {
 fn passive_of(service: &Service) -> Option<&Passive> {
     match service {
         Service::LoadBalancer(balancer) => balancer.passive(),
-        Service::Static(_) | Service::Mirroring(_) => None,
+        Service::Static(_)
+        | Service::Mirroring(_)
+        | Service::Weighted(_)
+        | Service::Failover(_) => None,
     }
 }
 
@@ -242,7 +245,7 @@ fn target(ctx: &Ctx) -> Option<(&Passive, &Service, &Lease)> {
     let service = ctx
         .table
         .app(selected.app)
-        .and_then(|app| app.service(selected.revision, selected.router))?;
+        .and_then(|app| app.leaf(&selected))?;
     Some((passive_of(service)?, service, lease))
 }
 

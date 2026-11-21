@@ -118,6 +118,8 @@ pub struct ServiceState {
     /// The state of each address of each server named by DNS, by the server's URL: they are not
     /// in the registry's server keys, which name one state per URL.
     named: Mutex<HashMap<NamedKey, Arc<ServerState>>>,
+    /// [`now_ms`] time until which a `failover` service keeps using its fallback; `0`: no hold.
+    hold_until_ms: AtomicU64,
 }
 
 /// A server named by DNS: its URL and one of the addresses the name resolved to.
@@ -131,6 +133,7 @@ impl ServiceState {
             next: AtomicU64::new(seed),
             key: RandomState::new(),
             named: Mutex::default(),
+            hold_until_ms: AtomicU64::new(0),
         }
     }
 
@@ -152,6 +155,17 @@ impl ServiceState {
                     .iter()
                     .any(|server| server.url == *url && server.addr == *addr)
             });
+    }
+
+    /// The [`now_ms`] time until which a `failover` service keeps its fallback in use.
+    #[must_use]
+    pub fn held_until(&self) -> u64 {
+        self.hold_until_ms.load(Ordering::Relaxed)
+    }
+
+    /// Keeps the fallback of a `failover` service in use until `ms`; never shortens a hold.
+    pub fn hold_until(&self, ms: u64) {
+        self.hold_until_ms.fetch_max(ms, Ordering::Relaxed);
     }
 
     /// A keyed hash (SipHash) of `value` under a secret the service keeps for its lifetime: the
@@ -281,7 +295,7 @@ impl Registry {
         for app in apps {
             let app_id: Box<str> = app.id().into();
             for (revision, named) in app.services_mut() {
-                match &mut named.service {
+                let (fingerprint, shared) = match &mut named.service {
                     Service::LoadBalancer(balancer) => {
                         let key = Key {
                             app: app_id.clone(),
@@ -309,9 +323,25 @@ impl Registry {
                             }
                             kept.servers.insert(key, Arc::clone(&server.state));
                         });
+                        continue;
                     }
-                    Service::Static(_) | Service::Mirroring(_) => {}
+                    Service::Weighted(weighted) => weighted.state_mut(),
+                    Service::Failover(failover) => failover.state_mut(),
+                    Service::Static(_) | Service::Mirroring(_) => continue,
+                };
+                // A `weighted` or `failover` service has no server: its state is its counter
+                // and its fallback hold.
+                let key = Key {
+                    app: app_id.clone(),
+                    revision: revision.map(Into::into),
+                    service: named.name.clone(),
+                    server: None,
+                    fingerprint,
+                };
+                if let Some(old) = settled.services.get(&key) {
+                    *shared = Arc::clone(old);
                 }
+                kept.services.insert(key, Arc::clone(shared));
             }
         }
         *settled = kept;

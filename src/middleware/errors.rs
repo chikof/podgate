@@ -252,6 +252,22 @@ fn has_h2c_server(declared: &Declared) -> bool {
 /// every revision that takes or may still take requests defines it itself or inherits it from the
 /// app, and a `name@revision` names a revision that has it.
 fn check_target(app: &App, target: &Target) -> Result<(), Invalid> {
+    let graph = |services: &[Declared]| {
+        services.iter().any(|declared| {
+            *declared.name == *target.name && matches!(&*declared.kind, "weighted" | "failover")
+        })
+    };
+    if graph(&app.services)
+        || app
+            .revisions
+            .iter()
+            .any(|revision| graph(&revision.services))
+    {
+        return Err(invalid(format!(
+            "service {} is a weighted or failover service: a page comes from one loadbalancer",
+            target.name
+        )));
+    }
     let named = |services: &[Declared]| {
         services
             .iter()

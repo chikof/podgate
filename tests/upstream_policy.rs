@@ -297,6 +297,7 @@ fn unseen_address(policy: UpstreamPolicy, address: &str) -> (Gateway, RoutingTab
         router: 0,
         revision: 0,
         upstream: address.parse().expect("address"),
+        path: podgate::service::graph::Path::default(),
         pinned: false,
     };
     (gateway, table, selected)

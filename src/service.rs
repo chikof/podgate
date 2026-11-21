@@ -1,10 +1,11 @@
 //! Services: where a routed request goes. A router names a service; the service picks a server.
 //!
-//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer`, `static` and
-//! `mirroring` are built (a `static` service has no server: it answers from an operator-declared
-//! directory; a `mirroring` service has none either: the table routes to its main service and
-//! hands the copies to [`mirroring`]); `weighted` and `failover` are planned and refused with
-//! `service_not_built`; any other type is `invalid_service`. A router's service is looked up in the revision the request
+//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer`, `static`,
+//! `mirroring`, `weighted` and `failover` are built (a `static` service has no server: it answers
+//! from an operator-declared directory; a `mirroring` service has none either: the table routes
+//! to its main service and hands the copies to [`mirroring`]; a `weighted` or `failover` service
+//! has none of its own: it picks among other services, see [`graph`]); any other type is
+//! `invalid_service`. A router's service is looked up in the revision the request
 //! picked, then in the app's own services. Each kind lives in its own file:
 //!
 //! | Type | File |
@@ -28,6 +29,7 @@
 //! one arm in each of its `match` statements, and its name removed from `UNBUILT`.
 
 mod failover;
+pub mod graph;
 pub mod health;
 pub mod lb;
 mod loadbalancer;
@@ -49,6 +51,7 @@ use pingora::upstreams::peer::HttpPeer;
 use podgate_model::{Declared, SkewSecret};
 use resolve::Resolver;
 
+pub use failover::Failover;
 pub use lb::PickCx;
 pub(crate) use lb::RingBudget;
 pub use loadbalancer::{LoadBalancer, Server, Servers};
@@ -64,14 +67,21 @@ pub use sticky::Sticky;
 pub use transport::{
     Named as NamedTransport, Summary as TransportSummary, Transport, Upstream, timed_out,
 };
+pub use weighted::Weighted;
 
 /// Service types that are planned and not built yet.
-pub const UNBUILT: [&str; 2] = ["weighted", "failover"];
+pub const UNBUILT: [&str; 0] = [];
 
 /// Every service type `Service::compile` builds. `compile` refuses a type that is not listed here
 /// before it looks at its arms, so an arm for a new type is dead until its name is listed; the
 /// schema guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
-pub const BUILT: [&str; 3] = ["loadbalancer", "static", "mirroring"];
+pub const BUILT: [&str; 5] = [
+    "loadbalancer",
+    "static",
+    "mirroring",
+    "weighted",
+    "failover",
+];
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built type, whose
 /// configuration struct derives `schemars::JsonSchema`. Keep one entry per line, a blank line
@@ -93,6 +103,10 @@ schemas! {
     "static" => static_files::Config,
 
     "mirroring" => mirroring::Config,
+
+    "weighted" => weighted::Config,
+
+    "failover" => failover::Config,
 }
 
 /// The `type` of an upstream transport in a snapshot and its JSON Schema.
@@ -110,6 +124,10 @@ pub enum Service {
     Static(Arc<StaticSite>),
     /// `mirroring`: copies of a share of the requests of another service. Has no server.
     Mirroring(Box<Mirroring>),
+    /// `weighted`: a weighted choice among other services. Has no server of its own.
+    Weighted(Box<Weighted>),
+    /// `failover`: a primary service and a fallback. Has no server of its own.
+    Failover(Box<Failover>),
 }
 
 /// A service and the name it was declared under.
@@ -155,6 +173,12 @@ impl Service {
             "mirroring" => {
                 Mirroring::compile(declared).map(|mirroring| Self::Mirroring(Box::new(mirroring)))
             }
+            "weighted" => {
+                Weighted::compile(declared).map(|weighted| Self::Weighted(Box::new(weighted)))
+            }
+            "failover" => {
+                Failover::compile(declared).map(|failover| Self::Failover(Box::new(failover)))
+            }
             other => Err(Invalid::new(
                 "invalid_service",
                 format!("unknown service type {other}"),
@@ -169,6 +193,8 @@ impl Service {
             Self::LoadBalancer(_) => "loadbalancer",
             Self::Static(_) => "static",
             Self::Mirroring(_) => "mirroring",
+            Self::Weighted(_) => "weighted",
+            Self::Failover(_) => "failover",
         }
     }
 
@@ -177,7 +203,7 @@ impl Service {
     pub fn algorithm(&self) -> Option<&'static str> {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.algorithm()),
-            Self::Static(_) | Self::Mirroring(_) => None,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
 
@@ -186,7 +212,7 @@ impl Service {
     pub fn has_health_check(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.health_check().is_some(),
-            Self::Static(_) | Self::Mirroring(_) => false,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
         }
     }
 
@@ -195,7 +221,7 @@ impl Service {
     pub fn has_outlier_detection(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.passive().is_some(),
-            Self::Static(_) | Self::Mirroring(_) => false,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
         }
     }
 
@@ -206,7 +232,9 @@ impl Service {
     pub fn servers(&self) -> Servers {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
-            Self::Static(_) | Self::Mirroring(_) => Servers::default(),
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => {
+                Servers::default()
+            }
         }
     }
 
@@ -216,7 +244,7 @@ impl Service {
     pub fn ring_points(&self) -> u64 {
         match self {
             Self::LoadBalancer(balancer) => balancer.ring_points(),
-            Self::Static(_) | Self::Mirroring(_) => 0,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => 0,
         }
     }
 
@@ -225,7 +253,8 @@ impl Service {
     pub fn sticky(&self) -> Option<&Sticky> {
         match self {
             Self::LoadBalancer(balancer) => balancer.sticky(),
-            Self::Static(_) | Self::Mirroring(_) => None,
+            Self::Weighted(weighted) => weighted.sticky(),
+            Self::Static(_) | Self::Mirroring(_) | Self::Failover(_) => None,
         }
     }
 
@@ -242,7 +271,8 @@ impl Service {
     ) -> Result<(), Invalid> {
         match self {
             Self::LoadBalancer(balancer) => balancer.bind_sticky(secret, app, service),
-            Self::Static(_) | Self::Mirroring(_) => Ok(()),
+            Self::Weighted(weighted) => weighted.bind_sticky(secret, app, service),
+            Self::Static(_) | Self::Mirroring(_) | Self::Failover(_) => Ok(()),
         }
     }
 
@@ -252,15 +282,16 @@ impl Service {
         !self.servers().is_empty()
     }
 
-    /// Whether the service can answer a request: a load balancer with a server declared (one
-    /// whose name has no address yet is still backed: it answers `503`, it is not asleep), or a
-    /// static service, which answers from its directory and never sleeps.
+    /// Whether the service can answer a request on its own: a load balancer with a server declared
+    /// (one whose name has no address yet is still backed: it answers `503`, it is not asleep), or
+    /// a static service, which answers from its directory and never sleeps. A `weighted` or
+    /// `failover` service is never backed by itself: `graph::backed` asks its children.
     #[must_use]
     pub fn is_backed(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.is_backed(),
             Self::Static(_) => true,
-            Self::Mirroring(_) => false,
+            Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
         }
     }
 
@@ -268,7 +299,7 @@ impl Service {
     pub fn dns_names(&self) -> impl Iterator<Item = &str> {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.dns_names()),
-            Self::Static(_) | Self::Mirroring(_) => None,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
         .into_iter()
         .flatten()
@@ -280,7 +311,23 @@ impl Service {
     pub fn refresh(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.refresh(),
-            Self::Static(_) | Self::Mirroring(_) => false,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
+        }
+    }
+
+    /// Whether the service is a `weighted` or `failover` service: it picks among other services.
+    #[must_use]
+    pub fn is_graph(&self) -> bool {
+        matches!(self, Self::Weighted(_) | Self::Failover(_))
+    }
+
+    /// The children a `weighted` or `failover` service declares, empty for any other type.
+    #[must_use]
+    pub fn children(&self) -> &[graph::ChildRef] {
+        match self {
+            Self::Weighted(weighted) => weighted.children(),
+            Self::Failover(failover) => failover.children(),
+            Self::LoadBalancer(_) | Self::Static(_) | Self::Mirroring(_) => &[],
         }
     }
 
@@ -289,7 +336,9 @@ impl Service {
     pub fn as_static(&self) -> Option<&Arc<StaticSite>> {
         match self {
             Self::Static(site) => Some(site),
-            Self::LoadBalancer(_) | Self::Mirroring(_) => None,
+            Self::LoadBalancer(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => {
+                None
+            }
         }
     }
 
@@ -298,7 +347,7 @@ impl Service {
     pub fn as_mirroring(&self) -> Option<&Mirroring> {
         match self {
             Self::Mirroring(mirroring) => Some(mirroring),
-            Self::LoadBalancer(_) | Self::Static(_) => None,
+            Self::LoadBalancer(_) | Self::Static(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
 
@@ -308,7 +357,7 @@ impl Service {
     pub fn transport(&self) -> Option<&Transport> {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.transport()),
-            Self::Static(_) | Self::Mirroring(_) => None,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
 
@@ -322,7 +371,7 @@ impl Service {
     ) -> Option<R> {
         match self {
             Self::LoadBalancer(balancer) => balancer.with_upstream(addr, f),
-            Self::Static(_) | Self::Mirroring(_) => None,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
 
@@ -340,19 +389,21 @@ impl Service {
     pub fn skips_tls_verification(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.skips_tls_verification(),
-            Self::Static(_) | Self::Mirroring(_) => false,
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => false,
         }
     }
 
     /// The address of the server a new request goes to and the [`Lease`] that counts the request
     /// on it, or `None` when no server can take it. Keep the lease until the request is done.
+    /// A `weighted` or `failover` service picks nothing by itself: its children are in the
+    /// revision's links, and [`graph::pick`] walks them.
     #[must_use]
     pub fn pick(&self, cx: PickCx<'_>) -> Option<(SocketAddr, Lease)> {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
             Self::Static(site) => Some((NO_SERVER, site.lease())),
             // The table never routes a request to a mirroring service: it routes to its main.
-            Self::Mirroring(_) => None,
+            Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
         }
     }
 }

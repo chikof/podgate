@@ -8,7 +8,7 @@
 //! ```
 //!
 //! The mirroring service has no server of its own. A router that names it is answered by
-//! `service` (a `loadbalancer` of the revision the request picked, else of the app), exactly as
+//! `service` (a `loadbalancer`, `weighted` or `failover` service of the revision the request picked, else of the app), exactly as
 //! if the router had named that service; the copies are an addition that can never change the
 //! answer. A mirror target is a `loadbalancer` of the same app, `name` (in the revision the
 //! request picked) or `name@revision`; a `static` service or another `mirroring` service is
@@ -142,7 +142,7 @@ pub(crate) struct Scope<'a> {
 
 impl Scopes<'_> {
     /// `name` as revision `revision` sees it: its own service, else the app's.
-    fn find(&self, revision: usize, name: &str) -> Option<ServiceRef> {
+    pub(crate) fn find(&self, revision: usize, name: &str) -> Option<ServiceRef> {
         let own = self.revisions.get(revision)?.own;
         own.iter()
             .position(|named| &*named.name == name)
@@ -155,7 +155,7 @@ impl Scopes<'_> {
             })
     }
 
-    fn get(&self, revision: usize, found: ServiceRef) -> Option<&Named> {
+    pub(crate) fn get(&self, revision: usize, found: ServiceRef) -> Option<&Named> {
         match found {
             ServiceRef::Own(index) => self.revisions.get(revision)?.own.get(index),
             ServiceRef::App(index) => self.shared.get(index),
@@ -339,7 +339,7 @@ impl Mirroring {
                 )))
             };
         };
-        self.check_kind(scopes, at, main, &self.main)?;
+        self.check_kind(scopes, at, main, &self.main, true)?;
         let mut targets = Vec::with_capacity(self.mirrors.len());
         for mirror in &self.mirrors {
             let (revision, label) = match &mirror.revision {
@@ -363,7 +363,7 @@ impl Mirroring {
                     mirror.name
                 )));
             };
-            self.check_kind(scopes, revision, service, &mirror.name)?;
+            self.check_kind(scopes, revision, service, &mirror.name, false)?;
             if scopes
                 .get(revision, service)
                 .is_some_and(|named| named.service.servers().iter().any(|server| server.h2c))
@@ -387,19 +387,27 @@ impl Mirroring {
         }))
     }
 
-    /// The service `found` (named `name`) must be a `loadbalancer`.
+    /// The service `found` (named `name`) must be a `loadbalancer`; the main service may also be
+    /// a `weighted` or `failover` one (`graph_ok`), because the router that names the mirroring
+    /// service is still the one the posture checks see.
     fn check_kind(
         &self,
         scopes: &Scopes<'_>,
         revision: usize,
         found: ServiceRef,
         name: &str,
+        graph_ok: bool,
     ) -> Result<(), Invalid> {
         let Some(named) = scopes.get(revision, found) else {
             return Err(unknown(format!("service {name} is gone")));
         };
         match &named.service {
             Service::LoadBalancer(_) => Ok(()),
+            Service::Weighted(_) | Service::Failover(_) if graph_ok => Ok(()),
+            Service::Weighted(_) | Service::Failover(_) => Err(invalid(format!(
+                "service {name} is a {} service: a mirror is one loadbalancer, so a weighted or failover service is not a mirror",
+                named.service.kind()
+            ))),
             Service::Static(_) => Err(invalid(format!(
                 "service {name} is a static service: a copy of a request needs a server to dial, so a static service is neither mirrored nor a mirror"
             ))),

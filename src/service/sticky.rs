@@ -39,7 +39,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::Sha256;
 
-use super::{PickCx, Server};
+use super::{PickCx, Server, Service};
 use crate::compile::Invalid;
 use crate::route::Selected;
 use crate::table::RoutingTable;
@@ -48,6 +48,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Name of the cookie when the configuration gives none.
 pub const DEFAULT_NAME: &str = "__podgate_srv";
+/// Name of the cookie of a `weighted` service when the configuration gives none; it differs from
+/// [`DEFAULT_NAME`] so a parent and its children do not share a cookie.
+pub const DEFAULT_PARENT_NAME: &str = "__podgate_svc";
 
 /// The name of the revision cookie of skew protection, which a sticky cookie must not take.
 const REVISION_COOKIE: &str = "__podgate_rev";
@@ -145,9 +148,15 @@ impl Sticky {
     /// `secure: true`, a `max_age_secs` of `0`, or a `path` that is not an absolute path free of
     /// spaces, `;` and control characters.
     pub(super) fn compile(declared: &Value) -> Result<Self, Invalid> {
+        Self::compile_as(declared, DEFAULT_NAME)
+    }
+
+    /// [`Self::compile`] with `default_name` as the cookie's name when the declaration gives
+    /// none: a `weighted` parent and its children must not share a cookie.
+    pub(super) fn compile_as(declared: &Value, default_name: &str) -> Result<Self, Invalid> {
         let config: Config = serde_json::from_value(declared.clone()).map_err(invalid)?;
         let cookie = config.cookie;
-        let name = cookie.name.unwrap_or_else(|| DEFAULT_NAME.to_owned());
+        let name = cookie.name.unwrap_or_else(|| default_name.to_owned());
         if !is_token(&name) {
             return Err(invalid(format!(
                 "cookie name {name:?} is not a cookie name"
@@ -244,14 +253,36 @@ impl Sticky {
     /// may take the request. `None` (the algorithm picks) when the service is not bound, there
     /// is no cookie, no server has its tag, or the pinned one is unavailable, tried or without
     /// weight.
-    #[must_use]
     pub(super) fn pinned(&self, cx: PickCx<'_>, servers: &[Server]) -> Option<usize> {
+        self.pinned_by(
+            cx.request,
+            servers.len(),
+            |key, index| Some(keyed_for(key, servers.get(index)?)),
+            |index| {
+                servers
+                    .get(index)
+                    .is_some_and(|server| cx.allows(server) && server.weight > 0)
+            },
+        )
+    }
+
+    /// The index below `count` of the subject whose tag the request's cookie carries, among those
+    /// `usable` accepts. `keyed` is the MAC of a subject: a server of a load balancer
+    /// (`keyed_for`), a child of a `weighted` service by the name it is declared under
+    /// (`keyed_by_label`).
+    pub(super) fn pinned_by(
+        &self,
+        request: &RequestHeader,
+        count: usize,
+        keyed: impl Fn(&HmacSha256, usize) -> Option<HmacSha256>,
+        mut usable: impl FnMut(usize) -> bool,
+    ) -> Option<usize> {
         let key = self.key.as_ref()?;
-        for value in cookie_values(cx.request, &self.name) {
+        for value in cookie_values(request, &self.name) {
             let Some(tag) = decode(value) else { continue };
-            let found = servers.iter().position(|server| {
-                let mac = keyed_for(key, server);
-                mac.verify_truncated_left(&tag).is_ok() && cx.allows(server) && server.weight > 0
+            let found = (0..count).find(|index| {
+                keyed(key, *index).is_some_and(|mac| mac.verify_truncated_left(&tag).is_ok())
+                    && usable(*index)
             });
             if found.is_some() {
                 return found;
@@ -263,7 +294,16 @@ impl Sticky {
     /// The `Set-Cookie` value that pins to `server`, or `None` when the service is not bound or
     /// `request` already carries that cookie. `tls` adds `Secure`.
     fn header(&self, request: &RequestHeader, server: &Server, tls: bool) -> Option<String> {
-        let mac = keyed_for(self.key.as_ref()?, server);
+        self.header_with(request, keyed_for(self.key.as_ref()?, server), tls)
+    }
+
+    /// The `Set-Cookie` value that pins to the child `label` of a `weighted` service; see
+    /// [`Self::header`].
+    fn header_for(&self, request: &RequestHeader, label: &str, tls: bool) -> Option<String> {
+        self.header_with(request, keyed_by_label(self.key.as_ref()?, label), tls)
+    }
+
+    fn header_with(&self, request: &RequestHeader, mac: HmacSha256, tls: bool) -> Option<String> {
         let tag = mac.finalize().into_bytes();
         let value = URL_SAFE_NO_PAD.encode(tag.get(..TAG_LEN)?);
         if cookie_values(request, &self.name).any(|presented| presented == value) {
@@ -272,6 +312,13 @@ impl Sticky {
         let secure = if self.secure || tls { "; Secure" } else { "" };
         Some(format!("{}={value}{}{secure}", self.name, self.attributes))
     }
+}
+
+/// The MAC keyed for the child `label` of a `weighted` service.
+pub(super) fn keyed_by_label(key: &HmacSha256, label: &str) -> HmacSha256 {
+    let mut mac = key.clone();
+    mac.update(label.as_bytes());
+    mac
 }
 
 /// The MAC keyed for `server`: its URL, and for a server named by DNS its address too, since
@@ -324,9 +371,11 @@ fn publicly_cacheable(response: &ResponseHeader) -> bool {
         .any(|directive| directive.trim().eq_ignore_ascii_case("public"))
 }
 
-/// Pins the client to the server that answered, when the routed service is sticky and the
-/// request did not already carry that pin. A no-op without a route, on a service that is not
-/// sticky and on a `Cache-Control: public` response. The cookie is `Secure` on TLS connections.
+/// Pins the client to what answered it, for every sticky service the request went through: a
+/// `weighted` parent pins the child it chose, a `loadbalancer` the server. A request that
+/// already carried a pin gets no new one for it. A no-op without a route, on a service that is
+/// not sticky and on a `Cache-Control: public` response. The cookie is `Secure` on TLS
+/// connections.
 ///
 /// # Errors
 ///
@@ -340,30 +389,35 @@ pub fn set_cookie(
     let Some(selected) = selected else {
         return Ok(());
     };
-    let Some(service) = table
-        .app(selected.app)
-        .and_then(|app| app.service(selected.revision, selected.router))
-    else {
+    let Some(app) = table.app(selected.app) else {
         return Ok(());
     };
-    let Some(sticky) = service.sticky() else {
-        return Ok(());
-    };
-    if publicly_cacheable(response) {
-        return Ok(());
-    }
-    let servers = service.servers();
-    let Some(server) = servers
-        .iter()
-        .find(|server| server.addr == selected.upstream)
-    else {
-        return Ok(());
-    };
-    let tls = session
-        .digest()
-        .is_some_and(|digest| digest.ssl_digest.is_some());
-    if let Some(value) = sticky.header(session.req_header(), server, tls) {
-        response.append_header("set-cookie", value)?;
+    for (named, chosen) in app.trail(selected) {
+        let Some(sticky) = named.service.sticky() else {
+            continue;
+        };
+        if publicly_cacheable(response) {
+            return Ok(());
+        }
+        let request = session.req_header();
+        let tls = session
+            .digest()
+            .is_some_and(|digest| digest.ssl_digest.is_some());
+        let value = match (&named.service, chosen) {
+            (Service::Weighted(weighted), Some(index)) => weighted
+                .child_label(index)
+                .and_then(|label| sticky.header_for(request, label, tls)),
+            _ => {
+                let servers = named.service.servers();
+                servers
+                    .iter()
+                    .find(|server| server.addr == selected.upstream)
+                    .and_then(|server| sticky.header(request, server, tls))
+            }
+        };
+        if let Some(value) = value {
+            response.append_header("set-cookie", value)?;
+        }
     }
     Ok(())
 }

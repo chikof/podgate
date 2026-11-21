@@ -970,7 +970,7 @@ impl ProxyHttp for Gateway {
         let service = ctx
             .table
             .app(selected.app)
-            .and_then(|app| app.service(selected.revision, selected.router))
+            .and_then(|app| app.leaf(&selected))
             .ok_or_else(outside)?;
         // The servers of a name follow its DNS answers: the one picked may have just left.
         let (mut peer, pool_key) = service

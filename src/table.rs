@@ -32,6 +32,8 @@ use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
 use crate::observe::tracing as trace;
 use crate::router::{CompiledRouter, Index, Matched};
+use crate::service::graph::{self, Graph, Link, Links, Node, Path, Readiness, Trail};
+use crate::service::state::now_ms;
 use crate::service::{self, Lease, PickCx};
 use crate::tls::{CertError, CertStore, Options};
 use pingora::upstreams::peer::HttpPeer;
@@ -128,7 +130,10 @@ pub struct CompiledRevision {
     routes: Box<[Option<ServiceRef>]>,
     /// For each router, in order: where the copies go when its service is a `mirroring` one.
     mirrors: Box<[Option<Arc<service::mirroring::Plan>>]>,
-    /// Whether some router's service here can answer: it has a server, or is a static service.
+    /// The children of the revision's `weighted` and `failover` services, resolved in its scope.
+    links: Links,
+    /// Whether some router's service here can answer: it has a server below it, or is a static
+    /// service.
     backed: bool,
 }
 
@@ -138,6 +143,7 @@ impl CompiledRevision {
         services: Vec<service::Named>,
         routes: Vec<Option<ServiceRef>>,
         mirrors: Vec<Option<Arc<service::mirroring::Plan>>>,
+        links: Links,
         backed: bool,
     ) -> Self {
         Self {
@@ -148,6 +154,7 @@ impl CompiledRevision {
             services: services.into_boxed_slice(),
             routes: routes.into_boxed_slice(),
             mirrors: mirrors.into_boxed_slice(),
+            links,
             backed,
         }
     }
@@ -251,6 +258,9 @@ pub struct Pick {
     pub upstream: SocketAddr,
     /// Counts the request on the backend until dropped; keep it for the life of the request.
     pub lease: Lease,
+    /// The children chosen on the way there when the router's service is a `weighted` or
+    /// `failover` one; empty for a plain service.
+    pub path: Path,
 }
 
 impl CompiledApp {
@@ -584,13 +594,70 @@ impl CompiledApp {
             .collect()
     }
 
-    fn take(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {
-        let (upstream, lease) = self.service(revision, router)?.pick(cx)?;
+    /// Where the router's service in revision `revision` starts: a `ServiceRef` of the revision's
+    /// scope. `None` when the revision does not define it.
+    pub(crate) fn root(&self, revision: usize, router: usize) -> Option<Node> {
+        let service = (*self.revisions.get(revision)?.routes.get(router)?)?;
+        Some(Node { revision, service })
+    }
+
+    /// Whether revision `revision` has a server that may take `cx` for `router`: the one rule the
+    /// revision split, `weighted` and `failover` share.
+    fn ready(&self, revision: usize, router: usize, cx: PickCx<'_>, now: u64) -> bool {
+        self.root(revision, router)
+            .is_some_and(|root| graph::readiness(self, root, cx, now, 0) == Readiness::Ready)
+    }
+
+    /// The server router `router`'s service takes the request to in revision `revision`, through
+    /// `weighted` and `failover` services when it is one: the pick that
+    /// [`Self::pick`] makes in the revision it chose, and that a retry repeats with the servers it
+    /// tried in `cx.excluded`. `None` when nothing below the service may take the request.
+    #[must_use]
+    pub fn pick_in(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {
+        let root = self.root(revision, router)?;
+        let mut path = Path::default();
+        let (upstream, lease) = graph::pick(self, root, cx, now_ms(), &mut path, 0)?;
         Some(Pick {
             revision,
             upstream,
             lease,
+            path,
         })
+    }
+
+    fn take(&self, revision: usize, router: usize, cx: PickCx<'_>) -> Option<Pick> {
+        self.pick_in(revision, router, cx)
+    }
+
+    /// The services a request went through, from its router's service to the one whose server
+    /// took it.
+    #[must_use]
+    pub fn trail(&self, selected: &crate::route::Selected) -> Trail<'_> {
+        Trail {
+            graph: self,
+            node: self.root(selected.revision, selected.router),
+            path: selected.path,
+            at: 0,
+        }
+    }
+
+    /// The service whose server took the request `selected`: the router's service, or the
+    /// `loadbalancer` below it when that is a `weighted` or `failover` service.
+    #[must_use]
+    pub fn leaf(&self, selected: &crate::route::Selected) -> Option<&service::Service> {
+        self.trail(selected).last().map(|(named, _)| &named.service)
+    }
+
+    /// The graph below router `router`'s service in revision `revision`, as `GET /v1/explain`
+    /// shows it; `None` when the service is not a `weighted` or `failover` one.
+    #[must_use]
+    pub fn describe_graph(
+        &self,
+        revision: usize,
+        router: usize,
+        cx: PickCx<'_>,
+    ) -> Option<graph::Described<'_>> {
+        graph::describe(self, self.root(revision, router)?, cx, now_ms())
     }
 
     /// Every service of the app with the revision it belongs to (`None` for the app's own, shared
@@ -617,10 +684,23 @@ impl CompiledApp {
     /// algorithm.
     #[must_use]
     pub fn pick(&self, router: usize, cx: PickCx<'_>) -> Option<Pick> {
+        // A revision whose service has no server that may take this request is out of the draw,
+        // and its share goes to the others in proportion to their weights: the rule of a
+        // `weighted` service (`weighted_skips_dead_child`).
+        let now = now_ms();
+        let share = |index: usize, revision: &CompiledRevision| {
+            let weight = revision.effective_weight();
+            if weight > 0 && self.ready(index, router, cx, now) {
+                u64::from(weight)
+            } else {
+                0
+            }
+        };
         let total: u64 = self
             .revisions
             .iter()
-            .map(|revision| u64::from(revision.effective_weight()))
+            .enumerate()
+            .map(|(index, revision)| share(index, revision))
             .sum();
         if total == 0 {
             return None;
@@ -631,19 +711,20 @@ impl CompiledApp {
         let turn = self.next_revision.fetch_add(1, Ordering::Relaxed) % total;
         let mut ticket = turn * (TICKET_STRIDE % total) % total;
         for (index, revision) in self.revisions.iter().enumerate() {
-            let weight = u64::from(revision.effective_weight());
+            let weight = share(index, revision);
             if ticket < weight {
                 return self.take(index, router, cx);
             }
             ticket -= weight;
         }
-        // A canary step landed between summing and walking: take the last revision in use.
+        // A canary step or a health change landed between summing and walking: take the last
+        // revision in the draw.
         let (index, _) = self
             .revisions
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, revision)| revision.effective_weight() > 0)?;
+            .find(|(index, revision)| share(*index, revision) > 0)?;
         self.take(index, router, cx)
     }
 
@@ -684,6 +765,22 @@ impl CompiledApp {
     pub(crate) fn pick_pinned_any(&self, id: &str) -> Option<Pick> {
         let request = pingora::http::RequestHeader::build("GET", b"/", None).ok()?;
         self.pick_pinned(0, id, PickCx::new(&request))
+    }
+}
+
+impl Graph for CompiledApp {
+    fn named(&self, node: Node) -> Option<&service::Named> {
+        let revision = self.revisions.get(node.revision)?;
+        match node.service {
+            ServiceRef::Own(index) => revision.services.get(index),
+            ServiceRef::App(index) => self.services.get(index),
+        }
+    }
+
+    fn links(&self, node: Node) -> &[Link] {
+        self.revisions
+            .get(node.revision)
+            .map_or(&[][..], |revision| revision.links.get(node.service))
     }
 }
 

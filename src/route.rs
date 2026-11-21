@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::host;
 use crate::router::{Matched, View, path};
+use crate::service::graph::Path;
 use crate::service::{Lease, PickCx};
 use crate::skew;
 use crate::table::RoutingTable;
@@ -29,6 +30,9 @@ pub struct Selected {
     pub revision: usize,
     /// The backend to connect to.
     pub upstream: SocketAddr,
+    /// The children chosen on the way to `upstream` when the router's service is a `weighted`
+    /// or `failover` one; empty for a plain service.
+    pub path: Path,
     /// Whether a valid session cookie dictated the revision (see [`crate::skew`]); `false` when
     /// the weighted pick chose it.
     pub pinned: bool,
@@ -131,6 +135,7 @@ pub fn select(
             router: matched.router,
             revision: pick.revision,
             upstream: pick.upstream,
+            path: pick.path,
             pinned,
         },
         pick.lease,
@@ -138,9 +143,11 @@ pub fn select(
 }
 
 /// Another server for a request whose attempt on `selected` failed: the same revision and
-/// service, a server that [`PickCx::allows`] (available, and not in `tried`). The [`Lease`]
-/// counts the request on it. `None` when the service has no such server, or no longer exists.
-/// `retry` calls this for every further attempt.
+/// router service, through its `weighted` and `failover` services when it is one, a server that
+/// [`PickCx::allows`] (available, and not in `tried`). The retry may therefore move to another
+/// child of a `weighted` service, or from the last server of a `failover` primary to its
+/// fallback. The [`Lease`] counts the request on it. `None` when nothing below the service has
+/// such a server, or the service no longer exists. `retry` calls this for every further attempt.
 #[must_use]
 pub fn reselect(
     table: &RoutingTable,
@@ -149,20 +156,20 @@ pub fn reselect(
     client: Option<IpAddr>,
     tried: &[SocketAddr],
 ) -> Option<(Selected, Lease)> {
-    let service = table
-        .app(selected.app)?
-        .service(selected.revision, selected.router)?;
     let cx = PickCx {
         excluded: tried,
         ..PickCx::new(request).with_client(client)
     };
-    let (upstream, lease) = service.pick(cx)?;
+    let pick = table
+        .app(selected.app)?
+        .pick_in(selected.revision, selected.router, cx)?;
     Some((
         Selected {
-            upstream,
+            upstream: pick.upstream,
+            path: pick.path,
             ..*selected
         },
-        lease,
+        pick.lease,
     ))
 }
 
