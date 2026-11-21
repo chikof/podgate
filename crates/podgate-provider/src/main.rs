@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use podgate_provider::consul::ConsulSource;
 use podgate_provider::docker::DockerSource;
+use podgate_provider::etcd::EtcdSource;
 use podgate_provider::file::FileSource;
 use podgate_provider::kubernetes::KubernetesSource;
 use podgate_provider::kubernetes::crd::{SchemaSource, print, read_schema};
@@ -63,11 +64,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<(Command, Pa
 ///
 /// Every source module adds one arm here. A kind that is not built into this binary is an
 /// error, never skipped: a missing source would silently delete its routes.
-fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> {
+fn register_sources(
+    engine: &mut Engine,
+    config: &Config,
+    policy: &UpstreamPolicy,
+) -> anyhow::Result<()> {
     for source in &config.sources {
         match &*source.kind {
             "consul" => engine.add_source(ConsulSource::from_config(source)?)?,
             "docker" => engine.add_source(DockerSource::from_config(source)?)?,
+            "etcd" => engine.add_source(EtcdSource::from_config(source, policy)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
             "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,
             "nomad" => engine.add_source(NomadSource::from_config(source)?)?,
@@ -127,8 +133,8 @@ async fn execute(command: Command, config_path: PathBuf) -> anyhow::Result<ExitC
         Some(path) => UpstreamPolicy::load(path).context("invalid upstream policy file")?,
         None => UpstreamPolicy::builtin(),
     };
-    let mut engine = Engine::new(config.clone(), policy);
-    register_sources(&mut engine, &config)?;
+    let mut engine = Engine::new(config.clone(), policy.clone());
+    register_sources(&mut engine, &config, &policy)?;
     match command {
         Command::Run => {
             let solver = podgate_provider::acme::dns::solver(&config)?;

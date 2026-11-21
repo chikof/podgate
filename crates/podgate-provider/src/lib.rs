@@ -23,6 +23,9 @@
 //!   `podgate.*` tags.
 //! - [`traefik_file`]: the converter of Traefik dynamic configuration files (YAML or TOML), also the
 //!   `convert-traefik` command.
+//! - [`kv`]: the layer the key-value sources share: layouts, tenant mapping, the allowlist
+//!   requirement and limits.
+//! - [`etcd`]: the source that reads a key prefix per tenant from etcd and follows it with a watch.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -34,8 +37,10 @@ pub mod config;
 pub mod consul;
 pub mod docker;
 pub mod engine;
+pub mod etcd;
 pub mod file;
 pub mod kubernetes;
+pub mod kv;
 pub mod merge;
 pub mod nomad;
 pub mod policy;

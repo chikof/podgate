@@ -2998,6 +2998,7 @@ dependencies = [
  "regex",
  "rustls",
  "rustls-pki-types",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml_ng",

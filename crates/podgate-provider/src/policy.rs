@@ -389,6 +389,13 @@ impl UpstreamPolicy {
         Self::parse(&text)
     }
 
+    /// Whether the file gives `tenant` an `allow` list of its own. The `default` entry does not
+    /// count: every tenant without an entry of its own shares it.
+    #[must_use]
+    pub fn has_tenant_allow_list(&self, tenant: &str) -> bool {
+        self.tenants.contains_key(tenant)
+    }
+
     /// The verdict for `tenant` dialling `ip`.
     ///
     /// # Errors
