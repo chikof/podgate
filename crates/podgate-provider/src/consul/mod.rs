@@ -18,7 +18,7 @@
 //! `/v1/catalog/services`, and takes the servers of every service it cares about from a blocking
 //! query on `/v1/health/service/<name>?passing=true`. Both are `GET`s ([`client`]). A server is
 //! the instance's own address and port, never an address a tag spells out. The tags are read by
-//! [`crate::docker::labels`], written `key=value` ([`tags`]).
+//! [`crate::docker::labels`], written `key=value` (`tags`).
 //!
 //! An instance that asks to be used but cannot be (an unknown tag, an address that is not an IP
 //! address) is left out and reported next to the state, as an outage text naming it, like the
