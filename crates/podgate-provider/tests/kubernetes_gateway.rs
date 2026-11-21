@@ -1808,3 +1808,177 @@ async fn gateway_snapshot_is_accepted_by_the_daemon() {
     let _ = stop.send(());
     let _ = tokio::time::timeout(DEADLINE, run).await;
 }
+
+/// An upstream that answers every request with the request target it received.
+async fn echo_backend() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("echo backend");
+    let addr = listener.local_addr().expect("address");
+    let task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let target = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned();
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{target}",
+                    target.len()
+                );
+                let _ = stream.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    (addr, task)
+}
+
+#[tokio::test]
+async fn prefix_replacement_never_leaves_an_empty_path() {
+    // `replacePrefixMatch` of a rewrite and of a redirect, for the bare prefix, the prefix with
+    // a slash and a deeper path, as the Gateway API's conformance tests ask: `/prefix` to `/`.
+    let api = FakeApi::start().await;
+    let dir = dir("prefix-replacement");
+    let ports = common::free_ports(2);
+    let policy = dir.join("policy.json");
+    fs::write(&policy, common::daemon::LOOPBACK_POLICY).expect("policy");
+    let daemon = common::daemon::Daemon::start(&policy, (ports[0], ports[1]), &[]).await;
+    let (upstream, _task) = echo_backend().await;
+    gateway_world(&api);
+    api.put("services", k8s::service("team-a", "web", &[(None, 80)]));
+    api.put(
+        "endpointslices",
+        k8s::slice(
+            "team-a",
+            "web",
+            0,
+            &[(None, upstream.port())],
+            &[("127.0.0.1", true, false)],
+        ),
+    );
+    let replace = |kind: &str, field: &str, value: &str| {
+        json!([{ "type": kind, field: { "path": {
+            "type": "ReplacePrefixMatch", "replacePrefixMatch": value } } }])
+    };
+    let rule = |prefix: &str, filters: Value| {
+        json!({ "matches": [{ "path": { "value": prefix } }], "filters": filters,
+                "backendRefs": [backend("web", 80)] })
+    };
+    api.put(
+        "httproutes",
+        http_route(
+            "team-a",
+            "prefixes",
+            &["site.acme.test"],
+            json!([
+                rule("/rw-root", replace("URLRewrite", "urlRewrite", "/")),
+                rule("/rw-bar", replace("URLRewrite", "urlRewrite", "/bar")),
+                rule(
+                    "/rd-root",
+                    replace("RequestRedirect", "requestRedirect", "/")
+                ),
+                rule(
+                    "/rd-bar",
+                    replace("RequestRedirect", "requestRedirect", "/bar")
+                ),
+                rule("/rw-empty", replace("URLRewrite", "urlRewrite", "")),
+                rule("/rw-tail/", replace("URLRewrite", "urlRewrite", "/xyz/")),
+                rule("/", json!([])),
+            ]),
+        ),
+    );
+    let extra = format!(
+        "debounce_ms = 20\nmax_delay_ms = 200\nresync_secs = 2\nupstream_policy_file = {:?}\n",
+        policy.display().to_string()
+    );
+    let kubeconfig = api.kubeconfig(&dir, "test-token");
+    let config = base_config(
+        &daemon.admin,
+        &format!(
+            "{extra}[[tenant]]\nid = \"acme\"\nhosts = [\"acme.test\", \"*.acme.test\"]\ncatch_all = true\n\n[[source]]\nkind = \"kubernetes\"\nname = \"k8s\"\nkubeconfig = {:?}\nnamespace_tenants = {{ team-a = \"acme\" }}\ngateway_api = true\n",
+            kubeconfig.display().to_string()
+        ),
+    );
+    let mut engine = podgate_provider::Engine::new(
+        config.clone(),
+        UpstreamPolicy::load(&policy).expect("policy"),
+    )
+    .with_tuning(common::fast_tuning());
+    engine.add_source(source(&config)).expect("source");
+    let status_rx = engine.status();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let run = tokio::spawn(async move {
+        let _ = engine
+            .run(async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+
+    let host = "site.acme.test";
+    let started = std::time::Instant::now();
+    while head(daemon.proxy, host, "/plain").await.0 != 200 {
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the routes never went live; provider status: {:?}",
+            *status_rx.borrow()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The upstream sees this path for the request on the left.
+    let upstream_sees = |text: &str| {
+        text.rsplit("\r\n\r\n")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    for (request, expected) in [
+        ("/rw-root", "/"),
+        ("/rw-root/", "/"),
+        ("/rw-root/x", "/x"),
+        ("/rw-root/x?q=1", "/x?q=1"),
+        ("/rw-bar", "/bar"),
+        ("/rw-bar/", "/bar/"),
+        ("/rw-bar/x", "/bar/x"),
+        ("/rw-empty/bar", "/bar"),
+        ("/rw-empty/", "/"),
+        ("/rw-empty", "/"),
+        ("/rw-tail/bar", "/xyz/bar"),
+        ("/rw-tail", "/xyz"),
+        ("/rw-tail/", "/xyz/"),
+    ] {
+        let (code, text) = head(daemon.proxy, host, request).await;
+        assert_eq!(code, 200, "{request}: {text}");
+        assert_eq!(upstream_sees(&text), expected, "rewrite of {request}");
+    }
+    // A redirect sends the same path in `Location`.
+    let location = |text: &str| {
+        text.lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("location:")
+                    .then(|| line["location:".len()..].trim().to_owned())
+            })
+            .unwrap_or_default()
+    };
+    for (request, expected) in [
+        ("/rd-root", "http://site.acme.test/"),
+        ("/rd-root/", "http://site.acme.test/"),
+        ("/rd-root/x", "http://site.acme.test/x"),
+        ("/rd-root/x?q=1", "http://site.acme.test/x?q=1"),
+        ("/rd-bar", "http://site.acme.test/bar"),
+        ("/rd-bar/", "http://site.acme.test/bar/"),
+        ("/rd-bar/x", "http://site.acme.test/bar/x"),
+    ] {
+        let (code, text) = head(daemon.proxy, host, request).await;
+        assert_eq!(code, 302, "{request}: {text}");
+        assert_eq!(location(&text), expected, "redirect of {request}");
+    }
+    let _ = stop.send(());
+    let _ = tokio::time::timeout(DEADLINE, run).await;
+}

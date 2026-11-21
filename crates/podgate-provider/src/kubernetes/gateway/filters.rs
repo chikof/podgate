@@ -298,10 +298,12 @@ fn check_path(path: &PathModifier) -> Result<(), Rejection> {
             path.kind
         )));
     };
-    let safe = value.starts_with('/')
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_graphic() && !matches!(b, b'?' | b'#' | b'\\'));
+    // An empty `replacePrefixMatch` strips the prefix; the API's own table has the row.
+    let safe = (value.is_empty() && path.kind == "ReplacePrefixMatch")
+        || (value.starts_with('/')
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && !matches!(b, b'?' | b'#' | b'\\')));
     if !safe {
         return Err(unsupported(format!(
             "the path {value:?} must start with / and hold no ?, #, backslash, space or control character"
@@ -368,13 +370,34 @@ fn rewrite_config(
         return Ok(object(json!({ "type": "replace_path", "path": full })));
     }
     let matched = trim_slash(prefix_of("URLRewrite", prefix)?);
-    let replacement = trim_slash(path.replace_prefix_match.as_deref().unwrap_or("/"));
-    // The rest keeps its own leading `/`, so `/foo` becomes `/bar` and `/foo/x` `/bar/x`.
+    let replacement = path.replace_prefix_match.as_deref().unwrap_or("/");
+    let (rest, path) = prefix_replacement(replacement, "(?P<rest>/.*)?", ".*");
     Ok(object(json!({
         "type": "replace_path_regex",
-        "regex": format!("^{}(?P<rest>/.*)?$", escape(matched)),
-        "replacement": format!("{}${{rest}}", literal(replacement)),
+        "regex": format!("^{}{rest}$", escape(matched)),
+        "replacement": path,
     })))
+}
+
+/// How `ReplacePrefixMatch` puts `replacement` where the matched prefix was.
+///
+/// Returns the pattern of what follows the prefix, and the replacement text that uses its
+/// group `rest`. `with_rest` is the pattern when the replacement is not the root and `class`
+/// the characters the rest of the path may hold. The rest keeps its own leading `/`, so `/foo`
+/// becomes `/bar` and `/foo/x` `/bar/x` (the API's table: `/foo/` becomes `/bar/`). A
+/// replacement that is empty or `/` must still leave a path: the rest is then captured without
+/// its slash and the slash comes from the replacement, so `/foo`, `/foo/` and `/foo/x` become
+/// `/`, `/` and `/x`.
+fn prefix_replacement(replacement: &str, with_rest: &str, class: &str) -> (String, String) {
+    let replacement = trim_slash(replacement);
+    if replacement.is_empty() {
+        (format!("(?:/(?P<rest>{class}))?"), "/${rest}".to_owned())
+    } else {
+        (
+            with_rest.to_owned(),
+            format!("{}${{rest}}", literal(replacement)),
+        )
+    }
 }
 
 /// The request URL as `redirect_regex` sees it: `scheme://host[:port]/path?query`.
@@ -423,11 +446,9 @@ fn redirect_config(
         ),
         Some(path) => {
             let matched = trim_slash(prefix_of("RequestRedirect", prefix)?);
-            let replacement = trim_slash(path.replace_prefix_match.as_deref().unwrap_or("/"));
-            (
-                format!("{}(?P<rest>(?:/[^?#]*)?)", escape(matched)),
-                format!("{}${{rest}}", literal(replacement)),
-            )
+            let replacement = path.replace_prefix_match.as_deref().unwrap_or("/");
+            let (rest, path) = prefix_replacement(replacement, "(?P<rest>(?:/[^?#]*)?)", "[^?#]*");
+            (format!("{}{rest}", escape(matched)), path)
         }
     };
     Ok(object(json!({
@@ -478,6 +499,92 @@ mod test {
                 json!({ "name": "s2", "type": "redirect_scheme", "scheme": "https", "permanent": true }),
             ]
         );
+    }
+
+    /// What `stage` turns `input` into: the middleware's own regular expression and
+    /// replacement, applied as the daemon applies them (every match is replaced).
+    fn apply(stage: &Stage, prefix: &str, input: &str) -> String {
+        let declared = stage.declare("s", Some(prefix)).expect("declared");
+        let regex = regex::Regex::new(declared.config["regex"].as_str().expect("a regex"))
+            .expect("a valid regex");
+        let replacement = declared.config["replacement"]
+            .as_str()
+            .expect("a replacement");
+        regex.replace_all(input, replacement).into_owned()
+    }
+
+    #[test]
+    fn prefix_replacement_never_leaves_an_empty_path() {
+        // The table is copied from the doc comment of `HTTPPathModifier.ReplacePrefixMatch`,
+        // `apis/v1/httproute_types.go` of kubernetes-sigs/gateway-api v1.2.1, as
+        // (request path, prefix match, replace prefix, modified path). `<empty string>` is "".
+        // The next four rows are the conformance suite's `httproute-rewrite-path` and
+        // `httproute-redirect-path` (v1.2.1, `conformance/tests/*.go`): `/prefix/one/two` with
+        // `/prefix/one` to `/one` gives `/one/two`, `/strip-prefix/three` and `/strip-prefix`
+        // with `/` give `/three` and `/`, `/original-prefix/lemon` to `/replacement-prefix`
+        // gives `/replacement-prefix/lemon` and `/path-and-host` gives `/replacement-prefix`.
+        // The rows with the root prefix are not in the API's table or the conformance suite:
+        // they follow the rows of the table with a trailing slash (`/foo/` to `/xyz/`).
+        let table = [
+            ("/foo/bar", "/foo", "/xyz", "/xyz/bar"),
+            ("/foo/bar", "/foo", "/xyz/", "/xyz/bar"),
+            ("/foo/bar", "/foo/", "/xyz", "/xyz/bar"),
+            ("/foo/bar", "/foo/", "/xyz/", "/xyz/bar"),
+            ("/foo", "/foo", "/xyz", "/xyz"),
+            ("/foo/", "/foo", "/xyz", "/xyz/"),
+            ("/foo/bar", "/foo", "", "/bar"),
+            ("/foo/", "/foo", "", "/"),
+            ("/foo", "/foo", "", "/"),
+            ("/foo/", "/foo", "/", "/"),
+            ("/foo", "/foo", "/", "/"),
+            ("/prefix/one/two", "/prefix/one", "/one", "/one/two"),
+            ("/strip-prefix/three", "/strip-prefix", "/", "/three"),
+            ("/strip-prefix", "/strip-prefix", "/", "/"),
+            (
+                "/original-prefix/lemon",
+                "/original-prefix",
+                "/replacement-prefix",
+                "/replacement-prefix/lemon",
+            ),
+            (
+                "/path-and-host",
+                "/path-and-host",
+                "/replacement-prefix",
+                "/replacement-prefix",
+            ),
+            ("/", "/", "/bar", "/bar/"),
+            ("/x", "/", "/bar", "/bar/x"),
+            ("/", "/", "/", "/"),
+            ("/x", "/", "/", "/x"),
+        ];
+        for (path, prefix, replacement, expected) in table {
+            let modifier = json!({ "path": {
+                "type": "ReplacePrefixMatch", "replacePrefixMatch": replacement } });
+            let rewrite = plan(
+                &filters(json!([{ "type": "URLRewrite", "urlRewrite": modifier }])),
+                Kind::Http,
+            )
+            .expect("a plan");
+            let redirect = plan(
+                &filters(json!([{ "type": "RequestRedirect", "requestRedirect": modifier }])),
+                Kind::Http,
+            )
+            .expect("a plan");
+            assert_eq!(
+                apply(&rewrite.stages[0], prefix, path),
+                expected,
+                "rewrite {path} with prefix {prefix:?} and replacement {replacement:?}"
+            );
+            assert_eq!(
+                apply(
+                    &redirect.stages[0],
+                    prefix,
+                    &format!("http://h.test:8080{path}?q=1")
+                ),
+                format!("http://h.test:8080{expected}?q=1"),
+                "redirect {path} with prefix {prefix:?} and replacement {replacement:?}"
+            );
+        }
     }
 
     #[test]
