@@ -10,6 +10,7 @@ use podgate_provider::docker::DockerSource;
 use podgate_provider::ecs::EcsSource;
 use podgate_provider::etcd::EtcdSource;
 use podgate_provider::file::FileSource;
+use podgate_provider::http::HttpSource;
 use podgate_provider::kubernetes::KubernetesSource;
 use podgate_provider::kubernetes::crd::{SchemaSource, print, read_schema};
 use podgate_provider::nomad::NomadSource;
@@ -82,6 +83,7 @@ fn register_sources(
             "ecs" => engine.add_source(EcsSource::from_config(source)?)?,
             "etcd" => engine.add_source(EtcdSource::from_config(source, policy)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
+            "http" => engine.add_source(HttpSource::from_config(source, policy)?)?,
             "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,
             "nomad" => engine.add_source(NomadSource::from_config(source)?)?,
             "swarm" => engine.add_source(SwarmSource::from_config(source)?)?,

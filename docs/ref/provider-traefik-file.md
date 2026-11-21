@@ -79,6 +79,10 @@ A name may carry its provider. `name@file` is the file itself and the suffix is 
 
 Traefik applies `tls.options` per router; the handshake runs before any router is known, so podgate's TLS policy belongs to the app (`docs/ref/tls-options.md`). The converter takes the option each TLS router asks for (its own `tls.options`, else `default`), applies the one most routers ask for to the app and leaves out the routers that ask for another, with `unsupported_label` at their `tls.options`: put them in a file of their own. The options map to `min_version` (`VersionTLS12`, `VersionTLS13`), `cipher_suites`, `alpn`, `sni_strict` and `clientAuth` (`clientAuthType` to `client_auth`, `caFiles` inlined as `client_ca_pem`). `maxVersion` other than TLS 1.3, `curvePreferences` and `disableSessionTickets` are refused. `preferServerCipherSuites` has no effect in Traefik and is ignored. The app's `tls.mode` is always `acme`.
 
+## The no-disk mode
+
+`convert_inline(id, text, syntax)` converts a document that does not come from this machine (an HTTP answer). It is `convert` with no directory: every option that names a file (`certFile`, `keyFile`, `usersFile`, the CA options) is refused with the fixed reason `file_reference_not_allowed: this option names a file; give the PEM or the text inline`, **before any filesystem call** and the same for every path, so the answer says nothing about which paths exist and no file of this machine can end up in a snapshot. An inline PEM is accepted. `Converted::files` is empty. The object that held the reference is left out like any other rejected object. `convert` and the file source are unchanged.
+
 ## Differences to know
 
 - Traefik ranks routers by rule length and podgate by the priority the converter writes, which is the same number; for TCP routers podgate ranks by constraints instead and refuses a `priority`.

@@ -14,6 +14,7 @@ pub mod dns_server;
 pub mod docker;
 pub mod ecs;
 pub mod etcd;
+pub mod http_endpoint;
 pub mod k8s;
 pub mod k8s_crd;
 pub mod nomad;

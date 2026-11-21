@@ -30,6 +30,7 @@
 //! - [`kv`]: the layer the key-value sources share: layouts, tenant mapping, the allowlist
 //!   requirement and limits.
 //! - [`etcd`]: the source that reads a key prefix per tenant from etcd and follows it with a watch.
+//! - [`mod@http`]: the source that polls an HTTP(S) endpoint for apps or a Traefik configuration.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //! - [`ca`]: the internal CA, which issues leaves for `tls.mode = "internal"` apps from a name-constrained
@@ -47,6 +48,7 @@ pub mod ecs;
 pub mod engine;
 pub mod etcd;
 pub mod file;
+pub mod http;
 pub mod kubernetes;
 pub mod kv;
 pub mod merge;
