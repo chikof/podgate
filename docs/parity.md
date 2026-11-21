@@ -125,7 +125,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
 | Internal CA (`tls internal`) | none | yes | 0103 (key material in the provider and offline root, name-constrained intermediate, short-lived leaves) |
-| OCSP stapling | none | automatic | 0092 (verified staples, fetched through the upstream policy; must-staple by default) |
+| OCSP stapling | none | automatic | built (verified staples, fetched through the upstream policy; must-staple by default, `ocsp: on` for any certificate with a responder, see `docs/ref/ocsp.md`) |
 | Mutual TLS (client auth) | `clientAuth` | `client_auth` | built (0021 enforcement, 0057 modes) |
 | Min and max version, cipher suites, curves, ALPN | `tls.options` | `protocols`, `ciphers`, `curves`, `alpn` | built (`max_version` and `curves` are rejected, not ignored) |
 | Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | built (strict SNI is per app) |
