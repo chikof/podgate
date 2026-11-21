@@ -40,7 +40,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Explicit priority | `priority` | route order | 0022 (within a tenant); Traefik's order reproduced by 0071 |
 | Ambiguity detection | none | none | 0022 (`route_ambiguity`) |
 | `protocol` matcher (http, grpc, ws) | none | `protocol` | not a leaf: `header` and `header_regexp` leaves or a CEL expression express it |
-| Expression matchers (CEL) | none | `expression` | 0105 (sandboxed, static cost limit, claims no host) |
+| Expression matchers (CEL) | none | `expression` | built (`docs/ref/match-cel.md`): sandboxed, static cost limit, claims no host; Traefik has no equivalent |
 | Per-route TLS options | `tls.options` on a router | per-site `tls` | declined as written: TLS is decided before routing, so policy belongs to the app and hosts (`tls_policy_conflict`) |
 
 ## Services
