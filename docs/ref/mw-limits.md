@@ -1,6 +1,6 @@
 # Middlewares `rate_limit` and `in_flight_req`
 
-Reference for `src/middleware/rate_limit.rs`, `src/middleware/in_flight_req.rs` and `src/middleware/limits.rs` (the source and the bounded table they share). The model they plug into is in `docs/architecture.md` (`### Middlewares`). They match Traefik's `rateLimit {average, period, burst, sourceCriterion}` and `inFlightReq {amount, sourceCriterion}`; Caddy has a rate limiter only as a plugin. Limits are per node; the control plane divides a global limit by the node count.
+Reference for `src/middleware/rate_limit.rs`, `src/middleware/in_flight_req.rs` and `src/middleware/limits.rs` (the source and the bounded table they share). The model they plug into is in `docs/architecture.md` (`### Middlewares`). They match Traefik's `rateLimit {average, period, burst, sourceCriterion}` and `inFlightReq {amount, sourceCriterion}`; Caddy has a rate limiter only as a plugin. Limits are per node; the control plane divides a global limit by the node count. A `rate_limit` can instead count cluster-wide through a shared Redis-compatible store (`scope: "cluster"`, with a required `on_store_error`): `docs/ref/ratelimit-cluster.md`.
 
 ```json
 {
@@ -84,6 +84,7 @@ State is kept in `middleware::state::Registry`, keyed by app, middleware name an
 |`rate_limit_loosened`|A higher rate (`average` over `period_secs`) or a bigger `burst`.|
 |`in_flight_req_loosened`|A higher `amount`.|
 |`rate_limit_source_changed`, `in_flight_req_source_changed`|`source` differs: requests are counted per something else, which can let a client leave its bucket.|
+|`rate_limit_cluster_fail_open`, `rate_limit_scope_node`|A cluster-scope limit starts failing open, or becomes per-node: see `docs/ref/ratelimit-cluster.md`.|
 
 A stricter limit, a smaller table or a bigger table list nothing.
 
