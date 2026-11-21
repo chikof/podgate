@@ -415,6 +415,7 @@ impl Gateway {
             cache: &self.cache,
             original: None,
             pages: Vec::new(),
+            credentialed: false,
         };
         let flow =
             middleware::run_routed(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;

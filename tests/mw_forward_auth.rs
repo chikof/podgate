@@ -996,3 +996,97 @@ async fn plan_lists_forward_auth_removal() {
     // Nothing was applied.
     assert_eq!(podgate.get("a.test", "/ok").await.status, 200);
 }
+
+#[tokio::test]
+async fn forward_auth_runs_before_cache_hit() {
+    let podgate = Podgate::start().await;
+    let up = Server::start(|_| http(200, &[("Cache-Control", "max-age=60")], "cached page")).await;
+    // The auth service allows the first call and denies every later one.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let auth = Server::start(move |_| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            http(200, &[], "")
+        } else {
+            http(401, &[("WWW-Authenticate", "Bearer")], "revoked")
+        }
+    })
+    .await;
+    let guarded = with_middleware(
+        app("a", &["a.test"], &[serving("r1", up.addr)]),
+        "auth",
+        "forward_auth",
+        json!({"address": format!("http://{}/verify", auth.addr)}),
+    );
+    let app = with_middleware(guarded, "c", "cache", json!({}));
+    push(&podgate, &snapshot(1, &[app])).await;
+
+    let filled = podgate.get("a.test", "/page").await;
+    assert_eq!((filled.status, filled.body.as_str()), (200, "cached page"));
+    assert_eq!(up.requests(), 1);
+    // The entry is stored and fresh, yet the next request is judged by the auth service first.
+    let denied = podgate.get("a.test", "/page").await;
+    assert_eq!(
+        (denied.status, denied.body.as_str()),
+        (401, "revoked"),
+        "{denied:?}"
+    );
+    assert_eq!(auth.requests(), 2);
+    assert_eq!(
+        up.requests(),
+        1,
+        "neither request reached the upstream twice"
+    );
+}
+
+#[tokio::test]
+async fn forward_auth_identity_bypasses_cache() {
+    let podgate = Podgate::start().await;
+    // The page depends on who is asking and says it may be shared.
+    let up = Server::start(|head| {
+        let user = header_of(head, "x-user").unwrap_or("anonymous");
+        http(
+            200,
+            &[("Cache-Control", "public, max-age=60")],
+            &format!("page for {user}"),
+        )
+    })
+    .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let auth = Server::start(move |_| {
+        let user = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            "a"
+        } else {
+            "b"
+        };
+        http(200, &[("X-User", user)], "")
+    })
+    .await;
+    let guarded = with_middleware(
+        app("a", &["a.test"], &[serving("r1", up.addr)]),
+        "auth",
+        "forward_auth",
+        json!({"address": format!("http://{}/verify", auth.addr), "response_headers": ["x-user"]}),
+    );
+    let app = with_middleware(guarded, "c", "cache", json!({}));
+    push(&podgate, &snapshot(1, &[app])).await;
+
+    let first = podgate.get("a.test", "/page").await;
+    assert_eq!((first.status, first.body.as_str()), (200, "page for a"));
+    assert_eq!(
+        first.header("cache-status"),
+        Some("podgate; bypass"),
+        "{first:?}"
+    );
+    let second = podgate.get("a.test", "/page").await;
+    assert_eq!(
+        (second.status, second.body.as_str()),
+        (200, "page for b"),
+        "{second:?}"
+    );
+    assert_eq!(
+        second.header("cache-status"),
+        Some("podgate; bypass"),
+        "{second:?}"
+    );
+    assert_eq!(up.requests(), 2, "both requests reached the upstream");
+}

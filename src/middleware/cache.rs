@@ -23,7 +23,8 @@
 //!
 //! The tenant and the app are in every key, every entry lives in its tenant's own store, and
 //! every byte is charged to the tenant's `max_buffer_bytes`; see [`crate::cache`]. A request
-//! with `Authorization` or `Cookie` bypasses the cache, and a response with `Set-Cookie`,
+//! with `Authorization` or `Cookie`, or with headers a `forward_auth` stage copied in, bypasses
+//! the cache, and a response with `Set-Cookie`,
 //! `private` or `no-store` is never stored, unless the declaration opts in for cookies.
 
 use std::sync::Arc;
@@ -344,7 +345,7 @@ impl Kind for Cache {
         let key = self
             .mode(cx.session.req_header())
             .and_then(|mode| self.key(cx).map(|key| (mode, key)));
-        let Some((mode, key)) = key else {
+        let Some((mode, key)) = key.filter(|_| !cx.credentialed) else {
             cx.cache.count(app, "bypass");
             state.result = Some("bypass");
             return Ok(Flow::Continue);

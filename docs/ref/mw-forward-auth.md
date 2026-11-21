@@ -77,3 +77,7 @@ Differences from Traefik: `Set-Cookie` of a `2xx` answer is not forwarded to the
 ## Plan and explain
 
 Removing the middleware shows in `POST /v1/snapshot/plan` as `forward_auth_removed`; copying fewer headers (a name or the regex dropped or changed) as `forward_auth_response_headers_removed`; a transport that stops verifying the auth service's certificate as `upstream_tls_verification_disabled`. Changing the address is not a loosening. Explain shows the address without its query string.
+
+## With `cache`
+
+A request into which this stage copied at least one header (an identity such as `X-User`) is a credentialed request: the `cache` stage bypasses it exactly as it does a request with `Authorization`, with no lookup and no store, and `Cache-Status` says `bypass`. The cache key does not hold the copied headers, so without this a page built for one user would be stored and served to the next. A request whose answer copied nothing (a gate with no `response_headers`, or an answer that leaves them out) is not credentialed and is cached normally. The stage still runs on a request that would have been a hit: the chain's request hooks run before the cache answers.

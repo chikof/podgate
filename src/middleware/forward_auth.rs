@@ -140,6 +140,22 @@ struct Parts {
 #[derive(Debug)]
 pub struct ForwardAuth(Box<Parts>);
 
+/// What a request keeps of its `forward_auth` stage.
+#[derive(Debug, Default)]
+pub struct State {
+    /// The auth service answered `2xx` and its answer put at least one header into the request:
+    /// the request now carries an identity the cache key does not know.
+    identified: bool,
+}
+
+impl State {
+    /// Whether the request carries headers copied from the auth service.
+    #[must_use]
+    pub fn identified(&self) -> bool {
+        self.identified
+    }
+}
+
 fn invalid(message: impl std::fmt::Display) -> Invalid {
     Invalid::new("invalid_middleware", format!("forward_auth: {message}"))
 }
@@ -482,7 +498,7 @@ impl ForwardAuth {
 }
 
 impl Kind for ForwardAuth {
-    type State = ();
+    type State = State;
 
     fn compile(declared: &Declared, cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
         let config: Config =
@@ -556,7 +572,7 @@ impl Kind for ForwardAuth {
         })))
     }
 
-    async fn request(&self, cx: &mut RequestCx<'_>, _state: &mut ()) -> pingora::Result<Flow> {
+    async fn request(&self, cx: &mut RequestCx<'_>, state: &mut State) -> pingora::Result<Flow> {
         // First, whatever the answer: nothing the client wrote under a name the auth service
         // sets may reach the upstream.
         self.strip(cx.session.req_header_mut());
@@ -566,6 +582,7 @@ impl Kind for ForwardAuth {
                 for (name, value) in &answer.headers {
                     if self.copies(name) {
                         request.append_header(name.clone(), value.clone())?;
+                        state.identified = true;
                     }
                 }
                 Ok(Flow::Continue)

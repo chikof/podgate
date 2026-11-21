@@ -168,6 +168,10 @@ pub struct RoutedCx<'a> {
     /// a `HEAD`, which is never paged). A cache must neither store nor serve such a response: the
     /// page, not the stored copy, is the answer. Filled by [`run_routed`].
     pub pages: Vec<std::ops::RangeInclusive<u16>>,
+    /// Whether a stage of the chain put an identity into the request (`forward_auth` copied
+    /// headers from its auth service): a cache must neither serve nor store such a request, as
+    /// for one with `Authorization`. Filled by [`run_routed`].
+    pub credentialed: bool,
 }
 
 /// What a finished request looks like to [`Kind::finished`].
@@ -829,6 +833,10 @@ pub async fn run_routed(
     state: &mut State,
 ) -> pingora::Result<Flow> {
     cx.pages = page_statuses(stages, chain, cx.session.req_header());
+    cx.credentialed = state
+        .stages
+        .iter()
+        .any(|stage| matches!(stage, StageState::ForwardAuth(auth) if auth.identified()));
     cx.original = state.original.take();
     let mut flow = Flow::Continue;
     for (position, index) in chain.iter().enumerate() {
