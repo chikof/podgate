@@ -68,6 +68,7 @@ pub fn render(
     out.push_str(&crate::middleware::limits::render(&live));
     crate::service::mirroring::render(&mut out);
     out.push_str(&crate::middleware::jwt_auth::render(&live));
+    crate::l4::udp::render(&mut out);
     table.metrics().render(&mut out, &live);
     out
 }

@@ -80,6 +80,11 @@ fn document() -> Value {
         ),
         ("service", service::schemas(), service::UNBUILT.to_vec()),
         ("transport", vec![service::transport_schema()], Vec::new()),
+        (
+            "udp_service",
+            vec![("loadbalancer", of::<crate::l4::udp::ServiceConfig>())],
+            Vec::new(),
+        ),
     ];
     for (category, schemas, planned) in categories {
         let mut index = Map::new();
@@ -115,6 +120,17 @@ fn document() -> Value {
         .and_then(|router| router.pointer_mut("/properties/match"))
     {
         *slot = json!({ "$ref": "#/$defs/matcher" });
+    }
+    // UDP routers are kept raw in the model, like the matcher of a router.
+    defs.insert(
+        "udp.router".to_owned(),
+        of::<crate::l4::udp::RouterConfig>(),
+    );
+    if let Some(slot) = defs
+        .get_mut("Udp")
+        .and_then(|udp| udp.pointer_mut("/properties/routers/items"))
+    {
+        *slot = json!({ "$ref": "#/$defs/udp.router" });
     }
     let Some(object) = document.as_object_mut() else {
         return document;

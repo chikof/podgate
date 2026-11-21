@@ -445,7 +445,33 @@ struct AppView<'a> {
     revisions: Vec<RevisionView<'a>>,
     services: Vec<ServiceView<'a>>,
     middlewares: Vec<MiddlewareView<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    udp: Option<UdpView<'a>>,
     recent: Recent,
+}
+
+/// The app's UDP routers and services.
+#[derive(Serialize)]
+struct UdpView<'a> {
+    routers: Vec<UdpRouterView<'a>>,
+    services: Vec<UdpServiceView<'a>>,
+}
+
+#[derive(Serialize)]
+struct UdpRouterView<'a> {
+    name: &'a str,
+    entry_points: &'a [Box<str>],
+    service: &'a str,
+    max_sessions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_reply_ratio: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct UdpServiceView<'a> {
+    name: &'a str,
+    servers: &'a [std::net::SocketAddr],
+    session_timeout_secs: u64,
 }
 
 /// The TLS policy without any certificate or CA bytes.
@@ -625,8 +651,40 @@ fn app_view<'a>(app: &'a CompiledApp, runtime: &Runtime<'_>) -> AppView<'a> {
                 config: named.stage.describe(),
             })
             .collect(),
+        udp: udp_view(app),
         recent: recent(runtime, app.id(), None),
     }
+}
+
+/// The UDP side of `app`, `None` when it declares none.
+fn udp_view(app: &CompiledApp) -> Option<UdpView<'_>> {
+    let udp = app.l4().udp();
+    if udp.routers().is_empty() && udp.services().is_empty() {
+        return None;
+    }
+    Some(UdpView {
+        routers: (0..udp.routers().len())
+            .filter_map(|at| {
+                let (router, service) = udp.route(at)?;
+                Some(UdpRouterView {
+                    name: router.name(),
+                    entry_points: router.entry_points(),
+                    service: service.name(),
+                    max_sessions: router.max_sessions(),
+                    max_reply_ratio: router.max_reply_ratio(),
+                })
+            })
+            .collect(),
+        services: udp
+            .services()
+            .iter()
+            .map(|service| UdpServiceView {
+                name: service.name(),
+                servers: service.servers(),
+                session_timeout_secs: service.timeout().as_secs(),
+            })
+            .collect(),
+    })
 }
 
 fn router_view<'a>(app: &'a CompiledApp, router: &'a CompiledRouter) -> RouterView<'a> {

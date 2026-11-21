@@ -1,7 +1,7 @@
 //! TCP and UDP routers and services of an app.
 //!
-//! The model exists so a snapshot can carry them and the compiler can refuse them by name
-//! (`l4_not_built`) until `src/l4/` is built. Routers and services are [`Declared`] objects like
+//! The model exists so a snapshot can carry them; `src/l4/` compiles them. TCP is refused by name
+//! (`l4_not_built`) until it is built; UDP is built. Routers and services are [`Declared`] objects like
 //! the HTTP ones; their kind modules will own their configuration.
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub struct Tcp {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Udp {
-    /// Routers: `name`, `entry_points` and `service`, kept raw.
+    /// Routers: `name`, `entry_points`, `service`, `max_sessions?` and `max_reply_ratio?`, kept raw.
     #[serde(default)]
     pub routers: Vec<Value>,
     /// Services.

@@ -3,7 +3,9 @@
 
 mod common;
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use common::{Podgate, TestCert, Upstream, app, serving, snapshot};
 use serde_json::{Value, json};
@@ -117,11 +119,31 @@ fn startup_failure(env: &[(&str, &str)]) -> (Option<i32>, String) {
         .env_remove("ENTRY_POINTS")
         .env("RUST_LOG", "warn")
         .envs(env.iter().copied());
-    let output = command.output().expect("run podgate");
-    (
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run podgate");
+    // A listener that starts instead of failing would run for ever, so a missing refusal is a
+    // failed test, not a hung one.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for podgate") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("podgate with {env:?} did not stop on its own within 20 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    (status.code(), stderr)
 }
 
 #[test]
@@ -156,11 +178,11 @@ fn entry_points_invalid_values() {
         );
     }
 
-    // The parser accepts tcp and udp; starting them waits for the specs that
-    // build them, and the error names the entry point.
+    // The parser accepts tcp and udp. Starting a tcp entry point waits for the spec that builds
+    // it, and a udp one cannot take the PROXY protocol; the error names the entry point.
     for (value, name) in [
         ("web=127.0.0.1:18080/http,db=127.0.0.1:15432/tcp", "db"),
-        ("dns=127.0.0.1:15353/udp", "dns"),
+        ("dns=127.0.0.1:15353/udp;proxy_protocol", "dns"),
     ] {
         let (code, stderr) = startup_failure(&[
             ("ENTRY_POINTS", value),

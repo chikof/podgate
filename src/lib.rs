@@ -122,9 +122,10 @@ pub use wake::{Wake, WakeService};
 /// # Errors
 ///
 /// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE` or `DASHBOARD_AUTH_FILE` is invalid, a
-/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, an entry point is `tcp` or `udp`
-/// (not built yet), a TLS listener cannot be configured, the admin socket or the dashboard
-/// address cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
+/// non-loopback `DASHBOARD_ADDR` has no `DASHBOARD_AUTH_FILE`, an entry point is `tcp` (not built
+/// yet) or a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be bound, a TLS listener
+/// cannot be configured, the admin socket or the dashboard address cannot be bound, or an
+/// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
@@ -198,6 +199,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             config.basic_auth_max_concurrent.get(),
             std::time::Duration::from_secs(1),
         ));
+    let udp_sessions = l4::udp::Tenants::new();
     for point in &config.entry_points {
         let gate = point
             .proxy_protocol
@@ -234,10 +236,30 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     None => proxy.endpoints().set_pre_tls_callback(Arc::new(hello)),
                 }
             }
-            entry::Protocol::Tcp | entry::Protocol::Udp => anyhow::bail!(
-                "entry point {} is {}: TCP and UDP entry points are not built yet",
-                point.name,
-                point.protocol.as_str()
+            entry::Protocol::Udp => {
+                anyhow::ensure!(
+                    !point.proxy_protocol,
+                    "entry point {}: proxy_protocol is not available on a udp entry point",
+                    point.name
+                );
+                let socket = l4::udp::bind(point.addr)
+                    .with_context(|| format!("cannot bind udp entry point {}", point.name))?;
+                server.add_service(background_service(
+                    &format!("udp entry point {}", point.name),
+                    l4::udp::Listener::new(
+                        &point.name,
+                        socket,
+                        table.clone(),
+                        budgets.clone(),
+                        upstream_policy.clone(),
+                        udp_sessions.clone(),
+                    ),
+                ));
+                continue;
+            }
+            entry::Protocol::Tcp => anyhow::bail!(
+                "entry point {} is tcp: TCP entry points are not built yet",
+                point.name
             ),
         }
         server.add_service(proxy);

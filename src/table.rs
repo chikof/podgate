@@ -26,6 +26,7 @@ use crate::compile::{self, Rejected};
 use crate::conflict::{self, Conflict};
 use crate::entry::CompileContext;
 use crate::entry::policy::{self as entry_policy, Policy as EntryPolicy};
+use crate::l4;
 use crate::middleware;
 use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
@@ -218,6 +219,7 @@ pub struct CompiledApp {
     client_auth: Option<Arc<ClientAuth>>,
     tls_options: Option<Arc<Options>>,
     canary: Option<Arc<Runtime>>,
+    l4: l4::Compiled,
     fingerprint: u64,
 }
 
@@ -231,6 +233,7 @@ pub(crate) struct Parts {
     pub(crate) fingerprint: u64,
     pub(crate) client_auth: Option<Arc<ClientAuth>>,
     pub(crate) tls_options: Option<Arc<Options>>,
+    pub(crate) l4: l4::Compiled,
 }
 
 /// What the effective weights of an app's revisions add up to while it has a canary.
@@ -294,6 +297,7 @@ impl CompiledApp {
             hosts: hosts.into_boxed_slice(),
             tls: app.tls.clone(),
             canary,
+            l4: parts.l4,
             fingerprint: parts.fingerprint,
             client_auth: parts.client_auth,
             tls_options: parts.tls_options,
@@ -453,6 +457,12 @@ impl CompiledApp {
     #[must_use]
     pub fn tenant(&self) -> &str {
         &self.tenant
+    }
+
+    /// The app's UDP (and later TCP) routers and services.
+    #[must_use]
+    pub fn l4(&self) -> &l4::Compiled {
+        &self.l4
     }
 
     /// The source named in the snapshot declaration.

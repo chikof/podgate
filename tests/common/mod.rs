@@ -177,10 +177,16 @@ const START_WAIT: Duration = Duration::from_secs(10);
 const LOOPBACK_POLICY: &str =
     r#"{"deny": ["0.0.0.0/8", "169.254.0.0/16", "fe80::/10", "224.0.0.0/4", "ff00::/8"]}"#;
 
-/// Whether process `pid` has a TCP socket listening on loopback `port`.
-fn listens(pid: u32, port: u16) -> bool {
+/// Whether process `pid` has a TCP socket listening on loopback `port`, or a bound UDP socket
+/// when `datagram`.
+fn listens(pid: u32, port: u16, datagram: bool) -> bool {
     let wanted = format!(":{port:04X}");
-    let inodes: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+    let (tables, listening) = if datagram {
+        (["/proc/net/udp", "/proc/net/udp6"], "07")
+    } else {
+        (["/proc/net/tcp", "/proc/net/tcp6"], "0A")
+    };
+    let inodes: Vec<String> = tables
         .iter()
         .filter_map(|table| std::fs::read_to_string(table).ok())
         .flat_map(|table| {
@@ -192,7 +198,7 @@ fn listens(pid: u32, port: u16) -> bool {
                     // Columns: sl, local_address, rem_address, st, ..., inode (index 9).
                     let local = columns.get(1)?;
                     let state = columns.get(3)?;
-                    (*state == "0A" && local.ends_with(&wanted))
+                    (*state == listening && local.ends_with(&wanted))
                         .then(|| format!("socket:[{}]", columns.get(9).copied().unwrap_or("")))
                 })
                 .collect::<Vec<_>>()
@@ -220,6 +226,8 @@ pub struct Podgate {
     pub tls_addr: SocketAddr,
     /// Every listener by entry point name.
     listeners: Vec<(String, SocketAddr)>,
+    /// The ports of the `udp` entry points.
+    datagram_ports: Vec<u16>,
     /// Path of the admin unix socket.
     pub admin_socket: PathBuf,
 }
@@ -365,6 +373,12 @@ impl Podgate {
                 addr.port()
             ));
         }
+        let datagram_ports: Vec<u16> = entries
+            .iter()
+            .zip(&listeners)
+            .filter(|((_, protocol), _)| *protocol == "udp")
+            .map(|(_, (_, addr))| addr.port())
+            .collect();
         let first_of = |wanted: &str| {
             entries
                 .iter()
@@ -396,6 +410,7 @@ impl Podgate {
             tls_addr,
             admin_socket,
             listeners,
+            datagram_ports,
         };
         // On `Err`, dropping `podgate` kills the process and removes its directory.
         podgate.wait_until_ready().await?;
@@ -418,10 +433,9 @@ impl Podgate {
                 let ready = exchange(&mut stream, &get_request("x", "/readyz")).await;
                 let pid = self.child.id();
                 if ready.status == 200
-                    && self
-                        .listeners
-                        .iter()
-                        .all(|(_, addr)| listens(pid, addr.port()))
+                    && self.listeners.iter().all(|(_, addr)| {
+                        listens(pid, addr.port(), self.datagram_ports.contains(&addr.port()))
+                    })
                 {
                     return Ok(());
                 }

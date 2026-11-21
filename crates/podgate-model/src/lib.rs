@@ -130,7 +130,7 @@ pub struct App {
     /// TCP routers and services. Not built yet.
     #[serde(default)]
     pub tcp: Option<Tcp>,
-    /// UDP routers and services. Not built yet.
+    /// UDP routers and services.
     #[serde(default)]
     pub udp: Option<Udp>,
     /// Which forwarding headers the app's upstreams receive. Absent: the default set,

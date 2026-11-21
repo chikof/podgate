@@ -129,6 +129,22 @@ pub enum Conflict {
         /// Their `declared_by` values.
         declared_by: [Box<str>; 2],
     },
+    /// Two L4 routers listen on an entry point that carries one (a `udp` entry point has nothing to
+    /// tell routers apart by).
+    #[error(
+        "entry point {entry_point} carries one router, and router {} (app {}, {}) and router {} (app {}, {}) both listen on it",
+        .routers[0], .apps[0], .declared_by[0], .routers[1], .apps[1], .declared_by[1]
+    )]
+    EntryPoint {
+        /// The contested entry point.
+        entry_point: Box<str>,
+        /// The apps, in the order of `routers`.
+        apps: [Box<str>; 2],
+        /// The routers, first declared first.
+        routers: [Box<str>; 2],
+        /// Their `declared_by` values: the app's.
+        declared_by: [Box<str>; 2],
+    },
 }
 
 impl Conflict {
@@ -142,6 +158,7 @@ impl Conflict {
             Self::TlsPolicy { .. } => "tls_policy_conflict",
             Self::CrossTenantWildcard { .. } => "cross_tenant_wildcard",
             Self::CrossTenantCatchAll { .. } => "cross_tenant_catch_all",
+            Self::EntryPoint { .. } => "route_ambiguity",
         }
     }
 
@@ -197,6 +214,15 @@ impl Conflict {
             } => json!({
                 "code": code, "message": message,
                 "tenants": tenants, "apps": apps, "routers": routers, "declared_by": declared_by,
+            }),
+            Self::EntryPoint {
+                entry_point,
+                apps,
+                routers,
+                declared_by,
+            } => json!({
+                "code": code, "message": message, "entry_point": entry_point,
+                "apps": apps, "routers": routers, "declared_by": declared_by,
             }),
         }
     }

@@ -194,10 +194,16 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     for (app, list) in snapshot.apps.iter().zip(&routers) {
         catch_all_rule(app, list, context, &mut rejected);
     }
+    let l4s: Vec<l4::Compiled> = snapshot
+        .apps
+        .iter()
+        .map(|app| l4::compile(app, snapshot, context, &mut rejected))
+        .collect();
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
-    let conflicts = conflict::detect(&snapshot.apps, &routers);
+    let mut conflicts = conflict::detect(&snapshot.apps, &routers);
+    conflicts.extend(l4::detect(&snapshot.apps, &l4s));
     if !conflicts.is_empty() {
         return Err(CompileError::Conflicts(conflicts));
     }
@@ -320,8 +326,12 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         .zip(parts)
         .zip(client_auth)
         .zip(tls_options)
+        .zip(l4s)
         .map(
-            |((((app, routers), (stages, (services, revisions))), client_auth), tls_options)| {
+            |(
+                ((((app, routers), (stages, (services, revisions))), client_auth), tls_options),
+                l4,
+            )| {
                 CompiledApp::assemble(
                     app,
                     Parts {
@@ -332,6 +342,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                         fingerprint: fingerprint(app),
                         client_auth,
                         tls_options,
+                        l4,
                     },
                 )
             },
@@ -443,7 +454,7 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
             &mut problem,
         );
         if let Some(invalid) = l4::reject(app) {
-            problem("tcp/udp".to_owned(), invalid);
+            problem("tcp".to_owned(), invalid);
         }
     }
     rejected
