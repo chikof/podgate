@@ -1,0 +1,7 @@
+displayName: Config check
+type: middleware
+import: example.com/podgate/configcheck
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example

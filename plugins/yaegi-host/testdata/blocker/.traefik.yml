@@ -1,0 +1,7 @@
+displayName: Blocker
+type: middleware
+import: example.com/podgate/blocker
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example

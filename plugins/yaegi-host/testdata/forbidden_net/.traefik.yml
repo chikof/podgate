@@ -1,0 +1,7 @@
+displayName: Forbidden net
+type: middleware
+import: example.com/podgate/forbidden_net
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example

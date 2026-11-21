@@ -1,0 +1,7 @@
+displayName: Header adder
+type: middleware
+import: example.com/podgate/headeradder
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example

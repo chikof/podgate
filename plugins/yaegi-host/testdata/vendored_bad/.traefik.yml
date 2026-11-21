@@ -1,0 +1,4 @@
+displayName: Vendored dependency that runs programs
+type: middleware
+import: example.com/podgate/vendored_bad
+summary: Example plugin for the podgate Yaegi host tests.

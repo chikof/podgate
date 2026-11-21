@@ -1,0 +1,4 @@
+displayName: Vendored dependency
+type: middleware
+import: example.com/podgate/vendored
+summary: Example plugin for the podgate Yaegi host tests.

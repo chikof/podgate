@@ -6,6 +6,8 @@ extend-exclude = ["Cargo.lock", "deny.toml", "vendor", "crates/podgate-provider/
 ned = "ned"
 # `esource` is the name of Pingora's `Error::esource` field (the side an error came from).
 esource = "esource"
+# `compress/flate` is a Go standard library package (docs/ref/plugin-yaegi.md).
+flate = "flate"
 
 [default]
 # Git and nix revisions such as `958ba64a` split into fake words.

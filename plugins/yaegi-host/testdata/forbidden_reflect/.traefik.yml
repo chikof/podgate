@@ -1,0 +1,7 @@
+displayName: Forbidden reflect
+type: middleware
+import: example.com/podgate/forbidden_reflect
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example

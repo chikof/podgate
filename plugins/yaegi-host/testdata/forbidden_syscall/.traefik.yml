@@ -1,0 +1,7 @@
+displayName: Forbidden syscall
+type: middleware
+import: example.com/podgate/forbidden_syscall
+summary: Example plugin for the podgate Yaegi host tests.
+
+testData:
+  Header: X-Example
