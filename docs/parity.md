@@ -102,7 +102,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Custom error pages | `errors` | `handle_errors` | built: `src/middleware/errors.rs`; the page comes from a service of the same app, with only `Host` and `Accept` sent (Traefik forwards the request headers), a bounded body charged to the tenant, and the original response kept on any failure |
 | Fixed response | none | `respond`, `error`, `abort` | built (`respond`): `src/middleware/respond.rs`; `1xx` refused, header values checked at compile |
 | Pass TLS client certificate | `passTLSClientCert` | placeholders | built: `pass_tls_client_cert` middleware, Traefik's two headers; forged headers are always stripped |
-| gRPC-Web | `grpcWeb` | plugin | 0056 |
+| gRPC-Web | `grpcWeb` | plugin | built: `grpc_web` middleware, binary and text, streaming, trailers as a body frame (trailers-only too, `grpc-status: 13` over 8 KiB, `2` when a response ends without trailers), `allow_origins` never reflected; every service reachable from the router must speak HTTP/2 (`invalid_middleware` otherwise) |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
 | Plugins | Yaegi (Go) plugins | Go modules | WASM filters in process; 0099 out-of-process plugins over a unix socket (no native code in podgate, any language); 0113 runs Traefik Go plugins through a Yaegi host. `dlopen` plugins are rejected |
 | JWT verification | Traefik Hub only | plugins | `jwt_auth` built (JWKS fetched through the upstream policy; names are not resolved until the JWKS fetch uses the 0042 resolver) |
