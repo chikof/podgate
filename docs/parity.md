@@ -132,13 +132,13 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | built (strict SNI is per app) |
 | SNI against Host check | none (domain fronting possible, GHSA-fh26-gfpp-7xxx) | `strict_sni_host` | built, on by default |
 | Session ticket control | `disableSessionTickets` | `session_tickets` | built as a refusal: tickets are listener wide and stay on; `session_tickets` is rejected with `unsupported_setting` |
-| TLS passthrough | `tls.passthrough` on TCP routers | `layer4` | 0059 (own port), 0060 (shared port, measured) |
+| TLS passthrough | `tls.passthrough` on TCP routers | `layer4` | built on `tcp` entry points; shared port with HTTP routers 0060 (measured) |
 
 ## TCP and UDP
 
 | Feature | Traefik | Caddy | podgate |
 |---|---|---|---|
-| TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | `ClientIP` built; SNI and ALPN 0059 |
+| TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | Built: `ClientIP`, `HostSNI`, `HostSNIRegexp`, `ALPN` and passthrough or termination |
 | TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | Load balancing with half-close, idle timeout and connect failover built; proxy protocol out and termination delay 0061 |
 | TCP middlewares | `inFlightConn`, `ipAllowList` | none | 0061 |
 | TCP health checks | `healthCheck` (v3) | `layer4` passive | built (connect, `send`/`expect` including a banner, TLS, other port, PROXY v2 header, thresholds, `unhealthy_interval_secs`; `no_healthy_server` refusal) |
