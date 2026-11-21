@@ -155,7 +155,7 @@ mod test {
     use crate::router::CompiledRouter;
     use crate::router::matcher::{Hello, View};
 
-    fn router(rule: Option<&str>, matcher: Value, priority: Option<i32>) -> Router {
+    fn router(rule: Option<&str>, matcher: &Value, priority: Option<i32>) -> Router {
         serde_json::from_value(json!({
             "name": "r", "service": "web", "match": matcher, "rule": rule, "priority": priority,
         }))
@@ -206,13 +206,16 @@ mod test {
         })
     }
 
-    /// Requests the table below is run against.
-    fn requests() -> Vec<(
+    /// A request: host, method, target and headers.
+    type Probe = (
         &'static str,
         &'static str,
         &'static str,
         Vec<(&'static str, &'static str)>,
-    )> {
+    );
+
+    /// Requests the table below is run against.
+    fn requests() -> Vec<Probe> {
         let mut table = Vec::new();
         for host in ["a.test", "b.test", "x.a.test", "api-7.example.org"] {
             for method in ["GET", "POST", "DELETE"] {
@@ -284,9 +287,9 @@ mod test {
         ];
         let requests = requests();
         for (rule, tree) in cases {
-            let by_rule = compiled(&router(Some(rule), Value::Null, None));
+            let by_rule = compiled(&router(Some(rule), &Value::Null, None));
             let len = i32::try_from(rule.len()).expect("length");
-            let by_tree = compiled(&router(None, tree.clone(), Some(len)));
+            let by_tree = compiled(&router(None, &tree, Some(len)));
             assert_eq!(by_rule.priority(), len, "{rule}: priority is the length");
             assert_eq!(by_rule.priority(), by_tree.priority(), "{rule}");
             assert_eq!(by_rule.spec(), by_tree.spec(), "{rule}: specificity");
@@ -351,8 +354,8 @@ mod test {
         ];
         let requests = requests();
         for (rule, tree) in cases {
-            let by_rule = compiled(&router(Some(rule), Value::Null, None));
-            let by_tree = compiled(&router(None, tree.clone(), Some(by_rule.priority())));
+            let by_rule = compiled(&router(Some(rule), &Value::Null, None));
+            let by_tree = compiled(&router(None, &tree, Some(by_rule.priority())));
             assert_eq!(by_rule.matcher_json(), &tree, "{rule}");
             assert_eq!(by_rule.spec(), by_tree.spec(), "{rule}: specificity");
             assert_eq!(by_rule.tier(), by_tree.tier(), "{rule}: tier");
@@ -374,15 +377,15 @@ mod test {
     fn a_rule_without_a_priority_gets_its_length_and_a_tree_gets_zero() {
         let rule = "Host(`a.test`)";
         assert_eq!(
-            compiled(&router(Some(rule), Value::Null, None)).priority(),
+            compiled(&router(Some(rule), &Value::Null, None)).priority(),
             14
         );
         assert_eq!(
-            compiled(&router(Some(rule), Value::Null, Some(-3))).priority(),
+            compiled(&router(Some(rule), &Value::Null, Some(-3))).priority(),
             -3
         );
         assert_eq!(
-            compiled(&router(None, json!({"host": "a.test"}), None)).priority(),
+            compiled(&router(None, &json!({"host": "a.test"}), None)).priority(),
             0
         );
     }
@@ -512,7 +515,7 @@ mod test {
                     }
                 }
             }
-            let router = router(Some(rule), Value::Null, None);
+            let router = router(Some(rule), &Value::Null, None);
             if let Ok(resolved) = resolve(&router) {
                 let _ = CompiledRouter::compile(&resolved, &app(), &[]);
             }
