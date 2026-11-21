@@ -14,6 +14,10 @@ fi
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+# The Yaegi host's Go module; its modules are vendored, so this never downloads.
+if command -v go >/dev/null 2>&1; then
+  (cd plugins/yaegi-host && export GOFLAGS=-mod=vendor GOPROXY=off GOTOOLCHAIN=local && go vet ./... && go test ./...)
+fi
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo deny check
 shellcheck scripts/*.sh
