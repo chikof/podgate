@@ -157,6 +157,7 @@ panic = "abort"
 opt-level = 3
 
 # Pingora 0.9.1 ends an upgraded tunnel when the 101 is read before the request's end-of-body task.
-# The copy differs from the registry crate by that one ordering fix. Change 0114; drop it once Pingora ships the fix.
+# The copy differs from the registry crate by that ordering fix and the `ProxyHttp::tunnel`
+# hook for tunnel idle, lifetime and removal timers. Drop it once Pingora ships both.
 [patch.crates-io]
 pingora-proxy = { path = "vendor/pingora-proxy" }
