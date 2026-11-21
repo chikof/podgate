@@ -159,7 +159,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Certificate storage and cluster issuance | `storage` (`acme.json`) in the proxy; clusters need a KV store or Enterprise | `storage` file, clustering through a shared storage module | built (the provider's broker keeps certificates, account key and answers in a `0700` state directory, persisted before pushed; follower providers read it; podgate stays stateless) |
 | Consul Catalog | yes | none | built (catalog and health through blocking queries, `podgate.*` and `traefik.*` tags, servers from healthy instances only, tenants by fixed, meta or namespace, 512 watched services; reference `docs/ref/provider-consul.md`) |
 | Amazon ECS | yes | none | 0107 |
-| Docker Swarm | yes | `caddy-docker-proxy` | 0108 |
+| Docker Swarm | yes | `caddy-docker-proxy` | built (services labelled `podgate.*` or `traefik.*` on the service, servers from the running tasks' addresses on one overlay network or the service's virtual IP, poll plus service and node events, tenants by fixed, network or label; reference `docs/ref/provider-swarm.md`) |
 | etcd, Redis (key trees) | yes | none | etcd built (`podgate-json` and `traefik-kv` layouts under a key prefix per tenant, range and watch through the JSON gateway with resync, compaction repair and outage keeping the last state, user and password from a file with token renewal, TLS with a client certificate, a mandatory per-tenant upstream allowlist; reference `docs/ref/provider-etcd.md`, shared layer `docs/ref/provider-kv.md`); Redis 0110 |
 | HTTP provider | yes | `--config <url>` | 0111 |
 | Marathon, Rancher, Nomad-less legacy providers | Marathon, Rancher (removed in v3) | none | not planned: end-of-life platforms |
