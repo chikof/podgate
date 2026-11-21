@@ -8,6 +8,7 @@
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
 pub mod broker;
+pub mod ca;
 pub mod consul;
 pub mod daemon;
 pub mod dns_server;

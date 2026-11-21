@@ -8,22 +8,20 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common::ca::{internal, key_lines, pki, scratch, want, wants};
 use common::{AppExt, Harness, app, daemon};
-use podgate_model::TlsMode;
 use podgate_provider::ca::cli;
-use podgate_provider::ca::init::{InitOptions, Initialized, init};
+use podgate_provider::ca::init::{InitOptions, init};
 use podgate_provider::ca::issue::Signer;
 use podgate_provider::ca::names::SuffixError;
 use podgate_provider::ca::trust::{export_root, status};
-use podgate_provider::ca::{Ca, CaError, CaView, Secret, Want, Wants, unix_now};
-use podgate_provider::source::{SourceApp, State};
-use podgate_provider::trust::HostPattern;
+use podgate_provider::ca::{Ca, CaError, Secret, unix_now};
+use podgate_provider::source::State;
 use podgate_provider::{Config, Merger, UpstreamPolicy};
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
@@ -32,103 +30,12 @@ const DAY: i64 = 86_400;
 
 // ---- helpers ---------------------------------------------------------------------------------
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pgp-ca-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
-}
-
 fn mode_of(path: &Path) -> u32 {
     std::fs::metadata(path)
         .expect("metadata")
         .permissions()
         .mode()
         & 0o777
-}
-
-/// A CA made by `ca init` into a scratch directory, with the root key kept beside it.
-struct Pki {
-    work: PathBuf,
-    dir: PathBuf,
-    root_key: PathBuf,
-    made: Initialized,
-    suffixes: Vec<String>,
-}
-
-fn pki(name: &str, suffixes: &[&str]) -> Pki {
-    let work = scratch(name);
-    let dir = work.join("ca");
-    let root_key = work.join("offline").join("root.key");
-    std::fs::create_dir_all(root_key.parent().expect("parent")).expect("offline dir");
-    let suffixes: Vec<String> = suffixes.iter().map(|s| (*s).to_owned()).collect();
-    let made = init(&InitOptions::new(
-        dir.clone(),
-        root_key.clone(),
-        suffixes.clone(),
-    ))
-    .expect("ca init");
-    Pki {
-        work,
-        dir,
-        root_key,
-        made,
-        suffixes,
-    }
-}
-
-const TENANTS: &str = r#"
-[[tenant]]
-id = "acme"
-hosts = ["acme.internal", "*.acme.internal"]
-
-[[tenant]]
-id = "globex"
-hosts = ["globex.internal", "*.globex.internal"]
-"#;
-
-impl Pki {
-    /// The provider configuration after the `admin_socket` line: quick debounce, the tenants,
-    /// the `[ca]` section, one fake source `local`.
-    fn toml_full(&self, ca_extra: &str) -> String {
-        format!(
-            "{}\n[[source]]\nkind = \"fake\"\nname = \"local\"\n",
-            self.toml(ca_extra)
-        )
-    }
-
-    fn toml(&self, ca_extra: &str) -> String {
-        let suffixes: Vec<String> = self.suffixes.iter().map(|s| format!("{s:?}")).collect();
-        format!(
-            "debounce_ms = 20\nmax_delay_ms = 100\nresync_secs = 1\n{TENANTS}\n[ca]\nenabled = true\ndir = {:?}\nallowed_suffixes = [{}]\n{ca_extra}\n",
-            self.dir.display().to_string(),
-            suffixes.join(", ")
-        )
-    }
-
-    fn config(&self, ca_extra: &str) -> Config {
-        common::config(
-            Path::new("/nonexistent/admin.sock"),
-            &self.toml_full(ca_extra),
-        )
-    }
-
-    fn ca(&self, ca_extra: &str) -> Ca {
-        let config = self.config(ca_extra);
-        let settings = config.ca.clone().expect("an enabled [ca] section");
-        Ca::open(&settings, &config).expect("the CA opens")
-    }
-
-    fn root_file(&self) -> PathBuf {
-        let path = self.work.join("root.pem");
-        std::fs::write(&path, &self.made.root_cert).expect("root file");
-        path
-    }
-}
-
-fn internal(mut app: SourceApp) -> SourceApp {
-    app.app.tls.mode = TlsMode::Internal;
-    app
 }
 
 fn openssl(args: &[&str]) -> (bool, String) {
@@ -217,13 +124,6 @@ fn leaf_hosts(put: &common::Put) -> Vec<Vec<String>> {
         .unwrap_or_default()
 }
 
-fn key_lines(key: &str) -> Vec<String> {
-    key.lines()
-        .filter(|line| !line.starts_with("-----"))
-        .map(str::to_owned)
-        .collect()
-}
-
 fn pems_in(path: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(path).expect("list").flatten() {
@@ -235,23 +135,6 @@ fn pems_in(path: &Path) -> Vec<PathBuf> {
         }
     }
     found
-}
-
-fn want(app: &str, tenant: &str, hosts: &[&str]) -> Want {
-    let mut hosts: Vec<HostPattern> = hosts
-        .iter()
-        .map(|host| HostPattern::parse(host).expect("host"))
-        .collect();
-    hosts.sort();
-    Want {
-        app: app.into(),
-        tenant: tenant.into(),
-        hosts,
-    }
-}
-
-fn wants(list: Vec<Want>) -> Wants {
-    Wants { apps: list }
 }
 
 // ---- ca init ---------------------------------------------------------------------------------
@@ -1189,136 +1072,6 @@ fn ca_state_permissions() {
         matches!(opened, Err(CaError::Store(_))),
         "a readable CA key stops the provider: {opened:?}"
     );
-}
-
-#[derive(Clone, Default)]
-struct Sink(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Sink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-    type Writer = Sink;
-
-    fn make_writer(&'a self) -> Sink {
-        self.clone()
-    }
-}
-
-#[test]
-fn ca_keys_never_logged() {
-    let sink = Sink::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(sink.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let p = pki("logs", &["internal"]);
-    let root_key = std::fs::read_to_string(&p.root_key).expect("root key");
-    let mut ca = p.ca("");
-    let now = unix_now();
-    let w = wants(vec![
-        want("a", "default", &["a.internal"]),
-        want("bad", "default", &["a.example.com"]),
-    ]);
-    ca.reconcile(&w, now).expect("issue");
-    ca.reconcile(&w, now + 3 * DAY).expect("renew");
-    let _ = ca.issue(&["a.example.com"], now, 14);
-    let view = ca.view(now + 3 * DAY);
-    let key = view.certificates()[0].key_pem.clone();
-    let mut secrets = key_lines(&key);
-    secrets.extend(key_lines(&root_key));
-    secrets.extend(key_lines(
-        &std::fs::read_to_string(p.dir.join("intermediate.key.pem")).expect("key"),
-    ));
-
-    // Debug output of everything that holds a key.
-    let leaf = ca.issue(&["b.internal"], now, 14).expect("leaf");
-    secrets.extend(key_lines(leaf.key.expose()));
-    let signer_key =
-        Secret::new(std::fs::read_to_string(p.dir.join("intermediate.key.pem")).expect("key"));
-    let signer = Signer::from_pem(&p.made.intermediate_cert, &signer_key).expect("signer");
-    let shown = format!(
-        "{ca:?} {leaf:?} {signer:?} {view:?} {:?} {signer_key:?}",
-        CaView::off()
-    );
-    // The `print` output: what the merge shows an operator.
-    let merger = Merger::new(&p.config(""), UpstreamPolicy::builtin());
-    let mut states = BTreeMap::new();
-    states.insert(
-        Box::<str>::from("local"),
-        State {
-            apps: vec![internal(app("local", "a", &["a.internal"], UP))],
-            certificates: Vec::new(),
-        },
-    );
-    let merged = merger.merge_all(
-        &states,
-        &BTreeSet::new(),
-        &podgate_provider::acme::BrokerView::off(),
-        &view,
-    );
-    assert_eq!(
-        merged.snapshot().certificates.len(),
-        1,
-        "the leaf is in the merge"
-    );
-    let printed = merged.redacted_body(0);
-    assert!(printed.contains("[redacted]"), "{printed}");
-    let debug_merged = format!("{merged:?}");
-    // The commands' output.
-    let config_file = p.work.join("provider.toml");
-    std::fs::write(
-        &config_file,
-        format!(
-            "admin_socket = \"/nonexistent/admin.sock\"\n{}",
-            p.toml_full("")
-        ),
-    )
-    .ok();
-    let mut cli_out = Vec::new();
-    let mut cli_err = Vec::new();
-    for command in [vec!["status"], vec!["export-root"]] {
-        let mut args: Vec<String> = command.iter().map(|s| (*s).to_owned()).collect();
-        args.extend(["--config".to_owned(), config_file.display().to_string()]);
-        let code = cli::run(&args, &mut cli_out, &mut cli_err);
-        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&cli_err));
-    }
-
-    let logs = String::from_utf8_lossy(&sink.0.lock().expect("lock")).into_owned();
-    assert!(
-        logs.contains("internal certificate issued"),
-        "the logs saw the issuance: {logs}"
-    );
-    let everything = [
-        ("the logs", logs),
-        ("Debug", shown),
-        ("print", printed),
-        ("Debug of the merge", debug_merged),
-        (
-            "the ca command",
-            String::from_utf8_lossy(&cli_out).into_owned() + &String::from_utf8_lossy(&cli_err),
-        ),
-    ];
-    for (what, text) in &everything {
-        assert!(
-            !text.contains("PRIVATE KEY"),
-            "{what} shows a private key header"
-        );
-        for line in &secrets {
-            assert!(!text.contains(line.as_str()), "{what} shows key material");
-        }
-    }
 }
 
 // ---- the ca command --------------------------------------------------------------------------
