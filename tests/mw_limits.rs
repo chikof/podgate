@@ -598,13 +598,10 @@ async fn in_flight_req_releases_on_abort() {
 
 #[tokio::test]
 async fn in_flight_req_releases_on_upstream_error() {
-    let dead = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        listener.local_addr().expect("addr")
-    };
+    let dead = common::refused();
     let podgate = serve(
         limited(
-            dead,
+            dead.addr,
             "in_flight_req",
             json!({ "amount": 1, "source": { "ip": {} } }),
         ),
