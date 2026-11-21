@@ -23,7 +23,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Underscore and alias header names | `aliasHeadersStrategy`, `underscoreHeadersStrategy` | none | built: `underscore_headers` `keep` (default), `delete`, `reject` |
 | Encoded characters policy | `http.encodedCharacters` | none | built (normalization and refusal of encoded slashes, NUL, encoded dot segments), built: `allow_encoded_slash` accepts `%2F` only, kept inside its segment |
 | Graceful shutdown | `transport.lifeCycle` | `grace_period` | built (`REQUEST_TIMEOUT_SECS`, SIGTERM) |
-| HTTP/3 and QUIC | `http3` | default | 0086 (a QUIC front inside the process, per-connection and per-tenant memory budgets; no mTLS or WebSockets over h3) |
+| HTTP/3 and QUIC | `http3` | default | built: a QUIC front inside the process (`quinn`, `h3`) bridged into the entry point's pipeline, `;http3` on an `https` entry point, `Alt-Svc` only for apps that allow it, per-connection and per-tenant memory budgets, retry tokens under load, no 0-RTT; no mTLS, on-demand certificates or WebSockets over h3; `docs/ref/http3.md` |
 
 ## Routing
 
