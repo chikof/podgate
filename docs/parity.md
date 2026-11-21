@@ -79,7 +79,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | HTTP/2 and h2c upstream | `h2c://`, `disableHTTP2` | `versions h2 h2c` | built (`http2`, ALPN for `https://`, `h2c://` by prior knowledge, see `docs/ref/transports.md`) |
 | h2c on entry points, gRPC | automatic h2c on plain entry points | `protocols h1 h2c` | built: `entry_points[].http2.h2c`; gRPC verified end to end, `docs/ref/grpc.md` |
 | Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | built (dial, read, write and idle timeouts; `max_idle_per_host` is `unsupported_setting`, pool size is `UPSTREAM_POOL_SIZE`) |
-| SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | 0104 (Workload API client, one SVID per tenant, upstream mTLS and client identity) |
+| SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | built: `servers_transport.spiffe {ids, trust_domain}` (ids and patterns are `peerCertURI`), one SVID per tenant by hint from the operator policy, `tls.spiffe_client`, `x-forwarded-tls-client-spiffe-id` (`docs/ref/spiffe.md`) |
 | PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | built: `proxy_protocol {version: 1\|2}` on a `servers_transport`, per-client pool key, `LOCAL` for probes and internal callers, refused for mirrors; `docs/ref/transport-extras.md` |
 
 ## Middlewares
