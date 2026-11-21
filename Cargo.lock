@@ -2991,6 +2991,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "podgate-model",
+ "podgate-rule",
  "rcgen",
  "rustls",
  "rustls-pki-types",
@@ -3003,6 +3004,14 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "podgate-rule"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,422 @@
+[
+  {
+    "rule": "Host(`a.test`)",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 14
+  },
+  {
+    "rule": "Host(`A.Test`)",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 14
+  },
+  {
+    "rule": "host(`a.test`)",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 14
+  },
+  {
+    "rule": "Host(\"a.test\")",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 14
+  },
+  {
+    "rule": "Host(`*.a.test`)",
+    "matcher": {
+      "host": "*.a.test"
+    },
+    "priority": 16
+  },
+  {
+    "rule": " Host(`a.test`) ",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 16
+  },
+  {
+    "rule": "Host(`a.test`) || Host(`b.test`)",
+    "matcher": {
+      "host": [
+        "a.test",
+        "b.test"
+      ]
+    },
+    "priority": 32
+  },
+  {
+    "rule": "Host(`a.test`, `b.test`)",
+    "matcher": {
+      "host": [
+        "a.test",
+        "b.test"
+      ]
+    },
+    "traefik": false,
+    "priority": 24
+  },
+  {
+    "rule": "HostRegexp(`^[a-z]+\\.a\\.test$`)",
+    "matcher": {
+      "host_regexp": "^[a-z]+\\.a\\.test$"
+    },
+    "priority": 31
+  },
+  {
+    "rule": "Path(`/x`)",
+    "matcher": {
+      "path": "/x"
+    },
+    "priority": 10
+  },
+  {
+    "rule": "Path(`/x`, `/y`)",
+    "matcher": {
+      "any": [
+        {
+          "path": "/x"
+        },
+        {
+          "path": "/y"
+        }
+      ]
+    },
+    "traefik": false,
+    "priority": 16
+  },
+  {
+    "rule": "PathPrefix(`/api`)",
+    "matcher": {
+      "path_prefix": "/api"
+    },
+    "priority": 18
+  },
+  {
+    "rule": "PathPrefix(`/api`, `/v2`)",
+    "matcher": {
+      "any": [
+        {
+          "path_prefix": "/api"
+        },
+        {
+          "path_prefix": "/v2"
+        }
+      ]
+    },
+    "traefik": false,
+    "priority": 25
+  },
+  {
+    "rule": "PathRegexp(`^/v[0-9]+/`)",
+    "matcher": {
+      "path_regexp": "^/v[0-9]+/"
+    },
+    "priority": 24
+  },
+  {
+    "rule": "Method(`GET`)",
+    "matcher": {
+      "method": "GET"
+    },
+    "priority": 13
+  },
+  {
+    "rule": "Method(`get`)",
+    "matcher": {
+      "method": "GET"
+    },
+    "priority": 13
+  },
+  {
+    "rule": "Method(`GET`, `HEAD`)",
+    "matcher": {
+      "method": [
+        "GET",
+        "HEAD"
+      ]
+    },
+    "traefik": false,
+    "priority": 21
+  },
+  {
+    "rule": "Header(`X-Env`, `canary`)",
+    "matcher": {
+      "header": {
+        "name": "x-env",
+        "value": "canary"
+      }
+    },
+    "priority": 25
+  },
+  {
+    "rule": "HeaderRegexp(`X-Env`, `^can`)",
+    "matcher": {
+      "header_regexp": {
+        "name": "x-env",
+        "regex": "^can"
+      }
+    },
+    "priority": 29
+  },
+  {
+    "rule": "Query(`debug=1`)",
+    "matcher": {
+      "query": {
+        "name": "debug",
+        "value": "1"
+      }
+    },
+    "priority": 16
+  },
+  {
+    "rule": "Query(`debug`, `1`)",
+    "matcher": {
+      "query": {
+        "name": "debug",
+        "value": "1"
+      }
+    },
+    "priority": 19
+  },
+  {
+    "rule": "QueryRegexp(`debug`, `^[0-9]$`)",
+    "matcher": {
+      "query_regexp": {
+        "name": "debug",
+        "regex": "^[0-9]$"
+      }
+    },
+    "priority": 31
+  },
+  {
+    "rule": "ClientIP(`10.0.0.0/8`)",
+    "matcher": {
+      "client_ip": [
+        "10.0.0.0/8"
+      ]
+    },
+    "priority": 22
+  },
+  {
+    "rule": "ClientIP(`::1`)",
+    "matcher": {
+      "client_ip": [
+        "::1"
+      ]
+    },
+    "priority": 15
+  },
+  {
+    "rule": "Host(`a.test`) && PathPrefix(`/api`)",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "path_prefix": "/api"
+        }
+      ]
+    },
+    "priority": 36
+  },
+  {
+    "rule": "Host(`a.test`) && PathPrefix(`/api`) && Method(`POST`)",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "path_prefix": "/api"
+        },
+        {
+          "method": "POST"
+        }
+      ]
+    },
+    "priority": 54
+  },
+  {
+    "rule": "Host(`a.test`) && (PathPrefix(`/api`) || Path(`/x`))",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "any": [
+            {
+              "path_prefix": "/api"
+            },
+            {
+              "path": "/x"
+            }
+          ]
+        }
+      ]
+    },
+    "priority": 52
+  },
+  {
+    "rule": "Host(`a.test`) || Host(`b.test`) && Path(`/x`)",
+    "matcher": {
+      "any": [
+        {
+          "host": "a.test"
+        },
+        {
+          "all": [
+            {
+              "host": "b.test"
+            },
+            {
+              "path": "/x"
+            }
+          ]
+        }
+      ]
+    },
+    "priority": 46
+  },
+  {
+    "rule": "(Host(`a.test`) || Host(`b.test`)) && Path(`/x`)",
+    "matcher": {
+      "all": [
+        {
+          "host": [
+            "a.test",
+            "b.test"
+          ]
+        },
+        {
+          "path": "/x"
+        }
+      ]
+    },
+    "priority": 48
+  },
+  {
+    "rule": "((Host(`a.test`)))",
+    "matcher": {
+      "host": "a.test"
+    },
+    "priority": 18
+  },
+  {
+    "rule": "!Host(`a.test`)",
+    "matcher": {
+      "not": {
+        "host": "a.test"
+      }
+    },
+    "priority": 15
+  },
+  {
+    "rule": "Host(`a.test`) && !PathPrefix(`/admin`)",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "not": {
+            "path_prefix": "/admin"
+          }
+        }
+      ]
+    },
+    "priority": 39
+  },
+  {
+    "rule": "Host(`a.test`) &&   !   Path(`/x`)",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "not": {
+            "path": "/x"
+          }
+        }
+      ]
+    },
+    "priority": 34
+  },
+  {
+    "rule": "Host(`a.test`) && !(Path(`/x`) || Method(`GET`))",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "not": {
+            "any": [
+              {
+                "path": "/x"
+              },
+              {
+                "method": "GET"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "priority": 48
+  },
+  {
+    "rule": "!!Host(`a.test`)",
+    "matcher": {
+      "not": {
+        "not": {
+          "host": "a.test"
+        }
+      }
+    },
+    "priority": 16
+  },
+  {
+    "rule": "Host(`a.test`) && Path(\"/x\") && Header(`X`, \"y\")",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "path": "/x"
+        },
+        {
+          "header": {
+            "name": "x",
+            "value": "y"
+          }
+        }
+      ]
+    },
+    "priority": 48
+  },
+  {
+    "rule": "Host(`a.test`) && HostRegexp(`^x`)",
+    "matcher": {
+      "all": [
+        {
+          "host": "a.test"
+        },
+        {
+          "host_regexp": "^x"
+        }
+      ]
+    },
+    "priority": 34
+  }
+]

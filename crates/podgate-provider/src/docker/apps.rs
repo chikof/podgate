@@ -50,8 +50,12 @@ pub(super) fn build(
 
     let mut groups: BTreeMap<Box<str>, Vec<Candidate<'_>>> = BTreeMap::new();
     for container in serving {
-        let exposed = match container.labels.get("podgate.enable").map(String::as_str) {
-            Some("false") => false,
+        let enable = container
+            .labels
+            .get("podgate.enable")
+            .or_else(|| container.labels.get("traefik.enable"));
+        let exposed = match enable.map(String::as_str) {
+            Some(value) if value.eq_ignore_ascii_case("false") => false,
             // Any other value is for the label parser to reject, with a report.
             Some(_) => true,
             None => settings.exposed_by_default,
@@ -60,10 +64,15 @@ pub(super) fn build(
             continue;
         }
         match candidate(settings, container) {
-            Ok(candidate) => groups
-                .entry(candidate.app.clone())
-                .or_default()
-                .push(candidate),
+            Ok(candidate) => {
+                for problem in &candidate.labels.problems {
+                    built.reports.push(report(container, &problem.to_string()));
+                }
+                groups
+                    .entry(candidate.app.clone())
+                    .or_default()
+                    .push(candidate);
+            }
             Err(why) => built.reports.push(report(container, &why)),
         }
     }

@@ -23,6 +23,10 @@
 //! Any other `podgate.*` key rejects the container, like the daemon rejects an unknown field.
 //! Keys that do not start with `podgate.` are not this file's.
 //!
+//! The `traefik.*` keys are read too, by [`crate::traefik::translate`], into the same routers,
+//! services and middlewares (`docs/ref/provider-traefik.md`); a Traefik label that cannot be
+//! translated exactly leaves out the router it belongs to and is reported, see [`Labels::problems`].
+//!
 //! # The address rule
 //!
 //! Labels describe routing, never destinations. The servers of a service are added by
@@ -42,11 +46,12 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::source::TenantClaim;
+use crate::traefik::{self, Problem, Translation};
 
 const PREFIX: &str = "podgate.";
 
 /// The service a router uses when it names none, and the one that exists without a label.
-const DEFAULT_SERVICE: &str = "web";
+pub(crate) const DEFAULT_SERVICE: &str = "web";
 
 const DEFAULT_REVISION: &str = "default";
 
@@ -103,6 +108,18 @@ pub enum Rejection {
         /// What differs.
         reason: Box<str>,
     },
+    /// `traefik.*` labels that cannot be translated exactly and leave the container unusable:
+    /// a label that names an address, a `traefik.enable` that is no boolean, or no router
+    /// that translated.
+    #[error("{key}: {reason}")]
+    Unsupported {
+        /// The stable code of the first problem.
+        code: &'static str,
+        /// The label key of the first problem, or `traefik` for several.
+        key: Box<str>,
+        /// What is wrong.
+        reason: Box<str>,
+    },
 }
 
 impl Rejection {
@@ -116,6 +133,7 @@ impl Rejection {
             Self::Foreign { .. } => "foreign_reference",
             Self::NoRouter => "no_router",
             Self::Conflict { .. } => "app_conflict",
+            Self::Unsupported { code, .. } => code,
         }
     }
 
@@ -172,6 +190,11 @@ pub struct Labels {
     pub definition: Definition,
     /// The services of this container's revision, without servers.
     pub services: Vec<Declared>,
+    /// The scheme of the servers of the services that do not use plain `http`: `https` or `h2c`.
+    pub schemes: BTreeMap<Box<str>, Box<str>>,
+    /// The `traefik.*` labels that were left out, each naming its label. The router, service or
+    /// middleware they belong to is not in this struct, and neither is a router that uses it.
+    pub problems: Vec<Problem>,
 }
 
 #[derive(Default)]
@@ -210,24 +233,33 @@ struct Draft {
     services: BTreeMap<String, (Box<str>, Map<String, Value>)>,
     transports: BTreeMap<String, Map<String, Value>>,
     refs: Refs,
+    schemes: BTreeMap<Box<str>, Box<str>>,
+    problems: Vec<Problem>,
 }
 
-/// Reads the `podgate.*` pairs of one container.
+/// Reads the `podgate.*` and `traefik.*` pairs of one container.
 ///
-/// Pairs whose key does not start with `podgate.` are skipped.
+/// Pairs whose key starts with neither are skipped. Both spellings define routers, services and
+/// middlewares of the same app, and a name that both define is a rejection.
 ///
 /// # Errors
 ///
-/// A [`Rejection`] for the first label that is unknown, malformed, names an address, or refers
-/// to something this container does not define, and [`Rejection::NoRouter`] when no router
-/// remains.
+/// A [`Rejection`] for the first `podgate.*` label that is unknown, malformed, names an address,
+/// or refers to something this container does not define; for a `traefik.*` label that names an
+/// address; and [`Rejection::NoRouter`] when no router remains. A `traefik.*` label that cannot
+/// be translated exactly is not an error: it leaves out its router and is in
+/// [`Labels::problems`], unless no router is left.
 pub fn parse<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Labels, Rejection> {
     let mut draft = Draft::default();
+    let mut others = Vec::new();
     for (key, value) in pairs {
         if let Some(rest) = key.strip_prefix(PREFIX) {
             draft.accept(key, rest, value)?;
+        } else {
+            others.push((key, value));
         }
     }
+    draft.merge_traefik(traefik::translate(others))?;
     draft.finish()
 }
 
@@ -332,6 +364,77 @@ impl Draft {
         Ok(())
     }
 
+    /// Adds what the `traefik.*` labels translated to, next to the `podgate.*` ones.
+    fn merge_traefik(&mut self, translation: Translation) -> Result<(), Rejection> {
+        if let Some(problem) = translation.problems.iter().find(|problem| problem.fatal) {
+            return Err(Rejection::Unsupported {
+                code: problem.code.as_str(),
+                key: problem.key.clone(),
+                reason: problem.reason.clone(),
+            });
+        }
+        if let Some(tls) = translation.tls {
+            if self.tls.is_some_and(|own| own != tls) {
+                return Err(Rejection::invalid(
+                    "podgate.tls",
+                    "differs from a traefik tls.certresolver, which means acme",
+                ));
+            }
+            self.tls = Some(tls);
+        }
+        if let Some(port) = translation.port {
+            if self.port.is_some_and(|own| own != port) {
+                return Err(Rejection::invalid(
+                    "podgate.port",
+                    "differs from the traefik loadbalancer.server.port",
+                ));
+            }
+            self.port = Some(port);
+        }
+        let defined_twice = |what: &str, name: &str| {
+            Rejection::invalid(
+                &format!("traefik.http.{what}.{name}"),
+                format!("is also defined by a podgate.{what} label of this container"),
+            )
+        };
+        for router in translation.routers {
+            let name = router.name.to_string();
+            let draft = RouterDraft {
+                matcher: Some(router.matcher),
+                priority: router.priority,
+                entry_points: router.entry_points,
+                chain: router.chain,
+                service: Some(router.service),
+            };
+            if self.routers.insert(name.clone(), draft).is_some() {
+                return Err(defined_twice("routers", &name));
+            }
+        }
+        for middleware in translation.middlewares {
+            let name = middleware.name.to_string();
+            let draft = MiddlewareDraft {
+                kind: Some(middleware.kind),
+                config: middleware.config,
+            };
+            if self.middlewares.insert(name.clone(), draft).is_some() {
+                return Err(defined_twice("middlewares", &name));
+            }
+        }
+        for service in translation.services {
+            let name = service.name.to_string();
+            if self
+                .services
+                .insert(name.clone(), (service.kind, service.config))
+                .is_some()
+            {
+                return Err(defined_twice("services", &name));
+            }
+        }
+        self.schemes = translation.schemes;
+        self.problems = translation.problems;
+        Ok(())
+    }
+
     fn finish(mut self) -> Result<Labels, Rejection> {
         if let Some(hosts) = self.hosts.take() {
             let router = RouterDraft {
@@ -350,7 +453,20 @@ impl Draft {
             }
         }
         if self.routers.is_empty() {
-            return Err(Rejection::NoRouter);
+            return Err(match self.problems.first() {
+                None => Rejection::NoRouter,
+                Some(first) => Rejection::Unsupported {
+                    code: first.code.as_str(),
+                    key: "traefik".into(),
+                    reason: self
+                        .problems
+                        .iter()
+                        .map(|problem| format!("{}: {}", problem.key, problem.reason))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                        .into(),
+                },
+            });
         }
         let mut routers = Vec::new();
         for (name, draft) in self.routers {
@@ -443,12 +559,14 @@ impl Draft {
                 transports,
             },
             services,
+            schemes: self.schemes,
+            problems: self.problems,
         })
     }
 }
 
 /// Whether `value` is an address, a URL or a `host:port` in any of the usual spellings.
-fn looks_like_address(value: &str) -> bool {
+pub(crate) fn looks_like_address(value: &str) -> bool {
     value.contains("://")
         || value.starts_with("unix:")
         || value.parse::<IpAddr>().is_ok()
@@ -741,7 +859,9 @@ pub fn assemble(id: &str, members: &[Member<'_>]) -> Result<Assembled, Rejection
                 Some("revision.state")
             } else if member.labels.definition != first.labels.definition {
                 Some("routers, middlewares, transports or tls")
-            } else if member.labels.services != first.labels.services {
+            } else if member.labels.services != first.labels.services
+                || member.labels.schemes != first.labels.schemes
+            {
                 Some("services")
             } else {
                 None
@@ -830,17 +950,18 @@ pub fn assemble(id: &str, members: &[Member<'_>]) -> Result<Assembled, Rejection
         let mut servers: Vec<SocketAddr> = kept.iter().map(|&i| members[i].server).collect();
         servers.sort();
         servers.dedup();
-        let urls: Vec<Value> = servers
-            .iter()
-            .map(|server| json!({ "url": format!("http://{server}") }))
-            .collect();
         let services: Vec<Value> = first
             .services
             .iter()
             .map(|service| {
                 let mut config = service.config.clone();
                 if &*service.kind == "loadbalancer" {
-                    config.insert("servers".into(), Value::Array(urls.clone()));
+                    let scheme = first.schemes.get(&service.name).map_or("http", |s| &**s);
+                    let urls: Vec<Value> = servers
+                        .iter()
+                        .map(|server| json!({ "url": format!("{scheme}://{server}") }))
+                        .collect();
+                    config.insert("servers".into(), Value::Array(urls));
                 }
                 let mut object = Map::new();
                 object.insert("name".into(), Value::String(service.name.to_string()));

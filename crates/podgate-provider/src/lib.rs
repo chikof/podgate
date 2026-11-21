@@ -17,6 +17,8 @@
 //! - [`docker`]: the source that turns Docker and Podman containers into apps through their
 //!   `podgate.*` labels.
 //! - [`kubernetes`]: the source that turns Ingresses and EndpointSlices into routers and servers.
+//! - [`traefik`]: the translator of `traefik.*` labels and tags (rules, services, middlewares),
+//!   called by the sources next to their own labels.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -33,6 +35,7 @@ pub mod policy;
 pub mod push;
 pub mod quarantine;
 pub mod source;
+pub mod traefik;
 pub mod trust;
 
 pub use config::{Config, ConfigError};
