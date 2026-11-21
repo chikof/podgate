@@ -114,7 +114,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Static files: `file_server`, `try_files`, precompressed | none | yes | built: operator-declared per-tenant roots opened as `cap-std` handles (`STATIC_ROOTS_FILE`), no `..` or symlink escape, no hidden files, `index`, `try_files`, status pages, validators, ranges, `br`/`gzip` sidecars, file buffers charged to `max_buffer_bytes`; see `docs/ref/svc-static.md` |
 | Directory listings (`browse`) | none | `file_server browse` | built: opt-in by operator root flag and service flag, HTML and JSON, sorting, no hidden files, escaped names and bidi controls, symlinks only inside the root, bounded and charged to `max_buffer_bytes`; see `docs/ref/svc-static-browse.md` |
 | `php_fastcgi` and FastCGI | none | `php_fastcgi` | built: the `fastcgi` service runs PHP through operator-declared per-tenant PHP-FPM pools and code roots (`FASTCGI_FILE`), only `.php` files that resolve under a `cap-std` root, a path-info split that cannot run an upload, httpoxy, underscore and colliding headers dropped, `env` validated, bounded connection pool, bodies charged to `max_buffer_bytes`; see `docs/ref/svc-fastcgi.md` |
-| Rule strings in the configuration | the native syntax | none | 0106 (`rule` on a router, parsed by the 0071 crate at compile; same tenant and catch-all rules) |
+| Rule strings in the configuration | the native syntax | none | built (`rule` on every router, parsed by the 0071 crate at compile; same tenant and catch-all rules) |
 
 ## TLS and certificates
 
