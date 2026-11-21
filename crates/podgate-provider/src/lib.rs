@@ -28,6 +28,7 @@
 
 pub mod acme;
 pub mod config;
+pub mod consul;
 pub mod docker;
 pub mod engine;
 pub mod file;

@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use podgate_provider::consul::ConsulSource;
 use podgate_provider::docker::DockerSource;
 use podgate_provider::file::FileSource;
 use podgate_provider::kubernetes::KubernetesSource;
@@ -61,6 +62,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<(Command, Pa
 fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> {
     for source in &config.sources {
         match &*source.kind {
+            "consul" => engine.add_source(ConsulSource::from_config(source)?)?,
             "docker" => engine.add_source(DockerSource::from_config(source)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
             "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,
