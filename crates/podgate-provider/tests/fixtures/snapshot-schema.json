@@ -803,6 +803,11 @@
           "const": "on_demand",
           "description": "Issued at the first handshake for a matching host.",
           "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Served from the certificates the snapshot carries, which the operator's internal CA\nissued; podgate orders nothing.",
+          "type": "string"
         }
       ]
     },
