@@ -433,22 +433,26 @@ async fn an_upgrade_request_asks_a_tls_server_for_http1() {
 
 #[tokio::test]
 async fn h2_multiplexes_on_few_connections() {
-    let backend = Backend::plain(Duration::from_millis(400)).await;
+    let backend = Backend::plain(Duration::from_secs(1)).await;
     let podgate = Arc::new(Podgate::start().await);
     push(&podgate, 1, one_service(&[h2c(&backend)], None)).await;
 
-    // One request first, and time for Pingora to pool its connection: Pingora does not
-    // single-flight dials, so a cold burst opens a connection per request that finds none.
-    assert_eq!(podgate.get("a.test", "/warm").await.status, 200);
-    sleep(Duration::from_millis(200)).await;
-
-    // Twenty requests, started 5 ms apart so that each finds the pooled connection (Pingora
-    // misses a connection another request is taking at that very moment), all in flight at once.
+    // Pingora takes a pooled connection out of its pool while it opens a stream on it, and a
+    // request that arrives in that window finds none and dials its own
+    // (pingora-core `connectors/http/v2.rs`, `reused_http_session`). A fixed spacing only makes
+    // the window unlikely to be hit; a descheduled thread under load hits it. So each request
+    // starts after the upstream has the previous one: that stream is open and its connection is
+    // back in the pool, and the first request's dial is the only one. All twenty stay in
+    // flight at once because the upstream holds each for a second.
     let mut burst = JoinSet::new();
     for number in 0..20 {
         let podgate = Arc::clone(&podgate);
         burst.spawn(async move { podgate.get("a.test", &format!("/{number}")).await.status });
-        sleep(Duration::from_millis(5)).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while backend.stats.requests().len() <= number {
+            assert!(Instant::now() < deadline, "request {number} never arrived");
+            sleep(Duration::from_millis(1)).await;
+        }
     }
     while let Some(status) = burst.join_next().await {
         assert_eq!(status.expect("request"), 200);
