@@ -824,8 +824,6 @@ impl ProxyHttp for Gateway {
                 "replaced by an error page",
             ));
         }
-        skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
-        sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         // Before compression: the chain judges the response as the upstream sent it.
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             let cx = middleware::ResponseCx {
@@ -861,6 +859,9 @@ impl ProxyHttp for Gateway {
                 &mut ctx.chain,
             )?;
         }
+        // Last, so a Cache-Control that the chain set counts: see `shared_cacheable`.
+        skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
+        sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         Ok(())
     }
 

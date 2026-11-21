@@ -376,36 +376,46 @@ async fn caching_upstream(cache_control: &'static str) -> SocketAddr {
 }
 
 #[tokio::test]
-async fn sticky_not_set_on_public_responses() {
+async fn sticky_cookie_not_set_on_shared_cacheable_response() {
     let podgate = Podgate::start().await;
-    let public = caching_upstream("max-age=60, Public").await;
-    let private = caching_upstream("private").await;
     let sticky = json!({ "cookie": {} });
-    push(
-        &podgate,
-        &pushed(
-            1,
-            &[
-                sticky_app(&[public], &sticky),
-                app(
-                    "b",
-                    &["b.test"],
-                    &[serving("r1", &[sticky_service("web", &[private], &sticky)])],
-                ),
-            ],
-        ),
-    )
-    .await;
+    let shared = [
+        ("a", "max-age=60, Public"),
+        ("c", "max-age=60"),
+        ("d", "S-MaxAge=30"),
+    ];
+    let personal = [("b", "private"), ("e", "public, no-store")];
+    let mut apps = Vec::new();
+    for (id, control) in shared.iter().chain(&personal) {
+        let host = format!("{id}.test");
+        let upstream = caching_upstream(control).await;
+        apps.push(app(
+            id,
+            &[host.as_str()],
+            &[serving(
+                "r1",
+                &[sticky_service("web", &[upstream], &sticky)],
+            )],
+        ));
+    }
+    push(&podgate, &pushed(1, &apps)).await;
 
-    let shared = podgate.get("a.test", "/").await;
-    assert_eq!(shared.status, 200);
-    assert!(
-        header_of(&shared, NAME).is_none(),
-        "a shared cache must not store a pin: {:?}",
-        set_cookies(&shared)
-    );
-    let personal = podgate.get("b.test", "/").await;
-    assert!(header_of(&personal, NAME).is_some(), "{personal:?}");
+    for (id, control) in shared {
+        let response = podgate.get(&format!("{id}.test"), "/").await;
+        assert_eq!(response.status, 200);
+        assert!(
+            header_of(&response, NAME).is_none(),
+            "a shared cache must not store a pin ({control}): {:?}",
+            set_cookies(&response)
+        );
+    }
+    for (id, control) in personal {
+        let response = podgate.get(&format!("{id}.test"), "/").await;
+        assert!(
+            header_of(&response, NAME).is_some(),
+            "{control}: {response:?}"
+        );
+    }
 }
 
 #[tokio::test]

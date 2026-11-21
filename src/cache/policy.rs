@@ -126,6 +126,7 @@ const NO_CACHE: u8 = 2;
 const PRIVATE: u8 = 4;
 /// `must-revalidate` or `proxy-revalidate`.
 const MUST_REVALIDATE: u8 = 8;
+const PUBLIC: u8 = 16;
 
 /// The most RFC 9111 allows a delta-seconds to mean: larger values are capped to it.
 const MAX_DELTA: u64 = 2_147_483_648;
@@ -166,6 +167,8 @@ impl Directives {
                     found.flags |= NO_CACHE;
                 } else if name.eq_ignore_ascii_case("private") {
                     found.flags |= PRIVATE;
+                } else if name.eq_ignore_ascii_case("public") {
+                    found.flags |= PUBLIC;
                 } else if name.eq_ignore_ascii_case("must-revalidate")
                     || name.eq_ignore_ascii_case("proxy-revalidate")
                 {
@@ -195,10 +198,30 @@ impl Directives {
         self.flags & PRIVATE != 0
     }
 
+    /// `public`.
+    pub(crate) fn public(&self) -> bool {
+        self.flags & PUBLIC != 0
+    }
+
     /// `must-revalidate` or `proxy-revalidate`: a stale entry may never be served unchecked.
     pub(crate) fn must_revalidate(&self) -> bool {
         self.flags & MUST_REVALIDATE != 0
     }
+}
+
+/// Whether a shared cache may store a response with these `headers` (RFC 9111 sections 3 and
+/// 4.2.1): no `private` and no `no-store`, and freshness it can use: `public`, `s-maxage`,
+/// `max-age` or an `Expires` header. Heuristic freshness (a response with none of these and a
+/// `Last-Modified`) is deliberately ignored, so such a response counts as not cacheable.
+#[must_use]
+pub(crate) fn shared_cacheable(headers: &HeaderMap) -> bool {
+    let directives = Directives::parse(headers);
+    !directives.private()
+        && !directives.no_store()
+        && (directives.public()
+            || directives.s_maxage.is_some()
+            || directives.max_age.is_some()
+            || headers.contains_key(EXPIRES))
 }
 
 /// Splits a `Cache-Control` value at the commas outside quoted strings.
@@ -545,6 +568,32 @@ mod test {
             None,
             SystemTime::now(),
         )
+    }
+
+    #[test]
+    fn shared_cacheable_needs_explicit_freshness_and_no_private_or_no_store() {
+        let cases: [(&[(&str, &str)], bool); 11] = [
+            (&[], false),
+            (&[("last-modified", "Mon, 02 Jan 2006 15:04:05 GMT")], false),
+            (&[("cache-control", "public")], true),
+            (&[("cache-control", "S-MaxAge=1")], true),
+            (&[("cache-control", "max-age=60")], true),
+            (&[("expires", "Mon, 02 Jan 2006 15:04:05 GMT")], true),
+            (
+                &[("cache-control", "max-age=5"), ("cache-control", "PUBLIC")],
+                true,
+            ),
+            (&[("cache-control", "public, private")], false),
+            (&[("cache-control", "max-age=60, no-store")], false),
+            (
+                &[("cache-control", "public"), ("cache-control", "no-store")],
+                false,
+            ),
+            (&[("cache-control", "no-cache")], false),
+        ];
+        for (pairs, expected) in cases {
+            assert_eq!(shared_cacheable(&headers(pairs)), expected, "{pairs:?}");
+        }
     }
 
     #[test]

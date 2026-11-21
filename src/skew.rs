@@ -21,6 +21,7 @@ use pingora::proxy::Session;
 use podgate_model::SkewSecret;
 use sha2::Sha256;
 
+use crate::cache::policy::shared_cacheable;
 use crate::route::Selected;
 use crate::service::PickCx;
 use crate::table::{CompiledApp, Pick, RoutingTable};
@@ -107,8 +108,10 @@ pub fn pinned(
 }
 
 /// Pins the session to the revision that served this request, unless the request already was
-/// pinned to it. A no-op without a `skew_secret` or a route. The cookie is `Secure` on TLS
-/// connections.
+/// pinned to it. A no-op without a `skew_secret` or a route, and for a response that shared
+/// caches may store (`cache::policy::shared_cacheable`): a cache in front of podgate would replay the
+/// cookie to every visitor. The request stays unpinned and the next uncacheable response pins
+/// it. The cookie is `Secure` on TLS connections.
 ///
 /// # Errors
 ///
@@ -122,6 +125,9 @@ pub fn set_cookie(
     let Some(selected) = selected.filter(|selected| !selected.pinned) else {
         return Ok(());
     };
+    if shared_cacheable(&response.headers) {
+        return Ok(());
+    }
     let Some(secret) = table.skew_secret() else {
         return Ok(());
     };

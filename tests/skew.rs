@@ -4,10 +4,15 @@ mod common;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{Podgate, Response, TestCert, Upstream, app, revision, snapshot};
+use common::{
+    Podgate, Response, TestCert, Upstream, app, middleware, revision, snapshot, with_chain,
+};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
+use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 const SECRET: &str = "a-secret-of-at-least-16-bytes";
 const COOKIE: &str = "__podgate_rev";
@@ -297,4 +302,114 @@ async fn skew_short_secret_rejected() {
         live.body, "one",
         "the previous snapshot keeps serving: {live:?}"
     );
+}
+
+/// An upstream that answers every request `ok` with the raw `headers` lines (`\r\n`-joined by
+/// the caller) added to the response.
+async fn upstream_with(headers: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    while let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        seen.drain(..end + 4);
+                        let response =
+                            format!("HTTP/1.1 200 OK\r\n{headers}\r\nContent-Length: 2\r\n\r\nok");
+                        if stream.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Pushes app `a` with one serving revision on an upstream that sends `headers`, and returns
+/// the first response for `a.test`.
+async fn first_response(headers: &'static str, chain: &[Value]) -> Response {
+    let podgate = Podgate::start().await;
+    let addr = upstream_with(headers).await;
+    let mut pushed = snapshot(
+        1,
+        &[with_chain(
+            app("a", &["a.test"], &[revision("r1", addr, 1, "serving")]),
+            chain,
+        )],
+    );
+    pushed["skew_secret"] = json!(SECRET);
+    assert_eq!(podgate.push_snapshot(&pushed).await.status, 200);
+    let response = podgate.get("a.test", "/").await;
+    assert_eq!(response.status, 200, "{response:?}");
+    response
+}
+
+#[tokio::test]
+async fn skew_cookie_not_set_on_public_response() {
+    for control in [
+        "Cache-Control: max-age=60, Public",
+        "Cache-Control: max-age=5\r\nCache-Control: PUBLIC",
+    ] {
+        let response = first_response(control, &[]).await;
+        assert_eq!(
+            response.header("set-cookie"),
+            None,
+            "{control}: {response:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skew_cookie_not_set_on_s_maxage_response() {
+    let response = first_response("Cache-Control: S-MaxAge=60", &[]).await;
+    assert_eq!(response.header("set-cookie"), None, "{response:?}");
+}
+
+#[tokio::test]
+async fn skew_cookie_not_set_on_max_age_response() {
+    for control in [
+        "Cache-Control: max-age=60",
+        "Expires: Thu, 01 Jan 2099 00:00:00 GMT",
+    ] {
+        let response = first_response(control, &[]).await;
+        assert_eq!(
+            response.header("set-cookie"),
+            None,
+            "{control}: {response:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skew_cookie_set_on_private_public_mix() {
+    for control in [
+        "Cache-Control: public, private",
+        "Cache-Control: public\r\nCache-Control: no-store",
+        "Cache-Control: s-maxage=60, private",
+        "Cache-Control: private, max-age=60",
+        "Cache-Control: no-cache",
+    ] {
+        let response = first_response(control, &[]).await;
+        assert!(issued(&response).is_some(), "{control}: {response:?}");
+    }
+}
+
+#[tokio::test]
+async fn skew_cookie_not_set_when_the_chain_makes_it_public() {
+    let headers = middleware(
+        "cc",
+        "headers",
+        json!({ "response": { "set": { "cache-control": "public, max-age=60" } } }),
+    );
+    let response = first_response("X-Plain: 1", &[headers]).await;
+    assert_eq!(response.header("set-cookie"), None, "{response:?}");
 }

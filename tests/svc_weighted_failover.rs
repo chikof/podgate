@@ -539,3 +539,39 @@ async fn unknown_graph_fields_are_refused_not_ignored() {
     assert_eq!(reply.status, 422, "{}", reply.body);
     assert!(reply.body.contains("invalid_service"), "{}", reply.body);
 }
+
+#[tokio::test]
+async fn weighted_sticky_cookie_not_set_on_shared_cacheable_response() {
+    let podgate = Podgate::start().await;
+    let (one, two) = (Backend::start("one").await, Backend::start("two").await);
+    let mut split = weighted("top", &[("one", 1), ("two", 1)]);
+    split["sticky"] = json!({ "cookie": {} });
+    let services = [split, lb("one", &[one.addr]), lb("two", &[two.addr])];
+    let with_control = |version: u64, control: &str| {
+        let header = middleware(
+            "cc",
+            "headers",
+            json!({ "response": { "set": { "cache-control": control } } }),
+        );
+        let mut pushed = snapshot(version, &[with_chain(graph_app(&services), &[header])]);
+        pushed["skew_secret"] = json!(SECRET);
+        pushed
+    };
+
+    push(&podgate, &with_control(1, "max-age=60")).await;
+    for _ in 0..4 {
+        let response = podgate.get("a.test", "/").await;
+        assert_eq!(response.status, 200);
+        assert!(
+            set_cookie(&response, "__podgate_svc").is_none(),
+            "a shared cache must not store a pin: {response:?}"
+        );
+    }
+
+    push(&podgate, &with_control(2, "private, max-age=60")).await;
+    let response = podgate.get("a.test", "/").await;
+    assert!(
+        set_cookie(&response, "__podgate_svc").is_some(),
+        "{response:?}"
+    );
+}

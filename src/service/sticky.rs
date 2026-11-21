@@ -24,8 +24,8 @@
 //!
 //! Without a `skew_secret` there is no key: the snapshot is refused (`invalid_service`) when it
 //! binds the secret (`Sticky::bind`, called by the compiler for every service). A response
-//! that is `Cache-Control: public` never carries the cookie, because a shared cache would hand
-//! one client's pin to everyone.
+//! that a shared cache may store (`cache::policy::shared_cacheable`) never carries the cookie,
+//! because the cache would hand one client's pin to everyone.
 
 use std::fmt;
 
@@ -40,6 +40,7 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use super::{PickCx, Server, Service};
+use crate::cache::policy::shared_cacheable;
 use crate::compile::Invalid;
 use crate::route::Selected;
 use crate::table::RoutingTable;
@@ -360,22 +361,11 @@ fn decode(value: &str) -> Option<[u8; TAG_LEN]> {
     Some(tag)
 }
 
-/// Whether the response lets shared caches store it (`Cache-Control: public`).
-fn publicly_cacheable(response: &ResponseHeader) -> bool {
-    response
-        .headers
-        .get_all("cache-control")
-        .into_iter()
-        .filter_map(|header| header.to_str().ok())
-        .flat_map(|header| header.split(','))
-        .any(|directive| directive.trim().eq_ignore_ascii_case("public"))
-}
-
 /// Pins the client to what answered it, for every sticky service the request went through: a
 /// `weighted` parent pins the child it chose, a `loadbalancer` the server. A request that
 /// already carried a pin gets no new one for it. A no-op without a route, on a service that is
-/// not sticky and on a `Cache-Control: public` response. The cookie is `Secure` on TLS
-/// connections.
+/// not sticky and on a response that shared caches may store (`shared_cacheable`). The cookie is
+/// `Secure` on TLS connections.
 ///
 /// # Errors
 ///
@@ -396,7 +386,7 @@ pub fn set_cookie(
         let Some(sticky) = named.service.sticky() else {
             continue;
         };
-        if publicly_cacheable(response) {
+        if shared_cacheable(&response.headers) {
             return Ok(());
         }
         let request = session.req_header();
@@ -623,19 +613,5 @@ mod test {
         let mut unbound = Sticky::compile(&json!({ "cookie": {} })).expect("compiles");
         let err = unbound.bind(None, "app", "web").expect_err("refused");
         assert_eq!(err.code, "invalid_service");
-    }
-
-    #[test]
-    fn sticky_cache_rule_reads_every_cache_control_header() {
-        let mut response = ResponseHeader::build(200, None).expect("response");
-        assert!(!publicly_cacheable(&response));
-        response
-            .append_header("cache-control", "private, max-age=5")
-            .expect("header");
-        assert!(!publicly_cacheable(&response));
-        response
-            .append_header("cache-control", "max-age=60, Public")
-            .expect("header");
-        assert!(publicly_cacheable(&response));
     }
 }
