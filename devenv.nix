@@ -19,6 +19,7 @@
     pkgs.cmake # libz-ng-sys: pingora-core forces its zlib-ng backend
     pkgs.pebble # test ACME server
     pkgs.oha # HTTP load generator
+    pkgs.valkey # test Redis-compatible store
     pkgs.caddy # proxy benchmark baseline
     pkgs.traefik # proxy benchmark baseline
   ];
