@@ -42,9 +42,9 @@ use pingora::{Error, ErrorSource};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::Service;
 use super::loadbalancer::Server;
 use super::state::{ServerState, now_ms};
+use super::{Lease, Service};
 use crate::budget::Escaped;
 use crate::compile::Invalid;
 use crate::proxy::Ctx;
@@ -231,23 +231,25 @@ fn passive_of(service: &Service) -> Option<&Passive> {
     }
 }
 
+/// The `passive` setting, the service and the lease of the server `ctx`'s request is on now.
+/// `None` when the request is on no server, was refused for capacity, or its service has no
+/// `passive`.
+fn target(ctx: &Ctx) -> Option<(&Passive, &Service, &Lease)> {
+    let (lease, selected) = (ctx.lease.as_ref()?, ctx.route?);
+    if ctx.capacity_refusal {
+        return None;
+    }
+    let service = ctx
+        .table
+        .app(selected.app)
+        .and_then(|app| app.service(selected.revision, selected.router))?;
+    Some((passive_of(service)?, service, lease))
+}
+
 /// Counts the finished request against the server it was sent to, when that server's service
 /// has `passive`. `logging` calls this once per request, after the response is written.
 pub fn observe(session: &Session, error: Option<&Error>, ctx: &Ctx) {
-    let (Some(lease), Some(selected)) = (ctx.lease.as_ref(), ctx.route) else {
-        return;
-    };
-    if ctx.capacity_refusal {
-        return;
-    }
-    let Some(service) = ctx
-        .table
-        .app(selected.app)
-        .and_then(|app| app.service(selected.revision, selected.router))
-    else {
-        return;
-    };
-    let Some(passive) = passive_of(service) else {
+    let Some((passive, service, lease)) = target(ctx) else {
         return;
     };
     let failed = match (error, session.response_written()) {
@@ -256,6 +258,14 @@ pub fn observe(session: &Session, error: Option<&Error>, ctx: &Ctx) {
         (None, Some(head)) => passive.is_failure(head.status.as_u16(), lease.elapsed()),
     };
     passive.record(service.servers(), lease.server(), failed, now_ms());
+}
+
+/// Counts a failed attempt against the server it was sent to, before the request goes on to
+/// another one: `retry` calls this once per retried attempt, so `observe` counts only the last.
+pub fn observe_failed_attempt(ctx: &Ctx) {
+    if let Some((passive, service, lease)) = target(ctx) {
+        passive.record(service.servers(), lease.server(), true, now_ms());
+    }
 }
 
 /// How long `server` stays ejected from now, or `None` when it is not ejected.

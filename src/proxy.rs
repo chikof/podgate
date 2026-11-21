@@ -50,7 +50,9 @@ use bytes::Bytes;
 use http::{HeaderValue, Method};
 use pingora::Error;
 use pingora::ErrorSource;
-use pingora::ErrorType::{ConnectionClosed, HTTPStatus, InternalError, ReadError, WriteError};
+use pingora::ErrorType::{
+    ConnectionClosed, H2Downgrade, HTTPStatus, InternalError, InvalidH2, ReadError, WriteError,
+};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::{ALPN, Digest};
 use pingora::proxy::{FailToProxy, ProxyHttp, Session};
@@ -69,7 +71,7 @@ use crate::failures::{self, Failures};
 use crate::fairq::{self, Backends};
 use crate::forwarded;
 use crate::inflight::{Inflight, InflightGuard};
-use crate::middleware::{self, Flow, RequestCx, RoutedCx, errors};
+use crate::middleware::{self, Failure, Flow, RequestCx, RoutedCx, errors, retry};
 use crate::observe::access_log::{self, AccessLog};
 use crate::observe::metrics;
 use crate::observe::tracing as trace;
@@ -153,6 +155,12 @@ pub struct Ctx {
     pub error_page: errors::Attempt,
     /// What the request did about its mirrors.
     pub mirror: mirroring::State,
+    /// Whether a stage read the whole request body into the session's replay buffer, so a
+    /// retry can send it to another server (`buffering`).
+    pub body_held: bool,
+    /// What the `retry` middleware keeps: the servers tried and the attempt to start next
+    ///.
+    pub retry: retry::Progress,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -349,6 +357,19 @@ impl Gateway {
             })
     }
 
+    /// What the router's `retry` middleware says about the attempt that failed with `failure`:
+    /// see [`retry::on_upstream_error`]. The next server must pass the upstream address policy.
+    fn retry_after(&self, session: &mut Session, ctx: &mut Ctx, failure: Failure) -> Option<bool> {
+        retry::on_upstream_error(
+            session,
+            ctx,
+            failure,
+            self.upstream_timeout,
+            &self.events,
+            |table, selected| self.check_upstream(table, selected).is_ok(),
+        )
+    }
+
     /// Runs the router's middleware chain on the request. `true` when a middleware answered it.
     async fn run_chain(
         &self,
@@ -377,6 +398,7 @@ impl Gateway {
             hashing: &self.basic_auth,
             auth: &self.auth_client,
             policy: &self.upstream_policy,
+            body_held: &mut ctx.body_held,
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
@@ -538,6 +560,8 @@ impl ProxyHttp for Gateway {
             trace: trace::State::default(),
             error_page: errors::Attempt::default(),
             mirror: mirroring::State::default(),
+            body_held: false,
+            retry: retry::Progress::default(),
         }
     }
 
@@ -934,6 +958,7 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         ctx: &mut Ctx,
     ) -> pingora::Result<Box<HttpPeer>> {
+        retry::begin_attempt(&self.backends, session, ctx).await?;
         let selected = ctx
             .route
             .ok_or_else(|| Error::explain(InternalError, "upstream_peer without a route"))?;
@@ -958,6 +983,50 @@ impl ProxyHttp for Gateway {
         pool::observe(&mut ctx.pool, session.req_header());
         pool::isolate(&mut peer, identity, ctx.pool, session);
         Ok(Box::new(peer))
+    }
+
+    fn fail_to_connect(
+        &self,
+        session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Ctx,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        if let Some(retry) = self.retry_after(session, ctx, Failure::Connect) {
+            e.set_retry(retry);
+        }
+        e
+    }
+
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        e: Box<Error>,
+        ctx: &mut Ctx,
+        client_reused: bool,
+    ) -> Box<Error> {
+        let mut e = e.more_context(format!("Peer: {peer}"));
+        e.retry.decide_reuse(client_reused);
+        // A protocol downgrade retries on the same server and a client that went away is no
+        // server's failure: neither is for the chain to judge.
+        let judged = e.retry()
+            && *e.esource() != ErrorSource::Downstream
+            && !matches!(e.etype, H2Downgrade | InvalidH2);
+        let decided = judged
+            .then(|| self.retry_after(session, ctx, Failure::Reused))
+            .flatten();
+        match decided {
+            Some(retry) => e.set_retry(retry),
+            // No `retry` middleware: Pingora's own rule.
+            None if !session.req_header().method.is_idempotent()
+                || session.retry_buffer_truncated() =>
+            {
+                e.set_retry(false);
+            }
+            None => {}
+        }
+        e
     }
 
     fn persist_connection_context(

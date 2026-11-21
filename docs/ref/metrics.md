@@ -42,7 +42,7 @@ What each one counts:
 - `service_server_up` is `1` while the server may take a new request (not marked down by an active health check and not ejected) and `0` otherwise. It is read from the live table at scrape time. It carries the `revision` that defines the service (empty for a service the app shares), because health and ejection are state of a revision's server; this is the label set change 0033 introduced, and `observe::metrics::render` is the only producer of the series.
 - `tls_cert_not_after_seconds` is the Unix time the snapshot's certificate stops being valid, once per host the snapshot declares for it (a wildcard keeps its `*.` form). The hosts are what the snapshot declares, never what a client sent.
 - `snapshot_rejected_total{code}` counts refused snapshots once per distinct rejection code (`stale`, or the codes of the `422` body such as `host_conflict`). A snapshot refused for two codes counts once under each.
-- `service_retries_total` is registered for the retry policy; nothing in podgate retries yet, so it has no samples.
+- `service_retries_total` counts the attempts the `retry` middleware (`docs/ref/mw-retry.md`) repeated on another server of the service: one per retry, so a request tried three times adds two. A service that never retried has no sample.
 
 Only status classes that were seen have a sample, and a router or service that has seen no request has no series line at all, as in a client library that creates label children on first use. Histograms are always complete: every finite bucket, `+Inf`, `_sum` and `_count`.
 

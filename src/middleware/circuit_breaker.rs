@@ -720,6 +720,19 @@ impl CircuitBreaker {
         tracing::info!(app = %self.app, middleware = %self.name, ?transition, "circuit breaker moved");
     }
 
+    /// Records one outcome for a request that entered at `started`: the status the client got,
+    /// or an upstream failure.
+    fn count(&self, cx: &FinishCx<'_>, started: Instant) {
+        let outcome = Outcome {
+            status: cx.status,
+            network_error: cx.upstream_error,
+            latency_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        };
+        if let Some(transition) = self.breaker.record(self.breaker.now_ms(), outcome) {
+            self.announce(cx.events, transition);
+        }
+    }
+
     async fn refuse(&self, cx: &mut RequestCx<'_>, retry_after_secs: u32) -> pingora::Result<()> {
         let body = Bytes::from_static(br#"{"error":"circuit breaker open"}"#);
         let mut head = ResponseHeader::build(self.breaker.config().response_code, Some(3))?;
@@ -771,13 +784,13 @@ impl Kind for CircuitBreaker {
         if cx.status.is_none() && !cx.upstream_error {
             return;
         }
-        let outcome = Outcome {
-            status: cx.status,
-            network_error: cx.upstream_error,
-            latency_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        };
-        if let Some(transition) = self.breaker.record(self.breaker.now_ms(), outcome) {
-            self.announce(cx.events, transition);
+        self.count(cx, started);
+    }
+
+    fn attempt_failed(&self, cx: &FinishCx<'_>, state: &mut State) {
+        if let Some(started) = state.started.as_mut() {
+            let attempt = std::mem::replace(started, Instant::now());
+            self.count(cx, attempt);
         }
     }
 
@@ -1193,5 +1206,57 @@ mod test {
             ),
             (100, 10, 10, 20, 503)
         );
+    }
+
+    #[test]
+    fn circuit_counts_each_retried_attempt_once() {
+        let circuit = CircuitBreaker {
+            breaker: Arc::new(breaker(&json!({ "network_error_ratio": 0.5 }))),
+            app: "a".into(),
+            name: "cb".into(),
+        };
+        let events = crate::events::EventFeed::new();
+        let failed = |status: Option<u16>| FinishCx {
+            events: &events,
+            status,
+            upstream_error: true,
+        };
+        let counted = |circuit: &CircuitBreaker| {
+            let counts = circuit
+                .breaker
+                .window
+                .counts(circuit.breaker.now_ms() / 1000);
+            (counts.total, counts.network)
+        };
+
+        // Three attempts: two retried, then the last, which `finished` counts.
+        let mut state = State {
+            started: Some(Instant::now()),
+        };
+        circuit.attempt_failed(&failed(None), &mut state);
+        circuit.attempt_failed(&failed(None), &mut state);
+        assert_eq!(counted(&circuit), (2, 2));
+        assert!(
+            state.started.is_some(),
+            "the next attempt is timed from its start"
+        );
+        circuit.finished(&failed(Some(502)), &mut state);
+        assert_eq!(
+            counted(&circuit),
+            (3, 3),
+            "once per attempt, the last one once"
+        );
+        circuit.finished(&failed(Some(502)), &mut state);
+        assert_eq!(
+            counted(&circuit),
+            (3, 3),
+            "a request counts at most once per attempt"
+        );
+
+        // A request the breaker never admitted has nothing to count.
+        let mut refused = State::default();
+        circuit.attempt_failed(&failed(None), &mut refused);
+        assert_eq!(counted(&circuit), (3, 3));
+        assert!(refused.started.is_none());
     }
 }

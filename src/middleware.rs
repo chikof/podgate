@@ -63,6 +63,7 @@ pub mod redirect_scheme;
 pub mod replace_path;
 pub mod replace_path_regex;
 pub mod respond;
+pub mod retry;
 pub mod state;
 pub mod strip_prefix;
 pub mod strip_prefix_regex;
@@ -109,6 +110,9 @@ pub struct RequestCx<'a> {
     pub auth: &'a forward_auth::Client,
     /// The operator's rule for the addresses the proxy may dial.
     pub policy: &'a UpstreamPolicy,
+    /// Set by a hook that read the whole request body into the session's replay buffer
+    /// (`buffering`), so a second server can be sent the same body (`retry`).
+    pub body_held: &'a mut bool,
 }
 
 /// The stages of the chain that come before the one running a routed hook, with their per-request
@@ -186,6 +190,66 @@ pub struct FinishCx<'a> {
     /// The request failed on the upstream side before an answer arrived (refused, reset, timed
     /// out).
     pub upstream_error: bool,
+}
+
+/// How an attempt to reach a server failed, for [`Kind::on_upstream_error`]. Only failures the
+/// upstream client library marks retryable (no response byte arrived) are reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// No connection to the server could be made: nothing was sent to it.
+    Connect,
+    /// A pooled connection that was reused had died before a response byte arrived: the server
+    /// may have received, and acted on, the request.
+    Reused,
+}
+
+/// What the proxy can still send to a second server of the request body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Body {
+    /// The request has no body.
+    Absent,
+    /// A middleware holds the whole body in the session's replay buffer (`buffering`).
+    Held,
+    /// The request has a body nothing has read yet: no byte of it has left the proxy.
+    Unread,
+    /// The body was streamed to a server, wholly or in part: it cannot be sent again.
+    Streamed,
+}
+
+impl Body {
+    /// Whether the whole body can be sent to another server.
+    #[must_use]
+    pub fn replayable(self) -> bool {
+        matches!(self, Self::Absent | Self::Held)
+    }
+}
+
+/// What an upstream-error hook sees.
+#[derive(Debug)]
+pub struct ErrorCx<'a> {
+    /// The client's request.
+    pub request: &'a RequestHeader,
+    /// How the attempt failed.
+    pub failure: Failure,
+    /// What is left of the request body to send.
+    pub body: Body,
+    /// How long the whole request may take, measured from the start of the chain
+    /// (`REQUEST_TIMEOUT_SECS`).
+    pub deadline: std::time::Duration,
+}
+
+/// What a stage says about retrying the failed attempt on another server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The stage has no say. When no stage of the chain has one, Pingora's own rule stands.
+    Abstain,
+    /// Do not retry.
+    No,
+    /// Retry on another server after `backoff`.
+    Yes {
+        /// How long to wait before the next attempt.
+        backoff: std::time::Duration,
+    },
 }
 
 /// What a response-head hook sees.
@@ -306,6 +370,18 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     /// including those a request never reached (an earlier stage answered it): a stage keeps
     /// in its [`Self::State`] whether it ran.
     fn finished(&self, _cx: &FinishCx<'_>, _state: &mut Self::State) {}
+
+    /// Runs when an attempt failed before any response byte arrived and Pingora would retry it,
+    /// in chain order for every stage; the last stage that does not abstain decides. The default
+    /// abstains: only a kind that owns retries answers.
+    fn on_upstream_error(&self, _cx: &ErrorCx<'_>, _state: &mut Self::State) -> Verdict {
+        Verdict::Abstain
+    }
+
+    /// Runs for every stage of the chain when an attempt failed on the upstream side and the
+    /// request goes on to another server. `finished` runs once, for the last attempt, so a stage
+    /// that counts upstream failures sees each attempt exactly once.
+    fn attempt_failed(&self, _cx: &FinishCx<'_>, _state: &mut Self::State) {}
 
     /// Runs on every chunk of the request body the proxy reads from the client, before it goes
     /// to the upstream. `bytes_read` is everything read from the client so far, counted by
@@ -564,6 +640,36 @@ macro_rules! kinds {
                 }
             }
 
+            fn on_upstream_error(
+                &self,
+                cx: &$crate::middleware::ErrorCx<'_>,
+                state: &mut StageState,
+            ) -> $crate::middleware::Verdict {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::on_upstream_error(kind, cx, state)
+                        }
+                    )*
+                    _ => $crate::middleware::Verdict::Abstain,
+                }
+            }
+
+            fn attempt_failed(
+                &self,
+                cx: &$crate::middleware::FinishCx<'_>,
+                state: &mut StageState,
+            ) {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::attempt_failed(kind, cx, state)
+                        }
+                    )*
+                    _ => {}
+                }
+            }
+
             fn request_body(
                 &self,
                 bytes_read: u64,
@@ -648,7 +754,7 @@ kinds! {
 
     "circuit_breaker" => CircuitBreaker(circuit_breaker::CircuitBreaker),
 
-    "retry" => unbuilt,
+    "retry" => Retry(retry::Retry),
 
     "buffering" => Buffering(buffering::Buffering),
 
@@ -716,6 +822,8 @@ schemas! {
     "buffering" => buffering::Config,
 
     "cache" => cache::Config,
+
+    "retry" => retry::Config,
 
     "compress" => compress::Config,
 
@@ -974,6 +1082,36 @@ pub fn run_finished(stages: &[Named], chain: &[usize], cx: &FinishCx<'_>, state:
     for (position, index) in chain.iter().enumerate() {
         if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
             named.stage.finished(cx, slot);
+        }
+    }
+}
+
+/// Runs the upstream-error hooks of `chain`: the verdict of the last stage that does not
+/// abstain, [`Verdict::Abstain`] when none decides.
+pub fn run_upstream_error(
+    stages: &[Named],
+    chain: &[usize],
+    cx: &ErrorCx<'_>,
+    state: &mut State,
+) -> Verdict {
+    let mut verdict = Verdict::Abstain;
+    for (position, index) in chain.iter().enumerate() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            match named.stage.on_upstream_error(cx, slot) {
+                Verdict::Abstain => {}
+                decided => verdict = decided,
+            }
+        }
+    }
+    verdict
+}
+
+/// Tells every stage of `chain` that an attempt failed on the upstream side and the request goes
+/// on to another server.
+pub fn run_attempt_failed(stages: &[Named], chain: &[usize], cx: &FinishCx<'_>, state: &mut State) {
+    for (position, index) in chain.iter().enumerate() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.attempt_failed(cx, slot);
         }
     }
 }

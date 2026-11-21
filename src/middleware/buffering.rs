@@ -271,6 +271,7 @@ impl Buffering {
                 "request body does not fit the replay buffer",
             ));
         }
+        *cx.body_held = true;
         Ok(Flow::Continue)
     }
 }

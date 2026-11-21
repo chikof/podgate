@@ -137,6 +137,35 @@ pub fn select(
     ))
 }
 
+/// Another server for a request whose attempt on `selected` failed: the same revision and
+/// service, a server that [`PickCx::allows`] (available, and not in `tried`). The [`Lease`]
+/// counts the request on it. `None` when the service has no such server, or no longer exists.
+/// `retry` calls this for every further attempt.
+#[must_use]
+pub fn reselect(
+    table: &RoutingTable,
+    selected: &Selected,
+    request: &RequestHeader,
+    client: Option<IpAddr>,
+    tried: &[SocketAddr],
+) -> Option<(Selected, Lease)> {
+    let service = table
+        .app(selected.app)?
+        .service(selected.revision, selected.router)?;
+    let cx = PickCx {
+        excluded: tried,
+        ..PickCx::new(request).with_client(client)
+    };
+    let (upstream, lease) = service.pick(cx)?;
+    Some((
+        Selected {
+            upstream,
+            ..*selected
+        },
+        lease,
+    ))
+}
+
 /// [`matching`] then [`select`]: the whole routing decision for a request with no middleware
 /// chain in between, for tests and tools.
 ///
