@@ -34,9 +34,9 @@
 //!   hold, so the `cache` stage neither serves nor stores it, as for `forward_auth`. This holds
 //!   whatever the token source and with `remove_token`.
 
-mod claims;
+pub(in crate::middleware) mod claims;
 pub(crate) mod jwks;
-mod verify;
+pub(in crate::middleware) mod verify;
 
 #[cfg(test)]
 #[path = "../../tests/fixtures/jwt/signer.rs"]
@@ -55,9 +55,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use self::claims::{Rules, header_text};
-use self::jwks::{Cache, Demand, Fetch, FetchError, Flight, Plan, Target};
+use self::jwks::{Cache, Demand, Fetch, FetchError, Flight, Target};
 use self::verify::{Algorithm, Algorithms, Failure, KeySet, MAX_TOKEN, Token, verify};
-use super::{CompileCx, Flow, Kind, RequestCx, Stage, forward_auth, state};
+use super::{CompileCx, Flow, Kind, RequestCx, Stage, forward_auth, oidc, state};
 use crate::budget::{Escaped, TenantBudget};
 use crate::compile::{Invalid, Rejected};
 use crate::error::AppError;
@@ -107,7 +107,7 @@ pub mod kind {
 /// A string or a number or a boolean: what a required claim is compared with.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
-enum Scalar {
+pub(in crate::middleware) enum Scalar {
     Text(String),
     Number(serde_json::Number),
     Flag(bool),
@@ -126,7 +126,7 @@ impl Scalar {
 /// One value, or a list of which one must match.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
-enum Want {
+pub(in crate::middleware) enum Want {
     Any(Vec<Scalar>),
     One(Scalar),
 }
@@ -333,18 +333,7 @@ impl Source {
             Self::Header { name, .. } => {
                 request.remove_header(name);
             }
-            Self::Cookie(wanted) => {
-                let rebuilt: Vec<HeaderValue> = request
-                    .headers
-                    .get_all(COOKIE)
-                    .iter()
-                    .filter_map(|value| without_cookie(value, wanted))
-                    .collect();
-                request.remove_header(&COOKIE);
-                for value in rebuilt {
-                    request.append_header(COOKIE, value).ok();
-                }
-            }
+            Self::Cookie(wanted) => strip_cookie(request, wanted),
             Self::Query(wanted) => strip_query_params(request, |name| name == &**wanted),
         }
     }
@@ -355,6 +344,20 @@ impl Source {
             Self::Cookie(name) => json!({"cookie": name}),
             Self::Query(name) => json!({"query": name}),
         }
+    }
+}
+
+/// Removes the cookie `wanted` from every `Cookie` header of `request`; the other cookies stay.
+pub(in crate::middleware) fn strip_cookie(request: &mut RequestHeader, wanted: &str) {
+    let rebuilt: Vec<HeaderValue> = request
+        .headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| without_cookie(value, wanted))
+        .collect();
+    request.remove_header(&COOKIE);
+    for value in rebuilt {
+        request.append_header(COOKIE, value).ok();
     }
 }
 
@@ -413,24 +416,29 @@ fn strip_query_params(request: &mut RequestHeader, is_credential: impl Fn(&str) 
 pub(crate) struct Credentials {
     query: Vec<Box<str>>,
     headers: Vec<HeaderName>,
+    /// The callback paths of the `oidc` stages: the query of a request for one holds a code.
+    callbacks: Vec<Box<str>>,
 }
 
 impl Credentials {
-    /// The token places of the `jwt_auth` stages of `chain` (indices into the stages of `app`).
+    /// The token places of the `jwt_auth` stages of `chain` (indices into the stages of `app`),
+    /// and the callback paths of its `oidc` stages.
     #[must_use]
     pub(crate) fn of(app: &CompiledApp, chain: &[usize]) -> Self {
         let mut found = Self::default();
         for index in chain {
-            let Some(Stage::JwtAuth(auth)) = app.stages().get(*index).map(|named| &named.stage)
-            else {
-                continue;
-            };
-            for source in &auth.0.sources {
-                match source {
-                    Source::Query(name) => found.query.push(name.clone()),
-                    Source::Header { name, .. } => found.headers.push(name.clone()),
-                    Source::Cookie(_) => {}
+            match app.stages().get(*index).map(|named| &named.stage) {
+                Some(Stage::JwtAuth(auth)) => {
+                    for source in &auth.0.sources {
+                        match source {
+                            Source::Query(name) => found.query.push(name.clone()),
+                            Source::Header { name, .. } => found.headers.push(name.clone()),
+                            Source::Cookie(_) => {}
+                        }
+                    }
                 }
+                Some(Stage::Oidc(auth)) => found.callbacks.push(auth.callback_path().into()),
+                _ => {}
             }
         }
         found
@@ -442,10 +450,13 @@ impl Credentials {
         self.headers.iter().any(|header| header.as_str() == name)
     }
 
-    /// `query` with the value of every token parameter replaced by `[redacted]`.
+    /// `query` of a request for `path` with the value of every token parameter replaced by
+    /// `[redacted]`, and on the callback path of an `oidc` stage the `code` and `state` too: the
+    /// code is a credential until the token endpoint has redeemed it.
     #[must_use]
-    pub(crate) fn redact_query(&self, query: &str) -> String {
-        if self.query.is_empty() {
+    pub(crate) fn redact_query(&self, path: &str, query: &str) -> String {
+        let callback = self.callbacks.iter().any(|known| **known == *path);
+        if self.query.is_empty() && !callback {
             return query.to_owned();
         }
         query
@@ -456,6 +467,7 @@ impl Credentials {
                         .next()
                         .is_some_and(|(name, _)| {
                             self.query.iter().any(|known| **known == *name)
+                                || (callback && oidc::CALLBACK_SECRETS.contains(&&*name))
                         }) =>
                 {
                     format!("{written}=[redacted]")
@@ -470,8 +482,8 @@ impl Credentials {
     #[must_use]
     pub(crate) fn redact_target(&self, target: &str) -> String {
         match target.split_once('?') {
-            Some((path, query)) if !self.query.is_empty() => {
-                format!("{path}?{}", self.redact_query(query))
+            Some((path, query)) if !self.query.is_empty() || !self.callbacks.is_empty() => {
+                format!("{path}?{}", self.redact_query(path, query))
             }
             _ => target.to_owned(),
         }
@@ -541,6 +553,36 @@ impl State {
 
 fn invalid(message: impl std::fmt::Display) -> Invalid {
     Invalid::new("invalid_middleware", format!("jwt_auth: {message}"))
+}
+
+/// Reads a `required_claims` setting: at most [`MAX_ENTRIES`] claims, each with a name and 1 to
+/// [`MAX_ENTRIES`] accepted values.
+///
+/// # Errors
+///
+/// The message of the first entry that is not usable.
+pub(in crate::middleware) fn requirements(
+    wanted: BTreeMap<String, Want>,
+) -> Result<Vec<claims::Requirement>, String> {
+    if wanted.len() > MAX_ENTRIES {
+        return Err(format!(
+            "`required_claims` has more than {MAX_ENTRIES} entries"
+        ));
+    }
+    let mut required = Vec::with_capacity(wanted.len());
+    for (name, want) in wanted {
+        let values: Vec<Value> = match want {
+            Want::One(one) => vec![one.value()],
+            Want::Any(list) => list.into_iter().map(Scalar::value).collect(),
+        };
+        if name.is_empty() || values.is_empty() || values.len() > MAX_ENTRIES {
+            return Err(format!(
+                "`required_claims`: {name:?} needs a name and 1 to {MAX_ENTRIES} values"
+            ));
+        }
+        required.push((name.into_boxed_str(), values.into_boxed_slice()));
+    }
+    Ok(required)
 }
 
 /// The transport named `name` of `app`.
@@ -672,25 +714,11 @@ impl JwtAuth {
         if self.0.jwks.is_none() {
             return Ok(None);
         }
-        let cache = &self.0.runtime.cache;
-        let mut wait = match cache.plan(Instant::now(), demand) {
-            Plan::Ready(keys) => return Ok(Some(keys)),
-            Plan::Background(keys, flight) => {
-                self.spawn(who, flight);
-                return Ok(Some(keys));
-            }
-            Plan::Foreground(flight) => {
-                let wait = flight.subscribe();
-                self.spawn(who, flight);
-                wait
-            }
-            Plan::Wait(wait) => wait,
-            Plan::Unavailable => return Err(Failure::Unavailable),
-        };
-        // The sender is dropped, never used, when the fetch ends.
-        let _ended = wait.changed().await;
-        cache
-            .current(Instant::now())
+        self.0
+            .runtime
+            .cache
+            .obtain(demand, |flight| self.spawn(who, flight))
+            .await
             .map(Some)
             .ok_or(Failure::Unavailable)
     }
@@ -791,24 +819,7 @@ impl Kind for JwtAuth {
                 "`issuer` and `audiences` are not empty, with at most {MAX_ENTRIES} audiences"
             )));
         }
-        if config.required_claims.len() > MAX_ENTRIES {
-            return Err(invalid(format!(
-                "`required_claims` has more than {MAX_ENTRIES} entries"
-            )));
-        }
-        let mut required = Vec::with_capacity(config.required_claims.len());
-        for (name, want) in config.required_claims {
-            let values: Vec<Value> = match want {
-                Want::One(one) => vec![one.value()],
-                Want::Any(list) => list.into_iter().map(Scalar::value).collect(),
-            };
-            if name.is_empty() || values.is_empty() || values.len() > MAX_ENTRIES {
-                return Err(invalid(format!(
-                    "`required_claims`: {name:?} needs a name and 1 to {MAX_ENTRIES} values"
-                )));
-            }
-            required.push((name.into_boxed_str(), values.into_boxed_slice()));
-        }
+        let required = requirements(config.required_claims).map_err(invalid)?;
         let configured = config.token_sources.unwrap_or_else(|| {
             vec![SourceConfig {
                 header: Some("authorization".to_owned()),
@@ -1303,7 +1314,7 @@ mod test {
             json!({"algorithms": ["ES256"]}),
             json!({"algorithms": ["ES256"], "keys": {"keys": []}, "jwks_uri": "no"}),
             with(&json!({"jwks_uri": "ftp://10.0.0.1/jwks"})),
-            with(&json!({"jwks_uri": "https://idp.example/jwks"})),
+            with(&json!({"jwks_uri": "https://-bad-.example/jwks"})),
             with(&json!({"jwks_uri": "https://user@10.0.0.1/jwks"})),
             with(&json!({"jwks_uri": "http://10.0.0.1/jwks", "transport": "t"})),
             with(&json!({"transport": "t"})),

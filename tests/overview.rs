@@ -504,6 +504,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         jwt_query.clone(),
         URL_SAFE_NO_PAD.encode(&jwt_secret),
     ]);
+    let oidc_secret = plant("oidc-client-secret");
+    plants.push(oidc_secret.clone());
 
     let kinds = vec![
         (
@@ -576,6 +578,11 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
                    "keys": {"keys": [{"kty": "oct", "kid": "shared", "k": URL_SAFE_NO_PAD.encode(&jwt_secret)}]},
                    "jwks_uri": format!("https://10.0.0.8:8443/jwks?key={jwt_query}"),
                    "issuer": "https://idp.test", "forward_claims": {"sub": "x-user-sub"}}),
+        ),
+        (
+            "oidc",
+            json!({"issuer": "https://idp.test", "client_id": "podgate", "client_secret": oidc_secret,
+                   "forward_claims": {"sub": "x-user-sub"}}),
         ),
         (
             "respond",

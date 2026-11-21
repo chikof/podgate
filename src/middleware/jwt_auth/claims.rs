@@ -10,17 +10,17 @@ use serde_json::{Map, Value};
 use super::verify::Failure;
 
 /// A required claim: its name and the values of which one must match.
-pub(super) type Requirement = (Box<str>, Box<[Value]>);
+pub(in crate::middleware) type Requirement = (Box<str>, Box<[Value]>);
 
 /// The claim rules of one middleware.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Rules {
-    pub(super) issuer: Option<Box<str>>,
-    pub(super) audiences: Box<[Box<str>]>,
+pub(in crate::middleware) struct Rules {
+    pub(in crate::middleware) issuer: Option<Box<str>>,
+    pub(in crate::middleware) audiences: Box<[Box<str>]>,
     /// Claim name and the values of which one must match, in name order.
-    pub(super) required: Box<[Requirement]>,
-    pub(super) leeway_secs: u64,
-    pub(super) max_token_age_secs: Option<u64>,
+    pub(in crate::middleware) required: Box<[Requirement]>,
+    pub(in crate::middleware) leeway_secs: u64,
+    pub(in crate::middleware) max_token_age_secs: Option<u64>,
 }
 
 fn number(claims: &Map<String, Value>, name: &str) -> Result<Option<f64>, Failure> {
@@ -51,7 +51,11 @@ impl Rules {
     ///
     /// The first [`Failure`]: `exp` missing or past, `nbf` or `iat` in the future, `iat` too old,
     /// the wrong issuer or audience, then [`Failure::ClaimsForbidden`].
-    pub(super) fn check(&self, claims: &Map<String, Value>, now: f64) -> Result<(), Failure> {
+    pub(in crate::middleware) fn check(
+        &self,
+        claims: &Map<String, Value>,
+        now: f64,
+    ) -> Result<(), Failure> {
         #[allow(
             clippy::cast_precision_loss,
             reason = "the leeway is at most 300 seconds"
@@ -111,7 +115,7 @@ impl Rules {
 /// The text of a claim as a header value: a string as it is, a number or a boolean as JSON
 /// writes it, a list of those joined with `, `. Anything else (an object, `null`, a list that
 /// holds one) is not forwarded.
-pub(super) fn header_text(value: &Value) -> Option<String> {
+pub(in crate::middleware) fn header_text(value: &Value) -> Option<String> {
     fn scalar(value: &Value) -> Option<String> {
         match value {
             Value::String(text) => Some(text.clone()),

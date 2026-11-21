@@ -47,7 +47,7 @@ const MIN_SECRET: usize = 32;
 /// Why a request is refused. The body of the answer never says which; the access log and the
 /// metrics do ([`Self::code`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Failure {
+pub(in crate::middleware) enum Failure {
     /// No token in any configured place.
     Missing,
     /// The token is over [`MAX_TOKEN`] bytes.
@@ -112,7 +112,7 @@ impl Failure {
     }
 
     /// The reason the access log and the metrics give.
-    pub(super) fn code(self) -> &'static str {
+    pub(in crate::middleware) fn code(self) -> &'static str {
         match self {
             Self::Missing => "jwt_missing",
             Self::Oversized => "jwt_oversized",
@@ -137,7 +137,7 @@ impl Failure {
 
 /// A signature algorithm of a JWS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Algorithm {
+pub(in crate::middleware) enum Algorithm {
     Rs256,
     Rs384,
     Rs512,
@@ -183,7 +183,7 @@ impl Algorithm {
     }
 
     /// The name as written in a token.
-    pub(super) fn name(self) -> &'static str {
+    pub(in crate::middleware) fn name(self) -> &'static str {
         match self {
             Self::Rs256 => "RS256",
             Self::Rs384 => "RS384",
@@ -206,7 +206,7 @@ impl Algorithm {
     }
 
     /// Whether this is an HMAC.
-    pub(super) fn is_hmac(self) -> bool {
+    pub(in crate::middleware) fn is_hmac(self) -> bool {
         self.family() == Family::Symmetric
     }
 
@@ -234,7 +234,7 @@ impl Algorithm {
 
 /// The algorithms a configuration lists: the only ones a token may name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Algorithms(Box<[Algorithm]>);
+pub(in crate::middleware) struct Algorithms(Box<[Algorithm]>);
 
 impl Algorithms {
     /// Reads the configured names.
@@ -243,7 +243,7 @@ impl Algorithms {
     ///
     /// A message when the list is empty, names an algorithm that is not supported (`none`
     /// included), repeats one, or lists more than four of `RS*` and `PS*` together.
-    pub(super) fn compile(names: &[String]) -> Result<Self, String> {
+    pub(in crate::middleware) fn compile(names: &[String]) -> Result<Self, String> {
         if names.is_empty() {
             return Err("`algorithms` is empty; list the algorithms a token may use".to_owned());
         }
@@ -268,18 +268,18 @@ impl Algorithms {
         Ok(Self(list.into_boxed_slice()))
     }
 
-    pub(super) fn contains(&self, algorithm: Algorithm) -> bool {
+    pub(in crate::middleware) fn contains(&self, algorithm: Algorithm) -> bool {
         self.0.contains(&algorithm)
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = Algorithm> + '_ {
+    pub(in crate::middleware) fn iter(&self) -> impl Iterator<Item = Algorithm> + '_ {
         self.0.iter().copied()
     }
 }
 
 /// Why a key is refused.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum KeyError {
+pub(in crate::middleware) enum KeyError {
     #[error("a key is not a JSON object")]
     NotObject,
     #[error("`kty` {0:?} is not RSA, EC, OKP or oct")]
@@ -563,13 +563,13 @@ impl Key {
 
 /// A set of keys: the `keys` of a configuration, or what a JWKS endpoint answered.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct KeySet {
+pub(in crate::middleware) struct KeySet {
     keys: Vec<Key>,
 }
 
 /// Why a JWKS answer is not used.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum SetError {
+pub(in crate::middleware) enum SetError {
     #[error("the body is not a JWK set")]
     NotASet,
     #[error("no key of the set can be used")]
@@ -669,7 +669,7 @@ impl KeySet {
 
 /// A token, split and decoded up to its header. The claims are decoded after the signature.
 #[derive(Debug)]
-pub(super) struct Token<'a> {
+pub(in crate::middleware) struct Token<'a> {
     algorithm: Algorithm,
     kid: Option<String>,
     signing_input: &'a [u8],
@@ -684,7 +684,10 @@ impl<'a> Token<'a> {
     ///
     /// [`Failure::Oversized`], [`Failure::Malformed`], [`Failure::Crit`] or
     /// [`Failure::AlgNotAllowed`].
-    pub(super) fn parse(raw: &'a str, allowed: &Algorithms) -> Result<Self, Failure> {
+    pub(in crate::middleware) fn parse(
+        raw: &'a str,
+        allowed: &Algorithms,
+    ) -> Result<Self, Failure> {
         if raw.len() > MAX_TOKEN {
             return Err(Failure::Oversized);
         }
@@ -741,7 +744,7 @@ impl<'a> Token<'a> {
     /// # Errors
     ///
     /// [`Failure::Malformed`] when the payload is not a JSON object.
-    pub(super) fn claims(&self) -> Result<Map<String, Value>, Failure> {
+    pub(in crate::middleware) fn claims(&self) -> Result<Map<String, Value>, Failure> {
         let bytes = URL_SAFE_NO_PAD
             .decode(self.payload)
             .map_err(|_| Failure::Malformed)?;
@@ -782,7 +785,7 @@ fn select<'a>(
 ///
 /// [`Failure::UnknownKid`] when the token names a `kid` no key has, [`Failure::NoKey`] when keys
 /// exist but none of the token's algorithm and `kid`, [`Failure::BadSignature`] otherwise.
-pub(super) fn verify(token: &Token<'_>, sets: &[&KeySet]) -> Result<(), Failure> {
+pub(in crate::middleware) fn verify(token: &Token<'_>, sets: &[&KeySet]) -> Result<(), Failure> {
     let (candidates, kid_seen) = select(sets, token.algorithm, token.kid());
     if candidates.is_empty() {
         return Err(if token.kid().is_some() && !kid_seen {

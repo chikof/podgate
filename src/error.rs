@@ -124,6 +124,38 @@ pub enum AppError {
     /// A `jwt_auth` stage has no keys (its JWKS cannot be fetched and nothing is cached): `503`.
     #[error("authentication unavailable")]
     JwtUnavailable,
+    /// An `oidc` callback that is not the answer to a login this middleware started: no flow
+    /// cookie, a `state` that is not the cookie's, no code: `400`.
+    #[error("bad request")]
+    OidcBadCallback {
+        /// The reason for the access log.
+        reason: &'static str,
+    },
+    /// An `oidc` login that failed: the provider refused the code, or its ID token is not valid:
+    /// `401`. The body never says which check failed; `reason` is for the access log.
+    #[error("unauthorized")]
+    OidcRejected {
+        /// The reason for the access log.
+        reason: &'static str,
+    },
+    /// An `oidc` login of a person the middleware does not admit (a `required_claims` or an
+    /// `allow_subjects` that does not match), or one the provider declined: `403`.
+    #[error("forbidden")]
+    OidcForbidden {
+        /// The reason for the access log.
+        reason: &'static str,
+    },
+    /// An `oidc` login cannot go on because the identity provider, its discovery document or its
+    /// keys cannot be had: `503`. Existing sessions are not affected.
+    #[error("authentication unavailable")]
+    OidcUnavailable {
+        /// The reason for the access log.
+        reason: &'static str,
+    },
+    /// An `oidc` login found no room for its call to the token endpoint (the node's permits, or
+    /// the tenant's buffer budget): `503`, retry in a second.
+    #[error("authentication busy")]
+    OidcBusy,
     /// The backend has no slot for the request (its queue is full or the wait ran out): `503`,
     /// and the client should retry in a second. Another tenant on a shared backend can cause it.
     #[error("backend is saturated")]
@@ -165,10 +197,12 @@ impl AppError {
     #[must_use]
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::BadRequest(_) | Self::OidcBadCallback { .. } => StatusCode::BAD_REQUEST,
             Self::Misdirected | Self::TlsPolicy => StatusCode::MISDIRECTED_REQUEST,
-            Self::ClientCertRequired | Self::JwtForbidden { .. } => StatusCode::FORBIDDEN,
-            Self::JwtUnauthorized { .. } => StatusCode::UNAUTHORIZED,
+            Self::ClientCertRequired | Self::JwtForbidden { .. } | Self::OidcForbidden { .. } => {
+                StatusCode::FORBIDDEN
+            }
+            Self::JwtUnauthorized { .. } | Self::OidcRejected { .. } => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::WriterOwned { .. } => StatusCode::CONFLICT,
@@ -187,6 +221,8 @@ impl AppError {
             | Self::AuthUnavailable
             | Self::AuthSaturated
             | Self::JwtUnavailable
+            | Self::OidcUnavailable { .. }
+            | Self::OidcBusy
             | Self::LimiterBusy
             | Self::RateLimiterUnavailable
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
@@ -216,7 +252,8 @@ impl AppError {
             | Self::BufferingOverBudget
             | Self::AuthBusy
             | Self::AuthSaturated
-            | Self::AuthOverBudget => Some(1),
+            | Self::AuthOverBudget
+            | Self::OidcBusy => Some(1),
             Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
             Self::WakeTimeout => Some(5),
             _ => None,
@@ -246,6 +283,7 @@ impl AppError {
                 | Self::BufferingOverBudget
                 | Self::AuthBusy
                 | Self::AuthSaturated
+                | Self::OidcBusy
         )
     }
 
@@ -278,6 +316,11 @@ impl AppError {
             Self::AuthOverBudget => "auth_over_budget",
             Self::JwtUnauthorized { reason } | Self::JwtForbidden { reason } => reason,
             Self::JwtUnavailable => "jwks_unavailable",
+            Self::OidcBadCallback { reason }
+            | Self::OidcRejected { reason }
+            | Self::OidcForbidden { reason }
+            | Self::OidcUnavailable { reason } => reason,
+            Self::OidcBusy => "oidc_busy",
             Self::RateLimited { .. } => "rate_limited",
             Self::TooManyInFlight => "in_flight_limit",
             Self::LimiterBusy => "limiter_busy",

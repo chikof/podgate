@@ -72,6 +72,7 @@ pub fn render(
     crate::l4::tcp::render(&mut out);
     out.push_str(&crate::l4::health::render(&live));
     crate::l4::udp::render(&mut out);
+    out.push_str(&crate::middleware::oidc::render(&live));
     table.metrics().render(&mut out, &live);
     out
 }

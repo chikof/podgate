@@ -46,13 +46,13 @@ use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{Server, Transport};
 
 /// The most bytes of a JWKS answer.
-pub(super) const MAX_BODY: usize = 256 * 1024;
+pub(in crate::middleware) const MAX_BODY: usize = 256 * 1024;
 
 /// The bytes besides the body that a fetch holds: the request, the head and the read buffers.
 const ALLOWANCE: u64 = HEAD_ALLOWANCE + 2048;
 
 /// The bytes one fetch charges to the tenant.
-pub(super) const CHARGE: u64 = ALLOWANCE + MAX_BODY as u64;
+pub(in crate::middleware) const CHARGE: u64 = ALLOWANCE + MAX_BODY as u64;
 
 /// How long a fetch may take.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,24 +72,24 @@ pub(super) const STALE_FOR: Duration = Duration::from_secs(24 * 3600);
 /// The smallest and largest `jwks_refresh_secs`, and the default.
 pub(super) const REFRESH_MIN: u64 = 60;
 pub(super) const REFRESH_MAX: u64 = 86400;
-pub(super) const REFRESH_DEFAULT: u64 = 3600;
+pub(in crate::middleware) const REFRESH_DEFAULT: u64 = 3600;
 
 /// Where the JWKS is: the server, how to reach it and what to ask for.
 #[derive(Debug)]
-pub(super) struct Target {
-    pub(super) server: Server,
-    pub(super) transport: Arc<Transport>,
+pub(in crate::middleware) struct Target {
+    pub(in crate::middleware) server: Server,
+    pub(in crate::middleware) transport: Arc<Transport>,
     /// The `Host` header: the authority as written.
-    pub(super) host: Box<str>,
+    pub(in crate::middleware) host: Box<str>,
     /// The request target: the path and query of the URI.
-    pub(super) path: Box<str>,
+    pub(in crate::middleware) path: Box<str>,
     /// The URI as written, for the plan's comparison; never shown with its query.
-    pub(super) uri: Box<str>,
+    pub(in crate::middleware) uri: Box<str>,
 }
 
 impl Target {
     /// The URI without its query, which may carry a key for the endpoint.
-    pub(super) fn display(&self) -> String {
+    pub(in crate::middleware) fn display(&self) -> String {
         let scheme = if self.server.tls { "https" } else { "http" };
         let path = self.path.split('?').next().unwrap_or_default();
         format!("{scheme}://{}{path}", self.host)
@@ -97,7 +97,7 @@ impl Target {
 
     /// The address of the endpoint when its URL has an IP literal; `None` for a host name, which
     /// is resolved and checked against the upstream policy on every fetch.
-    pub(super) fn ip(&self) -> Option<IpAddr> {
+    pub(in crate::middleware) fn ip(&self) -> Option<IpAddr> {
         self.server.host().is_none().then(|| self.server.addr.ip())
     }
 }
@@ -114,7 +114,10 @@ fn invalid(message: impl std::fmt::Display) -> Invalid {
 /// IP literal or a host name (an `h2c://` one too: the fetch is HTTP/1.1, which an h2c server
 /// cannot answer), for credentials in the URL, and for a transport that sets TLS options on a
 /// plain `http://` URL.
-pub(super) fn parse_uri(text: &str, transport: Arc<Transport>) -> Result<Target, Invalid> {
+pub(in crate::middleware) fn parse_uri(
+    text: &str,
+    transport: Arc<Transport>,
+) -> Result<Target, Invalid> {
     let Parsed {
         server,
         host,
@@ -136,7 +139,7 @@ pub(super) fn parse_uri(text: &str, transport: Arc<Transport>) -> Result<Target,
 
 /// Why a fetch gave no keys. Logged, never sent to a client.
 #[derive(Debug, Error)]
-pub(super) enum FetchError {
+pub(in crate::middleware) enum FetchError {
     #[error("the tenant has no room in its buffer budget for the fetch")]
     Budget,
     #[error("{0}")]
@@ -148,18 +151,18 @@ pub(super) enum FetchError {
 }
 
 /// What a background fetch needs, all owned.
-pub(super) struct Fetch {
-    pub(super) target: Arc<Target>,
-    pub(super) client: Client,
-    pub(super) policy: UpstreamPolicy,
-    pub(super) resolver: Resolver,
-    pub(super) tenant: Box<str>,
-    pub(super) budget: Arc<TenantBudget>,
+pub(in crate::middleware) struct Fetch {
+    pub(in crate::middleware) target: Arc<Target>,
+    pub(in crate::middleware) client: Client,
+    pub(in crate::middleware) policy: UpstreamPolicy,
+    pub(in crate::middleware) resolver: Resolver,
+    pub(in crate::middleware) tenant: Box<str>,
+    pub(in crate::middleware) budget: Arc<TenantBudget>,
 }
 
 impl Fetch {
     /// Fetches and reads the set. Returns it with the number of keys that were left out.
-    pub(super) async fn run(&self) -> Result<(KeySet, usize), FetchError> {
+    pub(in crate::middleware) async fn run(&self) -> Result<(KeySet, usize), FetchError> {
         let _charge = self.budget.charge(CHARGE).ok_or(FetchError::Budget)?;
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
@@ -184,22 +187,33 @@ impl Fetch {
 }
 
 #[derive(Debug)]
-struct Stored {
-    keys: Arc<KeySet>,
+struct Stored<T> {
+    value: Arc<T>,
     fetched: Instant,
 }
 
-#[derive(Debug, Default)]
-struct State {
-    stored: Option<Stored>,
+#[derive(Debug)]
+struct State<T> {
+    stored: Option<Stored<T>>,
     flight: Option<watch::Receiver<()>>,
     last_kid_fetch: Option<Instant>,
     last_failure: Option<Instant>,
 }
 
+impl<T> Default for State<T> {
+    fn default() -> Self {
+        Self {
+            stored: None,
+            flight: None,
+            last_kid_fetch: None,
+            last_failure: None,
+        }
+    }
+}
+
 /// A fetch in progress. Dropping it wakes everyone who waits for it.
 #[derive(Debug)]
-pub(super) struct Flight {
+pub(in crate::middleware) struct Flight {
     _done: watch::Sender<()>,
 }
 
@@ -210,64 +224,66 @@ impl Flight {
     }
 }
 
-/// What a request does about the JWKS.
+/// What a request does about the cached value.
 #[derive(Debug)]
-pub(super) enum Plan {
-    /// Use this set.
-    Ready(Arc<KeySet>),
-    /// Use this (stale) set, and start this fetch in the background.
-    Background(Arc<KeySet>, Flight),
+pub(in crate::middleware) enum Plan<T> {
+    /// Use this value.
+    Ready(Arc<T>),
+    /// Use this (stale) value, and start this fetch in the background.
+    Background(Arc<T>, Flight),
     /// Start this fetch and wait for it.
     Foreground(Flight),
     /// Wait for the fetch in progress.
     Wait(watch::Receiver<()>),
-    /// There are no keys and no fetch is due: answer `503`.
+    /// There is no value and no fetch is due: answer `503`.
     Unavailable,
 }
 
-/// Why a request asks for keys.
+/// Why a request asks for the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Demand {
-    /// To check a token.
+pub(in crate::middleware) enum Demand {
+    /// To use it.
     Keys,
     /// A token named a `kid` that the set has not: a fresh set may have it.
     KidMiss,
 }
 
-/// The keys of one `jwks_uri` of one middleware.
+/// The value of one remote document of one middleware: the keys of a `jwks_uri`, or the
+/// discovery document of an `oidc` issuer. It never does I/O: [`Self::plan`] says what a request
+/// does and [`Self::finish`] takes what a fetch got.
 #[derive(Debug)]
-pub(super) struct Cache {
+pub(in crate::middleware) struct Cache<T = KeySet> {
     refresh: Duration,
-    state: Mutex<State>,
+    state: Mutex<State<T>>,
 }
 
-impl Cache {
-    pub(super) fn new(refresh_secs: u64) -> Self {
+impl<T> Cache<T> {
+    pub(in crate::middleware) fn new(refresh_secs: u64) -> Self {
         Self {
             refresh: Duration::from_secs(refresh_secs),
             state: Mutex::new(State::default()),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State<T>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The set a request may use at `now`: fresh or stale, not dropped.
-    pub(super) fn current(&self, now: Instant) -> Option<Arc<KeySet>> {
+    /// The value a request may use at `now`: fresh or stale, not dropped.
+    pub(in crate::middleware) fn current(&self, now: Instant) -> Option<Arc<T>> {
         let state = self.lock();
-        self.usable(&state, now).map(|(keys, _)| keys)
+        self.usable(&state, now).map(|(value, _)| value)
     }
 
-    /// The set at `now`, and whether it is past its refresh time.
-    fn usable(&self, state: &State, now: Instant) -> Option<(Arc<KeySet>, bool)> {
+    /// The value at `now`, and whether it is past its refresh time.
+    fn usable(&self, state: &State<T>, now: Instant) -> Option<(Arc<T>, bool)> {
         let stored = state.stored.as_ref()?;
         let age = now.saturating_duration_since(stored.fetched);
-        (age < self.refresh + STALE_FOR).then(|| (Arc::clone(&stored.keys), age >= self.refresh))
+        (age < self.refresh + STALE_FOR).then(|| (Arc::clone(&stored.value), age >= self.refresh))
     }
 
     /// What a request should do at `now`.
-    pub(super) fn plan(&self, now: Instant, demand: Demand) -> Plan {
+    pub(in crate::middleware) fn plan(&self, now: Instant, demand: Demand) -> Plan<T> {
         let mut state = self.lock();
         let joinable = state
             .flight
@@ -279,7 +295,7 @@ impl Cache {
             .is_some_and(|at| now.saturating_duration_since(at) < BACKOFF);
         let set = self.usable(&state, now);
         match (set, demand) {
-            (Some((keys, _)), Demand::KidMiss) => {
+            (Some((value, _)), Demand::KidMiss) => {
                 if let Some(flight) = joinable {
                     return Plan::Wait(flight);
                 }
@@ -287,17 +303,17 @@ impl Cache {
                     .last_kid_fetch
                     .is_none_or(|at| now.saturating_duration_since(at) >= KID_MISS);
                 if backing_off || !spaced {
-                    return Plan::Ready(keys);
+                    return Plan::Ready(value);
                 }
                 state.last_kid_fetch = Some(now);
                 Plan::Foreground(Self::start(&mut state))
             }
-            (Some((keys, false)), Demand::Keys) => Plan::Ready(keys),
-            (Some((keys, true)), Demand::Keys) => {
+            (Some((value, false)), Demand::Keys) => Plan::Ready(value),
+            (Some((value, true)), Demand::Keys) => {
                 if joinable.is_some() || backing_off {
-                    Plan::Ready(keys)
+                    Plan::Ready(value)
                 } else {
-                    Plan::Background(keys, Self::start(&mut state))
+                    Plan::Background(value, Self::start(&mut state))
                 }
             }
             (None, _) => match joinable {
@@ -308,21 +324,26 @@ impl Cache {
         }
     }
 
-    fn start(state: &mut State) -> Flight {
+    fn start(state: &mut State<T>) -> Flight {
         let (done, flight) = watch::channel(());
         state.flight = Some(flight);
         Flight { _done: done }
     }
 
     /// Takes the result of a fetch that [`Self::plan`] started at `now`, then wakes the
-    /// requests that wait for it. A failure keeps the set it had.
-    pub(super) fn finish<E>(&self, flight: Flight, now: Instant, result: Result<KeySet, E>) {
+    /// requests that wait for it. A failure keeps the value it had.
+    pub(in crate::middleware) fn finish<E>(
+        &self,
+        flight: Flight,
+        now: Instant,
+        result: Result<T, E>,
+    ) {
         {
             let mut state = self.lock();
             match result {
-                Ok(keys) => {
+                Ok(value) => {
                     state.stored = Some(Stored {
-                        keys: Arc::new(keys),
+                        value: Arc::new(value),
                         fetched: now,
                     });
                     state.last_failure = None;
@@ -334,12 +355,40 @@ impl Cache {
         drop(flight);
     }
 
+    /// The value to use now, fetching when the plan says so: `start` runs the fetch of a
+    /// [`Flight`] in the background. `None` when there is no value at all.
+    pub(in crate::middleware) async fn obtain(
+        &self,
+        demand: Demand,
+        start: impl FnOnce(Flight),
+    ) -> Option<Arc<T>> {
+        let mut wait = match self.plan(Instant::now(), demand) {
+            Plan::Ready(value) => return Some(value),
+            Plan::Background(value, flight) => {
+                start(flight);
+                return Some(value);
+            }
+            Plan::Foreground(flight) => {
+                let wait = flight.subscribe();
+                start(flight);
+                wait
+            }
+            Plan::Wait(wait) => wait,
+            Plan::Unavailable => return None,
+        };
+        // The sender is dropped, never used, when the fetch ends.
+        let _ended = wait.changed().await;
+        self.current(Instant::now())
+    }
+}
+
+impl Cache<KeySet> {
     /// The number of keys held, `0` with no set.
     pub(super) fn held(&self) -> usize {
         self.lock()
             .stored
             .as_ref()
-            .map_or(0, |stored| stored.keys.len())
+            .map_or(0, |stored| stored.value.len())
     }
 }
 
@@ -382,7 +431,7 @@ mod test {
 
     #[test]
     fn jwks_kid_miss_refresh_rate_limited() {
-        let cache = Cache::new(3600);
+        let cache = Cache::<KeySet>::new(3600);
         let t0 = Instant::now();
         assert_eq!(run(&cache, t0, Demand::Keys, Ok(keys())), "foreground");
         // The first miss refreshes, the following ones within 10 seconds do not.
@@ -418,7 +467,7 @@ mod test {
 
     #[test]
     fn jwks_stale_on_error() {
-        let cache = Cache::new(60);
+        let cache = Cache::<KeySet>::new(60);
         let t0 = Instant::now();
         assert_eq!(run(&cache, t0, Demand::Keys, Ok(keys())), "foreground");
         assert_eq!(run(&cache, at(t0, 59), Demand::Keys, Ok(keys())), "ready");
@@ -441,7 +490,7 @@ mod test {
 
     #[test]
     fn jwks_unreachable_no_cache_503() {
-        let cache = Cache::new(3600);
+        let cache = Cache::<KeySet>::new(3600);
         let t0 = Instant::now();
         assert_eq!(run(&cache, t0, Demand::Keys, Err(())), "foreground");
         assert!(cache.current(at(t0, 1)).is_none());
@@ -463,7 +512,7 @@ mod test {
 
     #[test]
     fn one_fetch_is_in_flight_and_waiters_wake_when_it_ends() {
-        let cache = Cache::new(3600);
+        let cache = Cache::<KeySet>::new(3600);
         let t0 = Instant::now();
         let Plan::Foreground(flight) = cache.plan(t0, Demand::Keys) else {
             panic!("the first request fetches");
@@ -481,7 +530,7 @@ mod test {
 
     #[test]
     fn a_dropped_fetch_does_not_wedge_the_cache() {
-        let cache = Cache::new(3600);
+        let cache = Cache::<KeySet>::new(3600);
         let t0 = Instant::now();
         let Plan::Foreground(flight) = cache.plan(t0, Demand::Keys) else {
             panic!("fetches");

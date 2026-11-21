@@ -809,6 +809,12 @@ pub fn with_jwt_auth(app: Value, config: Value) -> Value {
     with_middleware(app, "jwt", "jwt_auth", config)
 }
 
+/// `app` with one `oidc` middleware `login`, `config` holding its fields, in the app's
+/// `default_chain`.
+pub fn with_oidc(app: Value, config: Value) -> Value {
+    with_middleware(app, "login", "oidc", config)
+}
+
 /// `app` with one `forward_auth` middleware `auth` asking `http://<auth>/verify`; `extra` holds
 /// the other fields of its configuration (an object, or `null` for none).
 pub fn with_forward_auth(app: Value, auth: SocketAddr, extra: &Value) -> Value {

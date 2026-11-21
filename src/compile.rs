@@ -260,6 +260,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             limits,
             &mut rejected,
             context.resolver(),
+            snapshot.skew_secret.as_ref(),
         );
         let max_buffer_bytes = snapshot
             .tenants
@@ -318,6 +319,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         snapshot,
         &stage_lists,
         context.rate_limit_stores(),
+    ));
+    rejected.extend(middleware::oidc::check_snapshot(
+        snapshot,
+        &stage_lists,
+        context.upstream_policy(),
     ));
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
@@ -692,6 +698,7 @@ fn stages_of(
     limits: crate::cache::Limits,
     rejected: &mut Vec<Rejected>,
     resolver: &Resolver,
+    skew_secret: Option<&SkewSecret>,
 ) -> Vec<middleware::Named> {
     let mut stages: Vec<middleware::Named> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
@@ -719,10 +726,12 @@ fn stages_of(
                 if let middleware::Stage::Cache(cache) = &mut stage {
                     cache.bind(limits)?;
                 }
-                // The kinds that dial a host name of their configuration.
+                // The kinds that dial a host name of their configuration, and the one that keys
+                // its cookies with the snapshot's `skew_secret`.
                 match &mut stage {
                     middleware::Stage::ForwardAuth(auth) => auth.bind(resolver),
                     middleware::Stage::JwtAuth(auth) => auth.bind(resolver),
+                    middleware::Stage::Oidc(auth) => auth.bind(skew_secret, resolver)?,
                     _ => {}
                 }
                 Ok(stage)

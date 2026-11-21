@@ -186,6 +186,25 @@ impl Origin {
         url.push_str(&self.target);
         url
     }
+
+    /// The host of the request, lower case without a trailing dot and without a port.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// `scheme://host[:port]` of the request followed by `path`, which the caller has checked:
+    /// where a login flow tells an identity provider to come back to.
+    #[must_use]
+    pub fn at(&self, path: &str) -> String {
+        let mut url = format!("{}://{}", self.scheme(), self.host);
+        if let Some(port) = self.port {
+            url.push(':');
+            url.push_str(&port.to_string());
+        }
+        url.push_str(path);
+        url
+    }
 }
 
 /// Whether `raw` holds a control byte, a DEL, or a percent escape of one.

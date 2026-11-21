@@ -252,10 +252,11 @@ impl Copier {
     }
 }
 
-/// `query` with the values of the parameters the policy names, and of those a `jwt_auth` stage of
-/// the route reads a token from, replaced by `[redacted]`.
-fn redact_query(policy: &Policy, tokens: &Credentials, query: &str) -> String {
-    let query = tokens.redact_query(query);
+/// `query` of a request for `path` with the values of the parameters the policy names, of those
+/// a `jwt_auth` stage of the route reads a token from, and of the code of an `oidc` callback,
+/// replaced by `[redacted]`.
+fn redact_query(policy: &Policy, tokens: &Credentials, path: &str, query: &str) -> String {
+    let query = tokens.redact_query(path, query);
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
@@ -380,7 +381,10 @@ impl Record {
             .uri
             .query()
             .filter(|_| wants(Field::Query))
-            .map(|query| copy.text("query", &redact_query(&policy, &tokens, query)));
+            .map(|query| {
+                let shown = redact_query(&policy, &tokens, request.uri.path(), query);
+                copy.text("query", &shown)
+            });
         let method = copy.text("method", request.method.as_str());
         let path = copy.text("path", request.uri.path());
         let response = session.response_written();
@@ -559,6 +563,7 @@ mod test {
             redact_query(
                 &policy,
                 &Credentials::default(),
+                "/p",
                 "a=1&token=secret&b&key=x=y&c=3"
             ),
             "a=1&token=[redacted]&b&key=[redacted]&c=3"

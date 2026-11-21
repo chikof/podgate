@@ -56,6 +56,7 @@ pub mod in_flight_req;
 pub mod ip_allow_list;
 pub mod jwt_auth;
 pub(crate) mod limits;
+pub mod oidc;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod rate_limit;
@@ -833,6 +834,8 @@ kinds! {
 
     "jwt_auth" => JwtAuth(jwt_auth::JwtAuth),
 
+    "oidc" => Oidc(oidc::Oidc),
+
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => RateLimit(rate_limit::RateLimit),
@@ -899,6 +902,8 @@ schemas! {
     "forward_auth" => forward_auth::Config,
 
     "jwt_auth" => jwt_auth::Config,
+
+    "oidc" => oidc::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 
@@ -1049,6 +1054,7 @@ pub async fn run_routed(
     cx.credentialed = state.stages.iter().any(|stage| match stage {
         StageState::ForwardAuth(auth) => auth.identified(),
         StageState::JwtAuth(auth) => auth.verified(),
+        StageState::Oidc(auth) => auth.authenticated(),
         _ => false,
     });
     cx.original = state.original.take();
