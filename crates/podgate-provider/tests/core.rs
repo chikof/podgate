@@ -2002,27 +2002,3 @@ fn skew_secret_file_unreadable_fails_config() {
             .is_err()
     );
 }
-
-#[test]
-fn snapshot_acme_refused_until_relay() {
-    // Orders would never complete without the event relay and would burn the CA's rate limits.
-    let text = "admin_socket = \"/x.sock\"\n[snapshot.acme]\nissuer_node = \"node-1\"\ndirectory_url = \"https://acme.example.test/dir\"\n";
-    match podgate_provider::Config::parse(text) {
-        Err(podgate_provider::ConfigError::Invalid { field, reason }) => {
-            assert_eq!(&*field, "snapshot.acme");
-            assert!(
-                reason.contains("needs the event relay, not built yet")
-                    && reason.contains("docs/ref/provider.md"),
-                "{reason}"
-            );
-        }
-        other => panic!("expected the acme refusal, got {other:?}"),
-    }
-    // Without `acme` the section still loads.
-    assert!(
-        podgate_provider::Config::parse(
-            "admin_socket = \"/x.sock\"\n[snapshot]\nrevert_window_secs = 60\n"
-        )
-        .is_ok()
-    );
-}

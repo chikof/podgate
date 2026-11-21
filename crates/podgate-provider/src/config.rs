@@ -32,6 +32,7 @@ use podgate_model::{Budget, Observability, SkewSecret};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::acme::settings::{AcmeSettings, RawAcme};
 use crate::trust::HostPattern;
 
 /// The id of the default tenant.
@@ -69,7 +70,7 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
-    fn invalid(field: impl Into<Box<str>>, reason: impl std::fmt::Display) -> Self {
+    pub(crate) fn invalid(field: impl Into<Box<str>>, reason: impl std::fmt::Display) -> Self {
         Self::Invalid {
             field: field.into(),
             reason: reason.to_string().into(),
@@ -132,6 +133,8 @@ pub struct Config {
     pub sources: Vec<SourceConfig>,
     /// The parts of the snapshot the operator owns, copied into every snapshot.
     pub operator: Operator,
+    /// The ACME broker or follower, when `[acme]` is enabled.
+    pub acme: Option<AcmeSettings>,
 }
 /// The snapshot fields no source declares: the operator's `[snapshot]` section. A provider-only
 /// node has no other writer for them, so the provider copies them into every snapshot verbatim.
@@ -192,7 +195,6 @@ struct RawSource {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
-    acme: Option<toml::Value>,
     revert_window_secs: Option<u64>,
     observability: Option<Observability>,
     skew_secret_file: Option<PathBuf>,
@@ -211,6 +213,7 @@ struct RawConfig {
     #[serde(default)]
     source: Vec<RawSource>,
     snapshot: Option<RawSnapshot>,
+    acme: Option<RawAcme>,
 }
 
 /// A tenant or source name: lowercase letters, digits, `.`, `_` and `-`, starting with a letter
@@ -320,6 +323,7 @@ impl Config {
         let default_tenant = default_tenant(raw.default_tenant)?;
         let tenants = tenants(raw.tenant, &sources, &default_tenant)?;
         let operator = operator(raw.snapshot)?;
+        let acme = crate::acme::settings::parse(raw.acme)?;
         Ok(Self {
             admin_socket: raw.admin_socket,
             upstream_policy_file: raw.upstream_policy_file,
@@ -330,6 +334,7 @@ impl Config {
             tenants,
             sources,
             operator,
+            acme,
         })
     }
 
@@ -343,12 +348,6 @@ fn operator(raw: Option<RawSnapshot>) -> Result<Operator, ConfigError> {
     let Some(raw) = raw else {
         return Ok(Operator::default());
     };
-    if raw.acme.is_some() {
-        return Err(ConfigError::invalid(
-            "snapshot.acme",
-            "ACME on a provider-only node needs the event relay, not built yet; see docs/ref/provider.md",
-        ));
-    }
     let skew_secret = match raw.skew_secret_file {
         None => None,
         Some(path) => {

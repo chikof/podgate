@@ -21,8 +21,10 @@ use tokio::net::UnixStream;
 /// The name the provider pushes under, in the `podgate-writer` header.
 pub const WRITER: &str = "podgate-provider";
 
-/// Largest answer the client reads.
-const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
+/// Largest answer the client reads. The event feed answers with every event after the cursor, a
+/// full ring (4096) of certificates included, and an answer the client refuses would be
+/// refused again on every poll.
+const MAX_ANSWER_BYTES: usize = 32 * 1024 * 1024;
 
 /// Why a request got no answer.
 #[derive(Debug, Error)]
@@ -110,6 +112,9 @@ pub struct Tuning {
     pub request_timeout: Duration,
     /// How long to wait when validate answers `503` busy, before asking again.
     pub busy_wait: Duration,
+    /// How long one poll of the event feed waits for an event (`timeout_secs`); the request
+    /// deadline is this plus `request_timeout`.
+    pub event_poll: Duration,
 }
 
 impl Default for Tuning {
@@ -119,6 +124,7 @@ impl Default for Tuning {
             backoff_max: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
             busy_wait: Duration::from_secs(1),
+            event_poll: Duration::from_secs(20),
         }
     }
 }
@@ -142,6 +148,18 @@ impl AdminClient {
 
     async fn request(
         &self,
+        method: &str,
+        path: &str,
+        writer: bool,
+        body: &[u8],
+    ) -> Result<Answer, ClientError> {
+        self.request_within(self.timeout, method, path, writer, body)
+            .await
+    }
+
+    async fn request_within(
+        &self,
+        timeout: Duration,
         method: &str,
         path: &str,
         writer: bool,
@@ -180,7 +198,7 @@ impl AdminClient {
             }
             parse_answer(&raw)
         };
-        tokio::time::timeout(self.timeout, exchange)
+        tokio::time::timeout(timeout, exchange)
             .await
             .map_err(|_| ClientError::Timeout)?
     }
@@ -236,6 +254,21 @@ impl AdminClient {
     /// [`ClientError`] when there is no answer. Every status is an [`Answer`].
     pub async fn validate(&self, body: &str) -> Result<Answer, ClientError> {
         self.request("POST", "/v1/snapshot/validate", false, body.as_bytes())
+            .await
+    }
+
+    /// `GET /v1/events?after=<after>&timeout_secs=<wait>`: a long poll that waits up to `wait`
+    /// (at least one second) for an event after `after`. Sends no writer header.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`] when there is no answer. Every status is an [`Answer`].
+    pub async fn events(&self, after: u64, wait: Duration) -> Result<Answer, ClientError> {
+        let path = format!(
+            "/v1/events?after={after}&timeout_secs={}",
+            wait.as_secs().max(1)
+        );
+        self.request_within(self.timeout + wait, "GET", &path, false, b"")
             .await
     }
 }

@@ -351,7 +351,12 @@ impl Trust {
         }
     }
 
-    fn lookup(&self, id: &str) -> Result<Resolved<'_>, Problem> {
+    /// The tenant called `id`.
+    ///
+    /// # Errors
+    ///
+    /// `unknown_tenant` when it is not in the configuration.
+    pub fn lookup(&self, id: &str) -> Result<Resolved<'_>, Problem> {
         if id == &*self.default.id {
             return Ok(Resolved {
                 tenant: &self.default,

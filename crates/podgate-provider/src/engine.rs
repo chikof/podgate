@@ -21,15 +21,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
+use crate::acme::events::{NoSolver, Solver};
+use crate::acme::{self, BrokerError, BrokerView, Claims};
 use crate::config::Config;
 use crate::merge::{Finding, Merged, Merger};
 use crate::policy::UpstreamPolicy;
@@ -45,6 +48,9 @@ const MAX_BUSY_RETRIES: u32 = 5;
 
 type SourceTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
+/// How long the engine waits for every source before it shares claims anyway.
+const CLAIMS_PATIENCE: Duration = Duration::from_secs(30);
+
 /// Why the engine stopped.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,6 +62,9 @@ pub enum RunError {
         /// The owner's name, or `None` when it pushed without one.
         writer: Option<Box<str>>,
     },
+    /// The ACME broker cannot start: its state directory is not usable.
+    #[error("the ACME broker cannot start: {0}")]
+    Acme(Box<str>),
 }
 
 fn owner(writer: Option<&str>) -> String {
@@ -80,6 +89,9 @@ pub enum CollectError {
         /// What it reported.
         error: Box<str>,
     },
+    /// The ACME state directory cannot be read, so the merge would lack its certificates.
+    #[error("cannot read the ACME state directory: {0}")]
+    Acme(Box<str>),
 }
 
 /// A source's name that is not in the configuration.
@@ -111,6 +123,9 @@ pub struct Status {
     pub pushes: u64,
     /// Why the last round did not push, when it did not.
     pub error: Option<Box<str>>,
+    /// Why the ACME broker stopped, when it did: no certificate or challenge is added until the
+    /// provider restarts.
+    pub acme_error: Option<Box<str>>,
 }
 
 #[derive(Debug)]
@@ -157,6 +172,11 @@ pub struct Engine {
     error: Option<Box<str>>,
     last_findings: Vec<Finding>,
     started: Instant,
+    solver: Arc<dyn Solver>,
+    acme_view: Arc<BrokerView>,
+    acme_epoch: u64,
+    acme_claims: Option<watch::Sender<Option<Arc<Claims>>>>,
+    acme_error: Option<Box<str>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -194,6 +214,11 @@ impl Engine {
             error: None,
             last_findings: Vec::new(),
             started: Instant::now(),
+            solver: Arc::new(NoSolver),
+            acme_view: Arc::new(BrokerView::off()),
+            acme_epoch: 0,
+            acme_claims: None,
+            acme_error: None,
         }
     }
 
@@ -219,6 +244,14 @@ impl Engine {
         Ok(())
     }
 
+    /// Registers the DNS-01 solver that publishes TXT records for the ACME broker.
+    /// Without one, DNS-01 challenges are reported and never answered.
+    #[must_use]
+    pub fn with_dns_solver(mut self, solver: Arc<dyn Solver>) -> Self {
+        self.solver = solver;
+        self
+    }
+
     /// A receiver of the engine's status, which changes after every round.
     #[must_use]
     pub fn status(&self) -> watch::Receiver<Status> {
@@ -236,7 +269,8 @@ impl Engine {
     }
 
     fn merge(&self) -> Merged {
-        self.merger.merge(&self.states, &self.quarantine.excluded())
+        self.merger
+            .merge_with(&self.states, &self.quarantine.excluded(), &self.acme_view)
     }
 
     /// Takes an update of a source. Returns whether the desired state may have changed.
@@ -282,6 +316,7 @@ impl Engine {
                 }
             }
             self.last_findings = merged.findings().to_vec();
+            self.share_claims(merged);
         }
         let status = Status {
             findings: self.last_findings.clone(),
@@ -298,8 +333,38 @@ impl Engine {
             pushed_version: self.pushed.as_ref().map(|pushed| pushed.version),
             pushes: self.pushes,
             error: self.error.clone(),
+            acme_error: self.acme_error.clone(),
         };
         self.status.send_replace(status);
+    }
+
+    /// Tells the ACME broker what the apps of `merged` claim, once every source has reported
+    /// (or a source has been silent for a while): a partial view would make it refuse hosts
+    /// whose apps have not arrived yet.
+    fn share_claims(&self, merged: &Merged) {
+        let ready = self.sources_ready() || self.started.elapsed() >= CLAIMS_PATIENCE;
+        let Some(claims) = self.acme_claims.as_ref().filter(|_| ready) else {
+            return;
+        };
+        claims.send_if_modified(|current| {
+            let changed = current.as_deref() != Some(&**merged.claims());
+            if changed {
+                *current = Some(Arc::clone(merged.claims()));
+            }
+            changed
+        });
+    }
+
+    /// The ACME broker ended. Its last state stays pushed; the sources keep working.
+    fn acme_stopped(&mut self, ended: Result<Result<(), BrokerError>, tokio::task::JoinError>) {
+        let why: Box<str> = match ended {
+            Ok(Ok(())) => return,
+            Ok(Err(err)) => format!("{err}: {}", source_chain(&err)).into(),
+            Err(err) => format!("the ACME broker task failed: {err}").into(),
+        };
+        error!(error = %why, "the ACME broker stopped; the last pushed state stays and no certificate is added until the provider is restarted");
+        self.acme_error = Some(why);
+        self.publish(None);
     }
 
     /// Runs until `shutdown` completes or another writer owns the snapshot.
@@ -321,22 +386,60 @@ impl Engine {
         if self.config.sources.is_empty() {
             debounce.note(self.now_ms());
         }
+        let mut acme_view: Option<watch::Receiver<Arc<BrokerView>>> = None;
+        let mut acme_task: Option<JoinHandle<Result<(), BrokerError>>> = None;
+        if let Some(settings) = self.config.acme.clone() {
+            let handle = acme::start(
+                &settings,
+                &self.config,
+                self.client.clone(),
+                self.tuning,
+                Arc::clone(&self.solver),
+            )
+            .map_err(|err| RunError::Acme(format!("{err}: {}", source_chain(&err)).into()))?;
+            self.acme_view = Arc::clone(&handle.view.borrow());
+            self.acme_epoch = self.acme_view.epoch();
+            acme_view = Some(handle.view);
+            acme_task = Some(handle.task);
+            self.acme_claims = Some(handle.claims);
+            debounce.note(self.now_ms());
+        }
         let resync = self.config.resync;
         let mut resync_tick = tokio::time::interval_at(Instant::now() + resync, resync);
         resync_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         tokio::pin!(shutdown);
 
-        loop {
+        let result = loop {
             let debounce_at = debounce
                 .deadline()
                 .map(|ms| self.started + Duration::from_millis(ms));
             let wake = [debounce_at, retry_at].into_iter().flatten().min();
             let mode = tokio::select! {
-                () = &mut shutdown => break,
+                () = &mut shutdown => break Ok(()),
                 update = self.inbox.recv() => {
                     if let Some(update) = update && self.apply(update) {
                         debounce.note(self.now_ms());
                     }
+                    continue;
+                }
+                changed = view_changed(&mut acme_view) => {
+                    let Some(view) = acme_view.as_mut().filter(|_| changed) else {
+                        acme_view = None;
+                        continue;
+                    };
+                    self.acme_view = Arc::clone(&view.borrow_and_update());
+                    if self.acme_view.epoch() == self.acme_epoch {
+                        debounce.note(self.now_ms());
+                        continue;
+                    }
+                    // podgate restarted or lost events: look at the live snapshot now, not at
+                    // the next resync tick.
+                    self.acme_epoch = self.acme_view.epoch();
+                    Mode::Resync
+                }
+                ended = broker_ended(&mut acme_task) => {
+                    acme_task = None;
+                    self.acme_stopped(ended);
                     continue;
                 }
                 () = sleep_until(wake) => Mode::Changed,
@@ -374,11 +477,14 @@ impl Engine {
                     error!(error = %err, "stopping");
                     self.error = Some(err.to_string().into());
                     self.publish(None);
-                    return Err(err);
+                    break Err(err);
                 }
             }
+        };
+        if let Some(task) = &acme_task {
+            task.abort();
         }
-        Ok(())
+        result
     }
 
     /// One round: merge, and push when something has to be pushed.
@@ -549,7 +655,8 @@ impl Engine {
             let build = |extra: &BTreeSet<ObjectRef>| {
                 let mut excluded = self.quarantine.excluded();
                 excluded.extend(extra.iter().cloned());
-                self.merger.merge(&self.states, &excluded)
+                self.merger
+                    .merge_with(&self.states, &excluded, &self.acme_view)
             };
             let mut ask = Daemon {
                 client: &self.client,
@@ -604,6 +711,12 @@ impl Engine {
     /// [`CollectError`] when a source does not report within `wait`, or reports an outage:
     /// a partial merge would mislead.
     pub async fn first_pass(&mut self, wait: Duration) -> Result<Merged, CollectError> {
+        if let Some(settings) = &self.config.acme {
+            let view = acme::offline_view(settings).map_err(|err| {
+                CollectError::Acme(format!("{err}: {}", source_chain(&err)).into())
+            })?;
+            self.acme_view = Arc::new(view);
+        }
         let mut sources = JoinSet::new();
         for task in std::mem::take(&mut self.tasks) {
             sources.spawn(task);
@@ -753,6 +866,25 @@ fn duration_ms(duration: Duration) -> u64 {
 async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for the ACME broker to publish a new view. `false`: the broker is gone. Never ready
+/// when there is no broker.
+async fn view_changed(view: &mut Option<watch::Receiver<Arc<BrokerView>>>) -> bool {
+    match view {
+        Some(view) => view.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for the ACME broker's task to end. Never ready when there is none.
+async fn broker_ended(
+    task: &mut Option<JoinHandle<Result<(), BrokerError>>>,
+) -> Result<Result<(), BrokerError>, tokio::task::JoinError> {
+    match task {
+        Some(task) => task.await,
         None => std::future::pending().await,
     }
 }

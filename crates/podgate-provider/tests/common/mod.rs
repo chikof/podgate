@@ -7,6 +7,9 @@
 // Each test file compiles this module on its own and uses a different subset of it.
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
+pub mod daemon;
+pub mod pebble;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -34,6 +37,27 @@ pub fn socket_path() -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+/// `count` distinct free loopback ports. All probes stay bound until every port is chosen, so
+/// the kernel cannot hand the same port out twice.
+pub fn free_ports(count: usize) -> Vec<u16> {
+    let probes: Vec<std::net::TcpListener> = (0..count)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port"))
+        .collect();
+    probes
+        .iter()
+        .map(|probe| probe.local_addr().expect("local addr").port())
+        .collect()
+}
+
+/// How many authorizations pebble created, from its log: one "There are now N authorizations in
+/// the db" line each. pebble reuses a still-valid authorization for 1 percent of identifiers
+/// even with `PEBBLE_AUTHZREUSE=0` (`wfe/wfe.go:1562-1565`), and an order that reuses one has no
+/// challenge to publish. A test that counts challenges compares them with this, never with a
+/// fixed number.
+pub fn pebble_authorizations_created(pebble_log: &str) -> usize {
+    pebble_log.matches("authorizations in the db").count()
 }
 
 /// One snapshot the fake accepted.
@@ -68,6 +92,10 @@ struct Inner {
     script: VecDeque<Reply>,
     busy_validations: u32,
     rule: Rule,
+    events: Vec<Value>,
+    next_seq: u64,
+    oldest_kept: u64,
+    polls: Vec<u64>,
 }
 
 /// A fake admin socket.
@@ -106,6 +134,10 @@ impl FakeAdmin {
             script: VecDeque::new(),
             busy_validations: 0,
             rule: Arc::new(|_| Vec::new()),
+            events: Vec::new(),
+            next_seq: 1,
+            oldest_kept: 1,
+            polls: Vec::new(),
         }));
         Self {
             path,
@@ -152,6 +184,9 @@ impl FakeAdmin {
         inner.live_version = 0;
         inner.writer = None;
         inner.boot_id = format!("{}-restarted", inner.boot_id);
+        inner.events.clear();
+        inner.next_seq = 1;
+        inner.oldest_kept = 1;
     }
 
     /// Another writer pushed `version`.
@@ -175,6 +210,32 @@ impl FakeAdmin {
 
     pub fn validations(&self) -> Vec<Value> {
         lock(&self.inner).validations.clone()
+    }
+
+    /// Appends an event to the feed and returns its sequence number. `event` carries `kind` and
+    /// the kind's fields; `seq` is added.
+    pub fn emit(&self, mut event: Value) -> u64 {
+        let mut inner = lock(&self.inner);
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        event["seq"] = json!(seq);
+        inner.events.push(event);
+        seq
+    }
+
+    /// The `after` of every poll of the feed so far.
+    pub fn polls(&self) -> Vec<u64> {
+        lock(&self.inner).polls.clone()
+    }
+
+    /// The feed forgets everything before `oldest`: a poll with an older cursor gets `410`.
+    pub fn forget_events_before(&self, oldest: u64) {
+        let mut inner = lock(&self.inner);
+        inner.oldest_kept = oldest;
+        inner.next_seq = inner.next_seq.max(oldest);
+        inner
+            .events
+            .retain(|event| event["seq"].as_u64() >= Some(oldest));
     }
 
     pub fn live_version(&self) -> u64 {
@@ -264,6 +325,43 @@ async fn respond(stream: &mut UnixStream, status: u16, body: &Value) {
     let _ = stream.shutdown().await;
 }
 
+/// `GET /v1/events`: a long poll with the daemon's answers (`200` with events or empty after
+/// `timeout_secs`, `410` when `after` is older than what the feed keeps).
+async fn events_answer(shared: &Arc<Mutex<Inner>>, path: &str) -> (u16, Value) {
+    let query = path.split_once('?').map_or("", |(_, query)| query);
+    let param = |name: &str| {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let (after, wait) = (param("after"), param("timeout_secs"));
+    lock(shared).polls.push(after);
+    let start = Instant::now();
+    loop {
+        {
+            let inner = lock(shared);
+            if after + 1 < inner.oldest_kept {
+                return (
+                    410,
+                    json!({ "error": "events are no longer retained", "boot_id": inner.boot_id, "oldest": inner.oldest_kept }),
+                );
+            }
+            let events: Vec<Value> = inner
+                .events
+                .iter()
+                .filter(|event| event["seq"].as_u64() > Some(after))
+                .cloned()
+                .collect();
+            if !events.is_empty() || start.elapsed() >= Duration::from_secs(wait) {
+                return (200, json!({ "boot_id": inner.boot_id, "events": events }));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 fn rejection(conflicts: Vec<Value>) -> Value {
     json!({ "error": "snapshot rejected", "conflicts": conflicts })
 }
@@ -275,6 +373,7 @@ async fn serve(mut stream: UnixStream, shared: Arc<Mutex<Inner>>) {
     let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let route = (method.as_str(), path.split('?').next().unwrap_or_default());
     let (status, answer): (u16, Value) = match route {
+        ("GET", "/v1/events") => events_answer(&shared, &path).await,
         ("GET", "/v1/snapshot/version") => {
             let inner = lock(&shared);
             (
@@ -476,6 +575,8 @@ pub trait AppExt: Sized {
     fn labelled(self, tenant: &str) -> Self;
     /// The same app with the age stamp `stamp`.
     fn first_seen(self, stamp: u64) -> Self;
+    /// The same app, with certificates issued at the first handshake (`tls.mode = on_demand`).
+    fn on_demand(self) -> Self;
 }
 
 impl AppExt for SourceApp {
@@ -491,6 +592,11 @@ impl AppExt for SourceApp {
 
     fn first_seen(mut self, stamp: u64) -> Self {
         self.origin.first_seen = stamp;
+        self
+    }
+
+    fn on_demand(mut self) -> Self {
+        self.app.tls.mode = podgate_model::TlsMode::OnDemand;
         self
     }
 }
@@ -529,6 +635,7 @@ pub fn fast_tuning() -> podgate_provider::push::Tuning {
         backoff_max: Duration::from_millis(80),
         request_timeout: Duration::from_secs(5),
         busy_wait: Duration::from_millis(10),
+        event_poll: Duration::from_secs(1),
     }
 }
 
@@ -613,6 +720,21 @@ impl Harness {
             .await
             .expect("the engine stops")
             .expect("the engine task does not panic")
+    }
+
+    /// Stops the engine and hands the admin socket back, for a test that starts a second
+    /// engine against the same podgate.
+    pub async fn stop_keep_admin(mut self) -> FakeAdmin {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let run = self.run.take().expect("not stopped yet");
+        tokio::time::timeout(DEADLINE, run)
+            .await
+            .expect("the engine stops")
+            .expect("the engine task does not panic")
+            .expect("the engine stopped cleanly");
+        self.admin
     }
 
     /// Waits for the engine to end by itself (a writer conflict).

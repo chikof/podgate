@@ -15,10 +15,12 @@
 //!   object naming a tenant that does not exist is dropped, never defaulted.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use podgate_model::{App, Certificate, EntryPointPolicy, Snapshot, Tenant};
 use serde_json::{Map, Value};
 
+use crate::acme::{BrokerView, Claims};
 use crate::config::{Config, Operator, TenantConfig};
 use crate::policy::UpstreamPolicy;
 use crate::source::{ObjectKind, ObjectRef, SourceApp, SourceCertificate, State, TenantClaim};
@@ -58,12 +60,25 @@ pub struct Included {
 }
 
 /// The result of one merge.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Merged {
     snapshot: Snapshot,
     findings: Vec<Finding>,
     included: Vec<Included>,
     fingerprint: Box<str>,
+    claims: Arc<Claims>,
+}
+
+/// The fingerprint is the canonical snapshot text, private keys included: `Debug` leaves it out.
+impl std::fmt::Debug for Merged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Merged")
+            .field("apps", &self.snapshot.apps.len())
+            .field("certificates", &self.snapshot.certificates.len())
+            .field("findings", &self.findings)
+            .field("included", &self.included.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Merged {
@@ -83,6 +98,12 @@ impl Merged {
     #[must_use]
     pub fn included(&self) -> &[Included] {
         &self.included
+    }
+
+    /// What the apps of this merge claim: the ACME broker's input for approvals and pruning.
+    #[must_use]
+    pub fn claims(&self) -> &Arc<Claims> {
+        &self.claims
     }
 
     /// The canonical text of the snapshot at version `0`. Equal text, equal snapshot.
@@ -265,12 +286,25 @@ impl Merger {
         }
     }
 
-    /// Merges `states` (one per source name), leaving out the objects in `excluded`.
+    /// Merges `states` (one per source name), leaving out objects in `excluded`, with no ACME
+    /// broker.
     #[must_use]
     pub fn merge(
         &self,
         states: &BTreeMap<Box<str>, State>,
         excluded: &BTreeSet<ObjectRef>,
+    ) -> Merged {
+        self.merge_with(states, excluded, &BrokerView::off())
+    }
+
+    /// Like [`Self::merge`], and adds what the ACME broker holds: its certificates that an
+    /// app claims, and the snapshot's `acme` object.
+    #[must_use]
+    pub fn merge_with(
+        &self,
+        states: &BTreeMap<Box<str>, State>,
+        excluded: &BTreeSet<ObjectRef>,
+        broker: &BrokerView,
     ) -> Merged {
         let mut candidates: Vec<Candidate<'_>> = Vec::new();
         for (source, state) in states {
@@ -301,7 +335,7 @@ impl Merger {
         for candidate in &candidates {
             self.consider(candidate, excluded, &mut run);
         }
-        run.finish(self)
+        run.finish(self, broker)
     }
 
     fn consider(&self, candidate: &Candidate<'_>, excluded: &BTreeSet<ObjectRef>, run: &mut Run) {
@@ -537,8 +571,10 @@ impl Run {
         });
     }
 
-    fn finish(mut self, merger: &Merger) -> Merged {
+    fn finish(mut self, merger: &Merger, broker: &BrokerView) -> Merged {
         self.apps.sort_by(|a, b| a.id.cmp(&b.id));
+        let claims = Claims::of(&self.apps);
+        self.add_broker_certificates(broker, &claims);
         self.certificates
             .sort_by(|a, b| (&a.hosts, &a.cert_pem).cmp(&(&b.hosts, &b.cert_pem)));
         let snapshot = Snapshot {
@@ -549,6 +585,7 @@ impl Run {
             skew_secret: merger.operator.skew_secret.clone(),
             revert_window_secs: merger.operator.revert_window_secs,
             observability: merger.operator.observability.clone(),
+            acme: broker.acme(),
             ..Snapshot::default()
         };
         Merged {
@@ -556,6 +593,34 @@ impl Run {
             snapshot,
             findings: self.findings,
             included: self.included,
+            claims: Arc::new(claims),
+        }
+    }
+
+    /// Adds the certificates the ACME broker holds that an app of this merge claims a host of.
+    /// A certificate a source supplies for the same hosts wins: the operator's explicit file
+    /// replaces the issued one. The rest stay in the broker's store, unpushed, until an app
+    /// claims them again or 30 days pass.
+    fn add_broker_certificates(&mut self, broker: &BrokerView, claims: &Claims) {
+        let sorted = |hosts: &[Box<str>]| {
+            let mut hosts = hosts.to_vec();
+            hosts.sort_unstable();
+            hosts
+        };
+        let supplied: BTreeSet<Vec<Box<str>>> = self
+            .certificates
+            .iter()
+            .map(|cert| sorted(&cert.hosts))
+            .collect();
+        for cert in broker.certificates() {
+            let claimed = cert
+                .hosts
+                .iter()
+                .filter_map(|host| HostPattern::parse(host).ok())
+                .any(|pattern| claims.claims(&pattern));
+            if claimed && !supplied.contains(&sorted(&cert.hosts)) {
+                self.certificates.push(cert.clone());
+            }
         }
     }
 }

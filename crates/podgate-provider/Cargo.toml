@@ -14,6 +14,7 @@ workspace = true
 anyhow = "1.0.104"
 httparse = "1.10.1"
 podgate-model = { version = "0.1.0", path = "../podgate-model" }
+rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
@@ -22,3 +23,8 @@ tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "syn
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1.16.0"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
