@@ -160,7 +160,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Consul Catalog | yes | none | built (catalog and health through blocking queries, `podgate.*` and `traefik.*` tags, servers from healthy instances only, tenants by fixed, meta or namespace, 512 watched services; reference `docs/ref/provider-consul.md`) |
 | Amazon ECS | yes | none | 0107 |
 | Docker Swarm | yes | `caddy-docker-proxy` | 0108 |
-| etcd, Redis (key trees) | yes | none | 0109 (shared key-value layer), 0110 |
+| etcd, Redis (key trees) | yes | none | etcd built (`podgate-json` and `traefik-kv` layouts under a key prefix per tenant, range and watch through the JSON gateway with resync, compaction repair and outage keeping the last state, user and password from a file with token renewal, TLS with a client certificate, a mandatory per-tenant upstream allowlist; reference `docs/ref/provider-etcd.md`, shared layer `docs/ref/provider-kv.md`); Redis 0110 |
 | HTTP provider | yes | `--config <url>` | 0111 |
 | Marathon, Rancher, Nomad-less legacy providers | Marathon, Rancher (removed in v3) | none | not planned: end-of-life platforms |
 | One writer per node | not applicable (providers merge in-process) | not applicable | built (refused by name, takeover by the operator; 0069: the provider pushes as `podgate-provider` and stops with an error naming another writer), 0080 |
