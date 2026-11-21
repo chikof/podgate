@@ -1,0 +1,55 @@
+# podgate-provider: example configuration. Run it with
+#   podgate-provider run --config /etc/podgate/provider.toml
+# Reference: docs/ref/provider.md.
+
+# The admin socket of this node's podgate (its ADMIN_SOCKET). The provider is the only writer
+# on the node: the podkit agent must not push to the same podgate.
+admin_socket = "/run/podgate/admin.sock"
+
+# The same file podgate reads as UPSTREAM_POLICY_FILE, so a server address podgate would refuse
+# is reported by the provider first. Absent: the built-in deny list (loopback, link-local,
+# metadata, multicast).
+upstream_policy_file = "/etc/podgate/upstream-policy.json"
+
+# Updates of the sources are coalesced for this long before a push (default 500).
+debounce_ms = 500
+# A steady stream of updates still pushes at least this often (default 5000).
+max_delay_ms = 5000
+# How often the live version is checked, and how long a quarantined object waits for another
+# try (default 30).
+resync_secs = 30
+
+# The tenant of every object that names none. It may claim only hosts that no [[tenant]]
+# below reaches. Weight and budget default to 1, 256 requests and 64 MiB.
+[default_tenant]
+weight = 1
+budget = { max_inflight = 256, max_buffer_bytes = 67108864 }
+
+# A tenant owns hosts. An object of this tenant may claim a host only inside `hosts`: exact
+# names, or `*.` wildcards (one label, and the names one label under the wildcard's base).
+[[tenant]]
+id = "acme"
+weight = 4
+budget = { max_inflight = 512, max_buffer_bytes = 134217728 }
+hosts = ["acme.example", "*.acme.example"]
+# Objects of these sources may name this tenant in a label or annotation (`podgate.tenant`).
+# A label from any other source is ignored. The tenant is then the one the source maps the
+# object to (network, namespace or a fixed name), or the default tenant.
+label_sources = ["docker-prod"]
+
+[[tenant]]
+id = "globex"
+hosts = ["globex.example"]
+# Routers of this tenant that match hosts nobody claims (a host_regexp, or no host
+# constraint) are allowed. The same decision as listing the tenant in CATCH_ALL_TENANTS.
+catch_all = false
+# Entry points only this tenant may attach routers to; the snapshot tells podgate. A fallback
+# router on exclusive entry points is allowed without `catch_all`.
+exclusive_entry_points = ["globex-private"]
+
+# Sources. `kind` is docker, kubernetes, nomad or file; `name` is unique and becomes part of
+# every app id (`<name>-<local id>`) and of `declared_by` (`<kind>/<name>:<object>`). The other
+# keys belong to the source's own reference.
+[[source]]
+kind = "docker"
+name = "docker-prod"

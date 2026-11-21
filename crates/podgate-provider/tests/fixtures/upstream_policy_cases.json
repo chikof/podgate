@@ -1,0 +1,164 @@
+{
+  "comment": "Shared vectors for the upstream address policy. The provider's policy.rs and the daemon's src/service/upstream_policy.rs must give these answers. `policy` is the content of the policy file (null: no file, the built-in deny list); `allowed` and `refused` are addresses dialled by `tenant`; `rules` is the rule the verdict names for an address.",
+  "cases": [
+    {
+      "name": "builtin denies loopback, unspecified and multicast, allows private and public ranges",
+      "policy": null,
+      "tenant": "t",
+      "refused": [
+        "127.0.0.1", "127.255.255.254", "::1", "0.0.0.0", "0.1.2.3", "::",
+        "224.0.0.1", "239.255.255.250", "ff02::1", "ff05::2"
+      ],
+      "allowed": [
+        "10.1.2.3", "172.16.0.9", "192.168.1.1", "fd12::1", "fc00::5", "8.8.8.8",
+        "2001:db8::1", "126.255.255.255", "128.0.0.1"
+      ],
+      "rules": { "127.0.0.1": "deny 127.0.0.0/8", "::1": "deny ::1/128" }
+    },
+    {
+      "name": "builtin denies link-local and the metadata addresses",
+      "policy": {},
+      "tenant": "t",
+      "refused": [
+        "169.254.169.254", "169.254.0.1", "169.254.255.255", "fe80::1", "febf::1",
+        "fd00:ec2::254", "100.100.100.200", "192.0.0.192"
+      ],
+      "allowed": ["169.253.255.255", "fec0::1"],
+      "rules": { "169.254.169.254": "deny 169.254.0.0/16", "100.100.100.200": "deny 100.100.100.200/32" }
+    },
+    {
+      "name": "IPv4-mapped and IPv4-compatible IPv6 addresses are checked as the IPv4 address they carry",
+      "policy": null,
+      "tenant": "t",
+      "refused": [
+        "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:0.0.0.0", "::ffff:224.0.0.1",
+        "::127.0.0.1", "::169.254.169.254", "0:0:0:0:0:ffff:7f00:1"
+      ],
+      "allowed": ["::ffff:10.1.2.3"]
+    },
+    {
+      "name": "mapped addresses against an allow list",
+      "policy": { "default": { "allow": ["10.0.0.0/8"] } },
+      "tenant": "t",
+      "refused": ["::ffff:11.1.2.3", "11.0.0.1", "192.168.1.1"],
+      "allowed": ["::ffff:10.1.2.3", "10.1.2.3"],
+      "rules": { "11.0.0.1": "not in the allow list of the default entry" }
+    },
+    {
+      "name": "a custom deny list replaces the built-in one, and is also checked as written",
+      "policy": { "deny": ["::1/128"] },
+      "tenant": "t",
+      "refused": ["::1"],
+      "allowed": ["::ffff:127.0.0.1", "127.0.0.1"]
+    },
+    {
+      "name": "deny beats allow for the tenant's own range",
+      "policy": {
+        "deny": ["10.9.0.0/16"],
+        "default": { "allow": ["10.0.0.0/8"] },
+        "tenants": { "t": { "allow": ["10.9.0.0/16", "10.1.0.0/16"] } }
+      },
+      "tenant": "t",
+      "refused": ["10.9.0.1", "10.2.0.1"],
+      "allowed": ["10.1.2.3"],
+      "rules": { "10.9.0.1": "deny 10.9.0.0/16", "10.2.0.1": "not in the allow list of tenant t" }
+    },
+    {
+      "name": "deny beats allow for the default entry",
+      "policy": {
+        "deny": ["10.9.0.0/16"],
+        "default": { "allow": ["10.0.0.0/8"] },
+        "tenants": { "t": { "allow": ["10.9.0.0/16", "10.1.0.0/16"] } }
+      },
+      "tenant": "other",
+      "refused": ["10.9.0.1"],
+      "allowed": ["10.1.0.1", "10.2.0.1"]
+    },
+    {
+      "name": "the built-in deny list still applies when only allow is given",
+      "policy": { "default": { "allow": ["127.0.0.0/8"] } },
+      "tenant": "t",
+      "refused": ["127.0.0.1"],
+      "allowed": []
+    },
+    {
+      "name": "a tenant with an entry uses it instead of the default",
+      "policy": {
+        "default": { "allow": ["10.0.0.0/8"] },
+        "tenants": { "acme": { "allow": ["192.168.0.0/16"] } }
+      },
+      "tenant": "acme",
+      "refused": ["10.1.1.1"],
+      "allowed": ["192.168.1.1"]
+    },
+    {
+      "name": "a tenant without an entry uses the default",
+      "policy": {
+        "default": { "allow": ["10.0.0.0/8"] },
+        "tenants": { "acme": { "allow": ["192.168.0.0/16"] } }
+      },
+      "tenant": "other",
+      "refused": ["192.168.1.1"],
+      "allowed": ["10.1.1.1"],
+      "rules": { "192.168.1.1": "not in the allow list of the default entry" }
+    },
+    {
+      "name": "an empty allow list allows nothing, for that tenant only",
+      "policy": { "tenants": { "acme": { "allow": [] } } },
+      "tenant": "acme",
+      "refused": ["10.1.1.1"],
+      "allowed": []
+    },
+    {
+      "name": "an empty allow list of one tenant does not touch the others",
+      "policy": { "tenants": { "acme": { "allow": [] } } },
+      "tenant": "other",
+      "refused": [],
+      "allowed": ["10.1.1.1"]
+    },
+    {
+      "name": "deny_extra adds to the built-in list",
+      "policy": { "deny_extra": ["10.9.0.0/16"] },
+      "tenant": "t",
+      "refused": ["10.9.0.1", "127.0.0.1"],
+      "allowed": ["10.8.0.1"]
+    },
+    {
+      "name": "deny replaces the built-in list",
+      "policy": { "deny": ["10.9.0.0/16"] },
+      "tenant": "t",
+      "refused": ["10.9.0.1"],
+      "allowed": ["127.0.0.1"]
+    },
+    {
+      "name": "an empty file is the built-in policy",
+      "policy": {},
+      "tenant": "t",
+      "refused": ["127.0.0.1"],
+      "allowed": ["10.0.0.1"]
+    },
+    {
+      "name": "a bare address in a list is one host, and a mapped range is the IPv4 range",
+      "policy": { "default": { "allow": ["192.168.1.7", "::ffff:10.0.0.0/104"] } },
+      "tenant": "t",
+      "refused": ["192.168.1.8"],
+      "allowed": ["192.168.1.7", "10.200.0.1"]
+    }
+  ],
+  "invalid_files": [
+    { "json": "{\"deny\": [\"10.0.0.0/8\", \"nope\"]}", "entry": "deny[1]" },
+    { "json": "{\"deny\": [\"10.0.0.0/33\"]}", "entry": "deny[0]" },
+    { "json": "{\"deny\": [\"10.0.0.1/8\"]}", "entry": "deny[0]" },
+    { "json": "{\"deny_extra\": [\"x\"]}", "entry": "deny_extra[0]" },
+    { "json": "{\"default\": {\"allow\": [\"1.2.3.4/x\"]}}", "entry": "default.allow[0]" },
+    { "json": "{\"tenants\": {\"acme\": {\"allow\": [\"10.0.0.0/8\", \"::/129\"]}}}", "entry": "tenants.acme.allow[1]" },
+    { "json": "{\"tenants\": {\"a\": {\"allow\": []}, \"a\": {\"allow\": []}}}", "entry": "file" },
+    { "json": "{\"allow\": []}", "entry": "file" },
+    { "json": "{\"default\": {}}", "entry": "file" },
+    { "json": "{\"default\": {\"allow\": [], \"deny\": []}}", "entry": "file" },
+    { "json": "{\"deny\": [], \"deny_extra\": []}", "entry": "deny_extra" },
+    { "json": "[]", "entry": "file" },
+    { "json": "{\"deny\": \"10.0.0.0/8\"}", "entry": "file" },
+    { "json": "", "entry": "file" }
+  ]
+}
