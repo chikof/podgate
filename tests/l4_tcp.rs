@@ -991,3 +991,159 @@ async fn tcp_graceful_shutdown_lets_a_connection_finish() {
     let ended = timeout(Duration::from_secs(10), live.read_to_end(&mut rest)).await;
     assert!(ended.is_ok(), "the connection outlived the grace period");
 }
+
+/// A greeter on `ip` and a free port.
+async fn greeter_on(ip: &str, tag: &'static str) -> Server {
+    let listener = TcpListener::bind(format!("{ip}:0"))
+        .await
+        .expect("bind server");
+    spawn_server(listener, move |mut stream, _| async move {
+        drop(stream.write_all(format!("{tag}\n").as_bytes()).await);
+        let mut buf = [0_u8; 16];
+        drop(stream.read(&mut buf).await);
+    })
+}
+
+const OWNER: &str = "_db._tcp.shop.test";
+
+fn srv_server() -> Value {
+    json!({ "address": OWNER, "resolve": "srv" })
+}
+
+fn resolver_env(dns: &Dns) -> Vec<(&'static str, String)> {
+    vec![
+        ("DNS_SERVERS", dns.servers()),
+        ("DNS_MIN_TTL_SECS", "1".to_owned()),
+        ("DNS_TIMEOUT_MS", "1000".to_owned()),
+    ]
+}
+
+#[tokio::test]
+async fn tcp_srv_server_resolves_targets_and_ports() {
+    let dns = Dns::start().await;
+    let (one, two) = (
+        greeter_on("127.0.0.2", "ONE").await,
+        greeter_on("127.0.0.3", "TWO").await,
+    );
+    dns.set("a.shop.test", &["127.0.0.2"], 30);
+    dns.set("b.shop.test", &["127.0.0.3"], 30);
+    dns.set_srv(
+        OWNER,
+        &[
+            (10, 1, one.addr.port(), "a.shop.test"),
+            (10, 1, two.addr.port(), "b.shop.test"),
+        ],
+        30,
+    );
+    let env = resolver_env(&dns);
+    let env: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let podgate = Podgate::start_with_entry_points(&ENTRY_POINTS, &env).await;
+    push(
+        &podgate,
+        &reserved(1, &[tcp_app(&[srv_server()], &json!({}), &json!({}))]),
+    )
+    .await;
+    // The records choose both the addresses and the ports: the connections reach both targets.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let seen = loop {
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let mut stream = connect(&podgate).await;
+            let mut line = [0_u8; 4];
+            let read = timeout(WAIT, stream.read(&mut line))
+                .await
+                .expect("in time")
+                .unwrap_or(0);
+            seen.push(String::from_utf8_lossy(&line[..read]).trim().to_owned());
+        }
+        if (count_of(&seen, "ONE"), count_of(&seen, "TWO")) == (2, 2) || Instant::now() > deadline {
+            break seen;
+        }
+        sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        (count_of(&seen, "ONE"), count_of(&seen, "TWO")),
+        (2, 2),
+        "{seen:?}"
+    );
+    let overview = podgate.admin_get("/v1/overview?section=apps").await.json();
+    let service = &overview["apps"]["items"][0]["tcp"]["services"][0];
+    assert_eq!(
+        service["servers"].as_array().map(Vec::len),
+        Some(2),
+        "{service}"
+    );
+}
+
+#[tokio::test]
+async fn tcp_srv_server_obeys_the_port_policy() {
+    let dns = Dns::start().await;
+    let (open, shut) = (
+        greeter_on("127.0.0.2", "OPEN").await,
+        greeter_on("127.0.0.3", "SHUT").await,
+    );
+    dns.set("a.shop.test", &["127.0.0.2"], 30);
+    dns.set("b.shop.test", &["127.0.0.3"], 30);
+    dns.set_srv(
+        OWNER,
+        &[
+            (10, 1, open.addr.port(), "a.shop.test"),
+            (10, 1, shut.addr.port(), "b.shop.test"),
+        ],
+        30,
+    );
+    let dir = std::env::temp_dir().join(format!("podgate-tcp-srv-policy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("policy dir");
+    let file = dir.join("policy.json");
+    std::fs::write(
+        &file,
+        format!(
+            r#"{{"deny": ["0.0.0.0/8"], "srv_deny_ports": [{}]}}"#,
+            shut.addr.port()
+        ),
+    )
+    .expect("write policy");
+    let mut env = resolver_env(&dns);
+    env.push((
+        "UPSTREAM_POLICY_FILE",
+        file.to_str().expect("utf-8 path").to_owned(),
+    ));
+    let env: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let podgate = Podgate::start_with_entry_points(&ENTRY_POINTS, &env).await;
+    push(
+        &podgate,
+        &reserved(1, &[tcp_app(&[srv_server()], &json!({}), &json!({}))]),
+    )
+    .await;
+    sleep(Duration::from_secs(2)).await;
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let mut stream = connect(&podgate).await;
+        let mut line = [0_u8; 5];
+        let read = timeout(WAIT, stream.read(&mut line))
+            .await
+            .expect("in time")
+            .unwrap_or(0);
+        seen.push(String::from_utf8_lossy(&line[..read]).trim().to_owned());
+    }
+    assert_eq!(count_of(&seen, "OPEN"), 4, "{seen:?}");
+    assert_eq!(shut.accepted(), 0, "a target on a denied port was dialled");
+    std::fs::remove_dir_all(&dir).expect("remove policy dir");
+}
+
+#[tokio::test]
+async fn tcp_srv_server_takes_no_weight() {
+    let podgate = start().await;
+    let server = json!({ "address": OWNER, "resolve": "srv", "weight": 2 });
+    let response = podgate
+        .push_snapshot(&reserved(1, &[tcp_app(&[server], &json!({}), &json!({}))]))
+        .await;
+    assert_eq!(response.status, 422, "{}", response.body);
+    assert_eq!(response.json()["conflicts"][0]["code"], "invalid_service");
+}

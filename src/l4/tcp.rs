@@ -123,11 +123,26 @@ fn algorithm_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     /// `host:port`: an IP literal (`10.0.0.5:5432`, `[2001:db8::5]:5432`) or a DNS name
-    /// (`db.internal:5432`).
+    /// (`db.internal:5432`). With `resolve: "srv"`, the full SRV owner name without a port
+    /// (`_db._tcp.shop.service.consul`): the records choose the targets and ports.
     address: String,
-    /// Relative weight, `1` by default; only `weighted_round_robin` and `hrw` take one.
+    /// Relative weight, `1` by default; only `weighted_round_robin` and `hrw` take one. Not
+    /// allowed with `resolve: "srv"`: the records carry the weights.
     #[serde(default)]
     weight: Option<u32>,
+    /// `a` (the default): `address` is `host:port`. `srv`: `address` is an SRV owner name.
+    #[serde(default)]
+    resolve: Option<ResolveKind>,
+}
+
+/// How a server's `address` is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ResolveKind {
+    /// An IP literal, or a name looked up for `A` and `AAAA` records.
+    A,
+    /// A name looked up for `SRV` records.
+    Srv,
 }
 
 /// A compiled TCP router.
@@ -461,6 +476,14 @@ fn compile_service(
         .servers
         .iter()
         .map(|server| {
+            if server.resolve == Some(ResolveKind::Srv) {
+                let mut entry =
+                    json!({ "url": format!("http://{}", server.address), "resolve": "srv" });
+                if let Some(weight) = server.weight {
+                    entry["weight"] = json!(weight);
+                }
+                return Ok(entry);
+            }
             let url = server_url(&server.address, &declared.name, app, context)?;
             let mut entry = json!({ "url": url });
             if let Some(weight) = server.weight {
@@ -485,6 +508,7 @@ fn compile_service(
             err
         })?;
     names.charge(&app.tenant, &app.id, balancer.dns_names())?;
+    names.charge_srv(&app.tenant, &app.id, balancer.srv_names())?;
     Ok(Service {
         name: declared.name.clone(),
         balancer,
