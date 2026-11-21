@@ -775,11 +775,29 @@ async fn grpc_in_flight_held_for_stream() {
         "the refused call reached no upstream"
     );
 
-    // It ended, and the slot came back.
+    // It ended, and the slot came back. The slot is returned when podgate finishes the request,
+    // which can be just after the client has read the end of the stream, so a call made at once
+    // may still be refused; it is admitted within the deadline.
     server.release(1);
     assert_eq!(held.collect().await.grpc_status(), Some(0));
-    let outcome = client.unary(path::UNARY, b"x", &[]).await;
-    assert_eq!(outcome.grpc_status(), Some(0), "{outcome:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let after = loop {
+        let raw = client.unary_raw(path::UNARY, b"x", &[]).await;
+        if raw.status != 429 || std::time::Instant::now() > deadline {
+            break raw;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(after.status, 200, "{after:?}");
+    let status = after
+        .trailers
+        .as_ref()
+        .and_then(|map| map.get("grpc-status"));
+    assert_eq!(
+        status.map(|value| value.as_bytes()),
+        Some(&b"0"[..]),
+        "{after:?}"
+    );
 }
 
 #[tokio::test]
