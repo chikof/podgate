@@ -326,15 +326,16 @@ impl Registry {
                 kept.services.insert(key, Arc::clone(shared));
             }
             // The TCP services of an app have no revision; a `tcp:` prefix keeps their keys apart
-            // from the HTTP services'.
-            for (name, service) in app.l4_mut().tcp_mut().balancers_mut() {
+            // from the HTTP services'. The check of a TCP service is not part of its balancer's
+            // declaration, so its fingerprint joins the key here.
+            for (name, health, service) in app.l4_mut().tcp_mut().balancers_mut() {
                 if let Service::LoadBalancer(balancer) = service {
                     let key = Key {
                         app: app_id.clone(),
                         revision: None,
                         service: format!("tcp:{name}").into(),
                         server: None,
-                        fingerprint: balancer.fingerprint(),
+                        fingerprint: digest((balancer.fingerprint(), health)),
                     };
                     settle_balancer(&key, balancer, &settled, &mut kept);
                 }

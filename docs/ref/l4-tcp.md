@@ -41,8 +41,9 @@ The entry point is process configuration: `ENTRY_POINTS=pg=0.0.0.0:5432/tcp`. It
 | service `servers[].address` | `host:port`, 1 to 256 of them: an IP literal (`10.0.0.5:5432`, `[2001:db8::5]:5432`) or a DNS name (`db.internal:5432`). `weight` is optional and only `weighted_round_robin` and `hrw` take one. With `"resolve": "srv"` the address is a full SRV owner name without a port (`_db._tcp.shop.service.consul`), as in `docs/ref/dns-srv.md`: the records choose the targets, ports, priorities and weights, and a `weight` is `invalid_service`. A server `tls`, and the service fields `proxy_protocol` and `termination_delay_ms`, are `service_not_built`. |
 | service `algorithm` | `round_robin` (default), `weighted_round_robin`, `least_conn`, `random` or `hrw` (the client address picks the server, and the same client keeps it). The others (`ip_hash`, `uri_hash`, `header_hash`, `p2c_ewma`) read an HTTP request or response; `ip_hash` also builds a ring: `invalid_service`. |
 | service `idle_timeout_secs` | Seconds without a byte in either direction before the connection is closed. Default 300, 1 to 86,400. |
+| service `health_check` | Optional: probe each server (a connect, optionally a `send` and `expect` exchange, TLS, a PROXY header) and skip the ones that fail. `docs/ref/l4-health.md`. |
 
-A TCP service is the HTTP load balancer over `http://host:port` servers: the same code, balancing state that survives a snapshot push, and the same DNS handling. There is no `health_check`, `passive`, `sticky` or `transport` for TCP.
+A TCP service is the HTTP load balancer over `http://host:port` servers: the same code, balancing state that survives a snapshot push, and the same DNS handling. `health_check` probes the servers and skips the ones that fail (`docs/ref/l4-health.md`). There is no `passive`, `sticky` or `transport` for TCP.
 
 ## Which router takes a connection
 
@@ -71,7 +72,7 @@ On `GET /metrics`, process-wide and labelled by fixed reasons only:
 
 - `podgate_tcp_connections`: connections open now (the ones that reached a server).
 - `podgate_tcp_connections_total`: connections accepted.
-- `podgate_l4_refused_total{reason}`: closed before a server was dialled. Reasons: `no_route`, `over_inflight`, `over_budget`, `no_server`, `upstream_forbidden`.
+- `podgate_l4_refused_total{reason}`: closed before a server was dialled. Reasons: `no_route`, `over_inflight`, `over_budget`, `no_server`, `no_healthy_server` (the service's `health_check` has marked every server down), `upstream_forbidden`.
 - `podgate_tcp_connect_failures_total`: failed connects, each one a try of the next server.
 - `podgate_tcp_closed_total{reason}`: connections that reached a server and ended: `done`, `idle`, `error`, `shutdown`.
 - `podgate_tcp_bytes_total{direction}`: `in` from clients, `out` back to them.

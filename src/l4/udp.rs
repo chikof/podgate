@@ -301,6 +301,15 @@ fn compile_service(
             ),
         ));
     }
+    if declared.config.contains_key("health_check") {
+        return Err(Invalid::new(
+            "invalid_service",
+            format!(
+                "udp service {}: health_check is not supported, a datagram service cannot be probed without a protocol; use a TCP health_check on a companion port when the servers have one",
+                declared.name
+            ),
+        ));
+    }
     let invalid = |why: String| Invalid::new("invalid_service", format!("udp loadbalancer: {why}"));
     let config: ServiceConfig = serde_json::from_value(Value::Object(declared.config.clone()))
         .map_err(|err| invalid(err.to_string()))?;

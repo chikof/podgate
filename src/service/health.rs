@@ -105,9 +105,9 @@ const REGEX_SIZE_LIMIT: usize = 1 << 16;
 const MAX_PATH_BYTES: usize = 2048;
 const MAX_HEADERS: usize = 32;
 const MAX_HEADER_VALUE_BYTES: usize = 1024;
-const MAX_INTERVAL_SECS: u64 = 3600;
-const MAX_TIMEOUT_SECS: u64 = 300;
-const MAX_THRESHOLD: u32 = 100;
+pub(crate) const MAX_INTERVAL_SECS: u64 = 3600;
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 300;
+pub(crate) const MAX_THRESHOLD: u32 = 100;
 /// Headers a check may not set: the ones that frame the message or the connection (`hostname`
 /// sets `Host`).
 const FORBIDDEN_HEADERS: [&str; 10] = [
@@ -143,6 +143,8 @@ impl Verdict {
 pub struct Schedule {
     /// Time from the end of one probe to the start of the next.
     pub interval: Duration,
+    /// The same while the server is marked down, when it differs from `interval`.
+    pub unhealthy_interval: Option<Duration>,
     /// A probe that has not finished by then fails.
     pub timeout: Duration,
     /// Consecutive passes that mark a down server up.
@@ -327,6 +329,7 @@ impl Check {
         };
         let schedule = Schedule {
             interval: Duration::from_secs(config.interval_secs),
+            unhealthy_interval: None,
             timeout: Duration::from_secs(config.timeout_secs),
             healthy_threshold: threshold("healthy_threshold", config.healthy_threshold)?,
             unhealthy_threshold: threshold("unhealthy_threshold", config.unhealthy_threshold)?,
@@ -893,6 +896,9 @@ impl Scheduler {
             }
             return;
         }
+        // A new key starts healthy (see `Streak::new`), whatever flag the state carried over from
+        // a check that no longer exists.
+        state.healthy.store(true, Ordering::Relaxed);
         let window = schedule.timeout.min(schedule.interval);
         let jitter = window * u32::try_from(digest(&key) % 1000).unwrap_or(0) / 1000;
         let live = Arc::new(Mutex::new(Live {
@@ -935,11 +941,16 @@ async fn drive(
                 Err(_) => Verdict::fail("the probe timed out"),
             }
         };
-        {
+        let wait = {
             let mut live = locked(&live);
             let pass = verdict == Verdict::Pass;
-            if let Some(healthy) = live.streak.record(pass, &schedule) {
-                live.state.healthy.store(healthy, Ordering::Relaxed);
+            let flipped = live.streak.record(pass, &schedule);
+            // Written on every probe, not only on a flip, so a flag that is out of step with the
+            // streak (a state swapped in, a probe of an older check finishing) is corrected.
+            live.state
+                .healthy
+                .store(live.streak.healthy(), Ordering::Relaxed);
+            if let Some(healthy) = flipped {
                 let reason = match &verdict {
                     Verdict::Pass => "passed",
                     Verdict::Fail(reason) => &**reason,
@@ -953,8 +964,12 @@ async fn drive(
                     "server health changed"
                 );
             }
-        }
-        sleep(schedule.interval).await;
+            match schedule.unhealthy_interval {
+                Some(down) if !live.streak.healthy() => down,
+                _ => schedule.interval,
+            }
+        };
+        sleep(wait).await;
     }
 }
 
@@ -997,9 +1012,10 @@ impl HealthService {
         &self.scheduler
     }
 
-    /// Makes the registered HTTP probes those `table` calls for: one per server of every service
-    /// with a `health_check`, except in `draining` revisions (they take no new requests).
-    /// Probes of servers that are gone stop.
+    /// Makes the registered probes those `table` calls for: one per server of every HTTP service
+    /// with a `health_check`, except in `draining` revisions (they take no new requests), and
+    /// one per server of every TCP service with one. Probes of servers that are gone
+    /// stop.
     pub fn reconcile(&self, table: &RoutingTable) {
         let mut wanted: HashSet<Key> = HashSet::new();
         for app in table.apps() {
@@ -1048,6 +1064,7 @@ impl HealthService {
         }
         self.scheduler
             .retain(HTTP_OWNER, |key| wanted.contains(key));
+        crate::l4::health::reconcile(&self.scheduler, &self.policy, &self.connector, table);
     }
 
     fn probe_of(
@@ -1091,6 +1108,7 @@ impl BackgroundService for HealthService {
             }
         }
         self.scheduler.retain(HTTP_OWNER, |_| false);
+        self.scheduler.retain(crate::l4::health::OWNER, |_| false);
     }
 }
 
@@ -1106,6 +1124,7 @@ mod test {
     fn schedule(healthy: u32, unhealthy: u32) -> Schedule {
         Schedule {
             interval: Duration::from_millis(10),
+            unhealthy_interval: None,
             timeout: Duration::from_millis(200),
             healthy_threshold: healthy,
             unhealthy_threshold: unhealthy,
@@ -1434,6 +1453,40 @@ mod test {
     }
 
     #[tokio::test]
+    async fn scheduler_probes_a_down_server_at_its_own_rate_and_resets_a_stale_flag() {
+        let scheduler = Scheduler::new(NonZeroUsize::MIN);
+        let (pass, runs) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let state = Arc::new(ServerState::default());
+        state.healthy.store(false, Ordering::Relaxed);
+        let mut rule = schedule(1, 1);
+        rule.unhealthy_interval = Some(Duration::from_secs(60));
+        scheduler.register(
+            key("web", 1),
+            rule,
+            Arc::clone(&state),
+            flipping(&pass, &runs),
+        );
+        assert!(
+            state.healthy.load(Ordering::Relaxed),
+            "a new key starts healthy, whatever flag the state carried"
+        );
+        assert!(
+            settle(|| !state.healthy.load(Ordering::Relaxed)).await,
+            "marked down"
+        );
+        let seen = runs.load(Ordering::Relaxed);
+        sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            runs.load(Ordering::Relaxed),
+            seen,
+            "a down server waits unhealthy_interval, not interval"
+        );
+    }
+
+    #[tokio::test]
     async fn scheduler_times_a_probe_out_and_caps_probes_in_flight() {
         let scheduler = Scheduler::new(NonZeroUsize::new(2).expect("two"));
         let running = Arc::new(AtomicUsize::new(0));
@@ -1459,6 +1512,7 @@ mod test {
         };
         let rule = Schedule {
             interval: Duration::from_millis(10),
+            unhealthy_interval: None,
             timeout: Duration::from_millis(60),
             healthy_threshold: 1,
             unhealthy_threshold: 1,

@@ -17,6 +17,7 @@
 //! listener has no host to tell tenants apart by), and `server_address` parses a server
 //! address and applies the upstream address policy.
 
+pub mod health;
 pub mod tcp;
 pub mod udp;
 

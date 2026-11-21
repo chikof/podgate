@@ -253,10 +253,14 @@ impl App {
             }
         };
         let idle = service.idle();
+        // No attempt was made because the health check has marked every server down.
+        let unhealthy = connected.is_none() && tried.is_empty() && service.all_down();
         drop(live);
         let Some((mut server, _lease)) = connected else {
             STATS.refused(if forbidden > 0 && forbidden == tried.len() {
                 Refused::UpstreamForbidden
+            } else if unhealthy {
+                Refused::NoHealthyServer
             } else {
                 Refused::NoServer
             });

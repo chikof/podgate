@@ -34,6 +34,7 @@ mod stats;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pingora::http::RequestHeader;
@@ -42,6 +43,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::Compiled as L4;
+use super::health;
 use crate::compile::{Invalid, Rejected};
 use crate::conflict::Conflict;
 use crate::entry::{CompileContext, Protocol};
@@ -109,6 +111,10 @@ pub struct ServiceConfig {
     /// default 300.
     #[serde(default)]
     idle_timeout_secs: Option<u32>,
+    /// Active probe of each server; absent: none. See `docs/ref/l4-health.md`.
+    #[serde(default)]
+    #[schemars(with = "Option<health::Config>")]
+    health_check: Option<Value>,
 }
 
 fn algorithm_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -216,6 +222,7 @@ pub struct Service {
     name: Box<str>,
     balancer: service::Service,
     idle: Duration,
+    health: Option<Arc<health::Check>>,
 }
 
 impl Service {
@@ -236,6 +243,22 @@ impl Service {
     #[must_use]
     pub fn idle(&self) -> Duration {
         self.idle
+    }
+
+    /// The compiled `health_check`, when the service has one.
+    #[must_use]
+    pub fn health_check(&self) -> Option<&Arc<health::Check>> {
+        self.health.as_ref()
+    }
+
+    /// Whether the service has a `health_check` that has marked every one of its servers down:
+    /// a connection to it is refused at once, as `no_healthy_server`.
+    #[must_use]
+    pub fn all_down(&self) -> bool {
+        let servers = self.balancer.servers();
+        self.health.is_some()
+            && !servers.is_empty()
+            && servers.iter().all(|server| !server.available())
     }
 
     /// The server a connection from `client` goes to and the lease that counts the connection on
@@ -276,12 +299,19 @@ impl Compiled {
         &self.services
     }
 
-    /// The balancer of every service with its name, for the registry that carries their state
-    /// across a snapshot push.
-    pub(crate) fn balancers_mut(&mut self) -> impl Iterator<Item = (&str, &mut service::Service)> {
-        self.services
-            .iter_mut()
-            .map(|service| (&*service.name, &mut service.balancer))
+    /// The balancer of every service with its name and the fingerprint of its `health_check`
+    /// (`0` without one), for the registry that carries their state across a snapshot push: a
+    /// changed check starts its servers healthy.
+    pub(crate) fn balancers_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&str, u64, &mut service::Service)> {
+        self.services.iter_mut().map(|service| {
+            let check = service
+                .health
+                .as_ref()
+                .map_or(0, |check| check.fingerprint());
+            (&*service.name, check, &mut service.balancer)
+        })
     }
 
     /// The router at `index` and its service.
@@ -462,6 +492,11 @@ fn compile_service(
             "idle_timeout_secs is {idle}, between 1 and {MAX_IDLE_SECS} is allowed"
         )));
     }
+    let health = config
+        .health_check
+        .as_ref()
+        .map(|value| health::Check::compile(value).map(Arc::new))
+        .transpose()?;
     if let Some(algorithm) = config
         .algorithm
         .as_deref()
@@ -513,6 +548,7 @@ fn compile_service(
         name: declared.name.clone(),
         balancer,
         idle: Duration::from_secs(u64::from(idle)),
+        health,
     })
 }
 

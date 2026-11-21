@@ -23,15 +23,18 @@ pub(super) enum Refused {
     OverBudget,
     /// The service has no server that can take it, or every server tried failed.
     NoServer,
+    /// The service has a health check and it has marked every server down.
+    NoHealthyServer,
     /// The upstream address policy refused every server tried.
     UpstreamForbidden,
 }
 
-const REFUSED: [(Refused, &str); 5] = [
+const REFUSED: [(Refused, &str); 6] = [
     (Refused::NoRoute, "no_route"),
     (Refused::OverInflight, "over_inflight"),
     (Refused::OverBudget, "over_budget"),
     (Refused::NoServer, "no_server"),
+    (Refused::NoHealthyServer, "no_healthy_server"),
     (Refused::UpstreamForbidden, "upstream_forbidden"),
 ];
 
