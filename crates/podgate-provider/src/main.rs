@@ -146,7 +146,7 @@ async fn execute(command: Command, config_path: PathBuf) -> anyhow::Result<ExitC
     match command {
         Command::Run => {
             let solver = podgate_provider::acme::dns::solver(&config)?;
-            engine.with_dns_solver(solver).run(shutdown()).await?;
+            Box::pin(engine.with_dns_solver(solver).run(shutdown())).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Print => {
