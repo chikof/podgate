@@ -65,6 +65,10 @@ The stage runs in the chain, before a revision is chosen and before any tenant s
 
 A request whose token was accepted carries an identity (the copied claims, whatever the `Authorization` header said) that the cache key does not hold. The `cache` stage therefore neither serves nor stores it, whatever the token source and also after `remove_token`, as for `forward_auth` and for a request with `Authorization` or `Cookie`.
 
+## Mirrors
+
+The headers `forward_claims` writes, and the header the token came in when `remove_token` is off, are identity: a copy of the request sent to a `mirroring` service drops them unless the mirroring is set to `forward_credentials` (`Kind::carries_identity`). A token read from a query parameter that is not removed stays in the URL of the copy: set `remove_token` where a mirror is in use.
+
 ## The JWKS
 
 - **Fetch.** One `GET` through the bounded HTTP/1.1 client of `forward_auth`: the connection of the peer a service would use (so the named transport gives an `https://` endpoint its CA, name and client certificate), the exact IP checked against the upstream address policy (`docs/ref/upstream-policy.md`) before every dial, a body cap of 256 KiB, a timeout of 5 seconds, no redirects (a `3xx` is a failure), at most 100 keys used. The policy is also checked when the snapshot is compiled: a `jwks_uri` the policy refuses for the tenant (loopback, link-local, outside its allow list) is `upstream_forbidden`. The fetch is made on behalf of the tenant of the app that declares the middleware, so one tenant's policy never approves a fetch for another.
@@ -102,4 +106,4 @@ A request whose token was accepted carries an identity (the copied claims, whate
 
 ## Explain
 
-`GET /v1/explain` shows the stage's algorithms, the `kid` and type of its inline keys (never the key material), the `jwks_uri` without its query, the rules, the sources and `forward_claims`.
+`GET /v1/explain` shows the stage's algorithms, the `kid` and type of its inline keys (never the key material), the `jwks_uri` without its query, the rules (`max_token_age_secs` shown as `max_age_secs`), the `sources` (`token_sources`), `forward_claims` and `remove_credential` (`remove_token`): the overview refuses a field named like a secret.

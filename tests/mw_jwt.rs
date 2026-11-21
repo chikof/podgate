@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
-    Podgate, Response, TestCert, app, refused, serving, snapshot, with_jwt_auth, with_middleware,
+    Podgate, Response, TestCert, app, refused, router, service, serving, snapshot, with_jwt_auth,
+    with_middleware,
 };
 use serde_json::{Value, json};
 use signer::{Signer, forge_hmac, now, unsigned};
@@ -1136,5 +1137,72 @@ async fn jwt_failures_reach_the_access_log_and_the_metrics() {
     assert!(
         !log.contains(&secret[..40]),
         "part of the token is in the log"
+    );
+}
+
+#[tokio::test]
+async fn mirror_drops_jwt_claims() {
+    let podgate = Podgate::start().await;
+    let (main, shadow) = (echo().await, echo().await);
+    let key = Signer::es256("k");
+    let site = |forward_credentials: bool| {
+        let mirror = json!({
+            "name": "m", "type": "mirroring", "service": "web",
+            "mirrors": [{"service": "shadow", "percent": 100.0}],
+            "forward_credentials": forward_credentials,
+        });
+        let revision = json!({"id": "r1", "state": "serving", "weight": 100,
+            "services": [service("web", &[main.addr]), service("shadow", &[shadow.addr]), mirror]});
+        let mut app = app("a", &["a.test"], &[revision]);
+        app["routers"] = json!([router("default", json!({"host": ["a.test"]}), "m")]);
+        // The token travels in a header of its own, which is not removed.
+        with_jwt_auth(
+            app,
+            with(
+                &keys_config(&[&key], &["ES256"]),
+                &json!({"token_sources": [{"header": "x-api-token"}],
+                        "forward_claims": {"sub": "X-User"}}),
+            ),
+        )
+    };
+    push(&podgate, &snapshot(1, &[site(false)])).await;
+    let token = key.sign("ES256", &json!({}), &claims(&json!({})));
+    let sent = [("X-Api-Token", token.as_str()), ("X-User", "forged")];
+    let ask = || podgate.get_with_headers("a.test", "/", &sent);
+
+    let answer = ask().await;
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert_eq!(header_of(&answer.body, "x-user"), Some("ann"));
+    assert_eq!(header_of(&answer.body, "x-api-token"), Some(token.as_str()));
+    wait_for_requests(&shadow, 1).await;
+    let copy = shadow.heads()[0].clone();
+    assert!(
+        header_of(&copy, "x-user").is_none() && header_of(&copy, "x-api-token").is_none(),
+        "the identity and the token are credentials: {copy}"
+    );
+
+    // Meant to carry credentials: the copy gets both.
+    push(&podgate, &snapshot(2, &[site(true)])).await;
+    assert_eq!(ask().await.status, 200);
+    wait_for_requests(&shadow, 2).await;
+    let copy = shadow.heads()[1].clone();
+    assert_eq!(header_of(&copy, "x-user"), Some("ann"), "{copy}");
+    assert_eq!(
+        header_of(&copy, "x-api-token"),
+        Some(token.as_str()),
+        "{copy}"
+    );
+}
+
+async fn wait_for_requests(server: &Server, count: usize) {
+    for _ in 0..100 {
+        if server.requests() >= count {
+            return;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "the mirror got {} requests, wanted {count}",
+        server.requests()
     );
 }

@@ -16,10 +16,10 @@
 //!   `Authorization: Bearer` header by default). Its `alg` must be in `algorithms`, a key of the
 //!   type that algorithm needs and the token's `kid` must verify the signature, `exp` must be
 //!   present and in the future, `nbf` and `iat` are checked, `iss` and `aud` when configured. The
-//!   rules and why they are shaped so are in [`verify`] and [`claims`].
+//!   rules and why they are shaped so are in `jwt_auth/verify.rs` and `jwt_auth/claims.rs`.
 //! - **Where the keys come from.** `keys` (an inline JWK set) and/or `jwks_uri`, fetched by a
 //!   background task through the bounded client of `forward_auth` under the upstream address
-//!   policy ([`jwks`]).
+//!   policy (`jwt_auth/jwks.rs`).
 //! - **What the client sees.** `401` with `WWW-Authenticate: Bearer realm="podgate",
 //!   error="invalid_token"` for a missing or invalid token, `403` when the signature is valid
 //!   and `required_claims` do not match, `503 {"error":"authentication unavailable"}` when there
@@ -923,7 +923,19 @@ impl Kind for JwtAuth {
         kinds
     }
 
-    /// What the stage checks; never a key, a secret or the query of `jwks_uri`.
+    /// The headers a claim is copied into, and the header the token came in when it is not
+    /// removed: a mirror does not get them unless it is meant to carry credentials.
+    fn carries_identity(&self, name: &HeaderName) -> bool {
+        self.0.forward.iter().any(|(_, header)| header == name)
+            || (!self.0.remove_token
+                && self.0.sources.iter().any(
+                    |source| matches!(source, Source::Header { name: used, .. } if used == name),
+                ))
+    }
+
+    /// What the stage checks; never a key, a secret or the query of `jwks_uri`. The overview
+    /// refuses a field named like a secret, so the three settings that say "token" are shown as
+    /// `max_age_secs`, `sources` and `remove_credential`.
     fn describe(&self) -> Value {
         let parts = &*self.0;
         json!({
@@ -938,12 +950,12 @@ impl Kind for JwtAuth {
                 .map(|(name, want)| (name.to_string(), json!(want)))
                 .collect::<Map<String, Value>>(),
             "leeway_secs": parts.rules.leeway_secs,
-            "max_token_age_secs": parts.rules.max_token_age_secs,
-            "token_sources": parts.sources.iter().map(Source::describe).collect::<Vec<_>>(),
+            "max_age_secs": parts.rules.max_token_age_secs,
+            "sources": parts.sources.iter().map(Source::describe).collect::<Vec<_>>(),
             "forward_claims": parts.forward.iter()
                 .map(|(claim, header)| (claim.to_string(), json!(header.as_str())))
                 .collect::<Map<String, Value>>(),
-            "remove_token": parts.remove_token,
+            "remove_credential": parts.remove_token,
         })
     }
 }
@@ -1366,8 +1378,13 @@ mod test {
 
     #[test]
     fn posture_names_what_a_change_trusts_more() {
-        let old = compile(&with(&json!({"leeway_secs": 10}))).expect("old");
-        let longer = compile(&with(&json!({"leeway_secs": 11}))).expect("new");
+        let base = good();
+        let make = |leeway: u64| {
+            let mut config = base.clone();
+            config["leeway_secs"] = json!(leeway);
+            compile(&config).expect("compiles")
+        };
+        let (old, longer) = (make(10), make(11));
         assert_eq!(old.posture(Some(&longer)), [kind::LEEWAY_INCREASED]);
         assert_eq!(longer.posture(Some(&old)), Vec::<&str>::new());
         assert_eq!(old.posture(None), [kind::REMOVED]);
