@@ -133,7 +133,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Default certificate, strict SNI | `tls.stores.default`, `sniStrict` | `default_sni`, `fallback_sni` | built (strict SNI is per app) |
 | SNI against Host check | none (domain fronting possible, GHSA-fh26-gfpp-7xxx) | `strict_sni_host` | built, on by default |
 | Session ticket control | `disableSessionTickets` | `session_tickets` | built as a refusal: tickets are listener wide and stay on; `session_tickets` is rejected with `unsupported_setting` |
-| TLS passthrough | `tls.passthrough` on TCP routers | `layer4` | built on `tcp` entry points; shared port with HTTP routers 0060 (measured) |
+| TLS passthrough | `tls.passthrough` on TCP routers | `layer4` | built on `tcp` entry points; sharing a port with HTTP routers is refused with `unsupported_setting` (measured: the front costs 40 to 46 percent more CPU per request and lost throughput in 13 of 14 paired rounds, see the spec) |
 
 ## TCP and UDP
 
