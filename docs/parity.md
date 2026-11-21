@@ -16,7 +16,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Per-tenant entry point access | none | none | built (`EntryPointPolicy.tenants`, `entry_point_forbidden`) |
 | TCP and UDP listeners | `/tcp`, `/udp` suffix | `layer4` plugin | 0028 parses them (startup stops naming the entry point), 0058, 0062 |
 | `X-Forwarded-*` and `X-Real-IP` sent to upstreams | yes (adds `-Server`) | `X-Forwarded-For`, `-Proto`, `-Host` | built: X-Forwarded-For, -Proto, -Host, -Port and X-Real-IP by default (Traefik's set minus -Server, which is `forwarded.server: true`); `forwarded.rfc7239` adds `Forwarded`; forged inbound values of untrusted peers are removed |
-| PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | 0029 (strict, no fallback) |
+| PROXY protocol in | `proxyProtocol.trustedIPs` | `proxy_protocol` wrapper | built: strict, no fallback; `docs/ref/proxy-protocol.md` |
 | HTTP to HTTPS redirect on an entry point | `http.redirections.entryPoint` | automatic HTTPS redirects | built: `redirect {to, permanent}`, `302`/`301` for `GET` and `307`/`308` for other methods, as Traefik, default not permanent |
 | Read, write and idle timeouts | `transport.respondingTimeouts` | `servers { timeouts }` | built: `write_secs`, `idle_secs`, and `read_secs` on plain entry points; `header_secs`, and `read_secs` on a TLS entry point, are `unsupported_setting` (Pingora 0.9) |
 | HTTP/2 stream limit, max header size | `http2.maxConcurrentStreams`, `http.maxHeaderBytes` | `max_header_size`, `protocols` | built: `http2.max_concurrent_streams` on TLS entry points, `max_header_bytes` up to 1048575 |
