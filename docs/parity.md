@@ -105,7 +105,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | gRPC-Web | `grpcWeb` | plugin | 0056 |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
 | Plugins | Yaegi (Go) plugins | Go modules | WASM filters in process; 0099 out-of-process plugins over a unix socket (no native code in podgate, any language); 0113 runs Traefik Go plugins through a Yaegi host. `dlopen` plugins are rejected |
-| JWT verification | Traefik Hub only | plugins | 0089 (JWKS fetched through the upstream policy; names are not resolved until the JWKS fetch uses the 0042 resolver) |
+| JWT verification | Traefik Hub only | plugins | `jwt_auth` built (JWKS fetched through the upstream policy; names are not resolved until the JWKS fetch uses the 0042 resolver) |
 | OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | 0090 (stateless encrypted cookie sessions; no refresh tokens) |
 | Response caching | Hub only | `cache` plugin | built: memory only, bounded per tenant (charged to `max_buffer_bytes`, capped share), no disk tier, no distributed mode, purge API |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
