@@ -55,7 +55,7 @@ The bucket is the generic cell rate algorithm: one 64-bit number per source, the
 
 ## `in_flight_req`
 
-A request takes one slot of its source when it enters the chain. Over `amount` it is answered `429` with `retry-after: 1` and `{"error":"too many requests in flight"}`. The slot is returned when the request ends: the response completed, the upstream failed, the client went away, or a later stage answered. It is held in the request's state and returned by a `Drop` guard, so no exit path can leak it. A WebSocket holds its slot until the connection closes.
+A request takes one slot of its source when it enters the chain. Over `amount` it is answered `429` with `retry-after: 1` and `{"error":"too many requests in flight"}`. The slot is returned when the request ends: the response completed, the upstream failed, the client went away, or a later stage answered. It is held in the request's state and returned by a `Drop` guard, so no exit path can leak it. A WebSocket holds its slot until the connection closes. The slot is returned when podgate finishes the request, which can be just after the client has read the end of the response: a client that sends its next request at once, with `amount` already reached, may get one `429` and should retry after `retry-after`.
 
 ## Where it runs
 
