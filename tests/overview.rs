@@ -7,6 +7,7 @@ mod common;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -610,7 +611,14 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
 /// The operator's `PLUGINS_FILE` for the planted snapshot: one plugin served in this process.
 /// Returns the file's path and the server, which must outlive the daemon.
 async fn planted_plugins() -> (String, common::plugin::Server) {
-    let dir = std::env::temp_dir().join(format!("podgate-overview-plugin-{}", std::process::id()));
+    // Tests of one binary share a process under `cargo test`: the process id alone would give
+    // two of them the same socket, and one would remove the other's.
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "podgate-overview-plugin-{}-{}",
+        std::process::id(),
+        CALLS.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).expect("create the plugin directory");
     let socket = dir.join("demo.sock");
     let server = common::plugin::Server::passive(&socket, "demo").await;
