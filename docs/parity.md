@@ -95,7 +95,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Forward auth | `forwardAuth` | `forward_auth` | built (fail closed) |
 | IP allow list | `ipAllowList` | `remote_ip` plus `respond` | built |
 | Rate limit | `rateLimit` | plugin | built: `src/middleware/rate_limit.rs`; per node, bounded table charged to the tenant; the control plane divides a global limit by the node count |
-| Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | 0094 (Redis-compatible store, per-route `on_store_error: allow` with local fallback, or `deny`) |
+| Cluster-wide rate limit | Hub or Enterprise (Redis) | plugins | built: `scope: "cluster"` on `rate_limit` through a Redis-compatible store from `RATE_LIMIT_STORES_FILE`; a required per-route `on_store_error` (`allow` with a local fallback bucket, or `deny`), a circuit and a bounded call; the address and credentials only from that file, never a snapshot; measured ceiling about 107,000 req/s through one store; `docs/ref/ratelimit-cluster.md` |
 | In-flight request limit | `inFlightReq` | none | built (per node); 0102 (cluster-wide with leases) |
 | Circuit breaker | `circuitBreaker` (expression) | none | built: `src/middleware/circuit_breaker.rs`; structured `trip_when`, no expression language; `min_requests` floor |
 | Buffering, body size limits | `buffering` | `request_body max_size`, `request_buffers` | built: memory only, charged to `max_buffer_bytes` (no `mem_*`, no disk spill); `buffer_request` holds a body of at most 64 KiB before the upstream request starts; response limits need `buffer_response`; a chunked response over its limit is reset, not a `502` (Pingora sends the head first) |
