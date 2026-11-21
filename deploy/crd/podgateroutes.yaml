@@ -3002,12 +3002,19 @@ spec:
                         different tenants.
                       nullable: true
                       type: integer
+                    rule:
+                      description: |-
+                        A Traefik rule string such as ``Host(`a.test`) && PathPrefix(`/api`)``, at most 2 KiB,
+                        compiled by the daemon with the parser the providers use into the matcher tree before
+                        anything else looks at the router. Absent: the router has a `match`. Without a `priority`
+                        the rule's length in bytes is the priority, as in Traefik.
+                      nullable: true
+                      type: string
                     service:
                       description: 'The service that answers, by name: one of the revision''s services, else one of the app''s.'
                       type: string
                   required:
                   - name
-                  - match
                   - service
                   type: object
                 type: array

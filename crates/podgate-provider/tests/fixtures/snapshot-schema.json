@@ -676,6 +676,13 @@
             "null"
           ]
         },
+        "rule": {
+          "description": "A Traefik rule string such as ``Host(`a.test`) && PathPrefix(`/api`)``, at most 2 KiB,\ncompiled by the daemon with the parser the providers use into the matcher tree before\nanything else looks at the router. Absent: the router has a `match`. Without a `priority`\nthe rule's length in bytes is the priority, as in Traefik.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "service": {
           "description": "The service that answers, by name: one of the revision's services, else one of the app's.",
           "type": "string"
@@ -683,7 +690,6 @@
       },
       "required": [
         "name",
-        "match",
         "service"
       ],
       "type": "object"
@@ -4606,6 +4612,14 @@
         "name": {
           "description": "Unique among the app's TCP routers.",
           "type": "string"
+        },
+        "rule": {
+          "default": null,
+          "description": "A Traefik rule over the L4 functions (`HostSNI`, `HostSNIRegexp`, `ALPN`, `ClientIP`)\ninstead of `match`; both set is `invalid_router`. Compiled to the tree before anything else\nlooks at the router.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "service": {
           "description": "The TCP service that takes the connections.",
