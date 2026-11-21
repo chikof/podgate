@@ -2993,6 +2993,8 @@ spec:
                     - service
                     - mirrors
                   - properties:
+                      max_entries:
+                        minimum: 0
                       max_file_bytes:
                         minimum: 0
                       type:
@@ -3029,6 +3031,8 @@ spec:
                     algorithm:
                       description: 'The balancing algorithm: a name, or an object `{"type": name, ...options}`. Absent: `round_robin`.'
                       x-kubernetes-preserve-unknown-fields: true
+                    browse:
+                      type: boolean
                     cache_control:
                       description: '`Cache-Control` values by file extension.'
                       nullable: true
@@ -3109,6 +3113,11 @@ spec:
                       - interval_secs
                       - timeout_secs
                       type: object
+                    hide:
+                      items:
+                        type: string
+                      nullable: true
+                      type: array
                     index:
                       items:
                         type: string
@@ -3118,6 +3127,10 @@ spec:
                       description: |-
                         The most body bytes that are mirrored, default 1 MiB, at most 16 MiB. Larger bodies are
                         not mirrored. Needs `mirror_body`.
+                      minimum: 0
+                      nullable: true
+                      type: integer
+                    max_entries:
                       minimum: 0
                       nullable: true
                       type: integer

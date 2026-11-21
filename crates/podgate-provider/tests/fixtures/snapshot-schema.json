@@ -3978,6 +3978,10 @@
       "additionalProperties": false,
       "description": "The configuration of a `static` service.",
       "properties": {
+        "browse": {
+          "default": false,
+          "type": "boolean"
+        },
         "cache_control": {
           "additionalProperties": false,
           "description": "`Cache-Control` values by file extension.",
@@ -4002,6 +4006,16 @@
             "null"
           ]
         },
+        "hide": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "index": {
           "default": null,
           "items": {
@@ -4009,6 +4023,15 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "max_entries": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
