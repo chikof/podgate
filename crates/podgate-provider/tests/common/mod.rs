@@ -11,6 +11,10 @@ pub mod broker;
 pub mod daemon;
 pub mod dns_server;
 pub mod docker;
+// The daemon's harness, one copy for both crates: the provider must not depend on the daemon, so
+// the file is included by path. It may use only what both test targets have: the same
+// dev-dependencies and `super::free_ports`. The same file is `tests/common/pebble.rs`.
+#[path = "../../../../tests/common/pebble.rs"]
 pub mod pebble;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -52,15 +56,6 @@ pub fn free_ports(count: usize) -> Vec<u16> {
         .iter()
         .map(|probe| probe.local_addr().expect("local addr").port())
         .collect()
-}
-
-/// How many authorizations pebble created, from its log: one "There are now N authorizations in
-/// the db" line each. pebble reuses a still-valid authorization for 1 percent of identifiers
-/// even with `PEBBLE_AUTHZREUSE=0` (`wfe/wfe.go:1562-1565`), and an order that reuses one has no
-/// challenge to publish. A test that counts challenges compares them with this, never with a
-/// fixed number.
-pub fn pebble_authorizations_created(pebble_log: &str) -> usize {
-    pebble_log.matches("authorizations in the db").count()
 }
 
 /// One snapshot the fake accepted.

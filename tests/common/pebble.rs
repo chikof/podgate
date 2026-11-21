@@ -2,8 +2,12 @@
 //! listener, the processes with their ports, and what a test needs to talk to them. A missing
 //! `pebble` fails the test (it is on PATH in `devenv shell`); nothing is skipped.
 //!
+//! `crates/podgate-provider/tests/common/mod.rs` includes this file by `#[path]`, so it must keep
+//! to what both crates' tests have: the dev-dependencies they share and `super::free_ports`.
+//!
 //! pebble resolves every name through challtestsrv, which answers 127.0.0.1, so HTTP-01 and
-//! TLS-ALPN-01 are validated for real against the node the test names in [`Validation`].
+//! TLS-ALPN-01 are validated for real against the node the test names in [`Validation`], and a
+//! DNS-01 test publishes TXT records through challtestsrv's management API ([`Pebble::set_txt`]).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -14,12 +18,12 @@ use std::time::{Duration, Instant};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-/// Times to start `pebble` before giving up: its ports come from `free_ports`.
+/// Times to start `pebble` before giving up: its ports come from [`super::free_ports`].
 const START_ATTEMPTS: u32 = 5;
 /// Longest one start attempt waits for pebble's ports to open.
 const START_WAIT: Duration = Duration::from_secs(30);
@@ -104,9 +108,15 @@ impl Pebble {
     /// the probe and the bind (and `cargo test` runs tests as threads of one process), so a
     /// process that exits at start is retried with fresh ports.
     pub async fn start(pki: Pki, ports: Validation) -> Self {
+        Self::start_with_dns(pki, ports, None).await
+    }
+
+    /// Like [`Pebble::start`], with pebble resolving every name through `dns` instead of
+    /// challtestsrv: for DNS-01, whose TXT records the test serves itself.
+    pub async fn start_with_dns(pki: Pki, ports: Validation, dns: Option<SocketAddr>) -> Self {
         let mut failures = Vec::new();
         for attempt in 1..=START_ATTEMPTS {
-            match Self::try_start(pki.clone(), ports).await {
+            match Self::try_start(pki.clone(), ports, dns).await {
                 Ok(started) => return started,
                 Err(reason) => failures.push(format!("attempt {attempt}: {reason}")),
             }
@@ -114,7 +124,11 @@ impl Pebble {
         panic!("pebble did not start:\n{}", failures.join("\n"));
     }
 
-    async fn try_start(pki: Pki, validation: Validation) -> Result<Self, String> {
+    async fn try_start(
+        pki: Pki,
+        validation: Validation,
+        external_dns: Option<SocketAddr>,
+    ) -> Result<Self, String> {
         let ports = super::free_ports(5);
         let (acme, management, spare) = (ports[0], ports[1], ports[2]);
         let (dns, challtest_management) = (ports[3], ports[4]);
@@ -161,7 +175,10 @@ impl Pebble {
         let pebble = Command::new("pebble")
             .arg("-config")
             .arg(&config_path)
-            .args(["-dnsserver", &format!("127.0.0.1:{dns}")])
+            .args([
+                "-dnsserver",
+                &external_dns.map_or_else(|| format!("127.0.0.1:{dns}"), |addr| addr.to_string()),
+            ])
             .env("PEBBLE_VA_NOSLEEP", "1")
             .env("PEBBLE_AUTHZREUSE", "0")
             // pebble answers badNonce to 5% of requests by default; instant-acme retries a
@@ -208,6 +225,75 @@ impl Pebble {
             self.pki.read("pebble.log"),
             self.pki.read("pebble.err"),
         ))
+    }
+
+    /// pebble's log so far.
+    pub fn log(&self) -> String {
+        self.pki.read("pebble.log")
+    }
+
+    /// How many authorizations pebble created, from its log: one "There are now N authorizations
+    /// in the db" line each.
+    ///
+    /// A second order on the same ACME account can reuse a still-valid authorization, and then it
+    /// has no challenge to publish. `PEBBLE_AUTHZREUSE=0` does not prevent that: pebble v2.10.1
+    /// reads the variable only when it is in `0..=100`, otherwise it keeps its default of 50
+    /// (`wfe/wfe.go:214-216`), and `makeAuthorizations` reuses when `rand.Intn(100) > percent` is
+    /// false, which is 1% per identifier at 0 (`wfe/wfe.go:1562-1565`). A test that counts the
+    /// challenges of such an order compares them with this, never with a fixed number.
+    pub fn authorizations_created(&self) -> usize {
+        self.log().matches("authorizations in the db").count()
+    }
+
+    /// A call to challtestsrv's management API; returns the response body.
+    pub async fn dns(&self, path: &str, body: &Value) -> String {
+        let body = body.to_string();
+        let mut tcp = TcpStream::connect(self.challtest)
+            .await
+            .expect("connect to challtestsrv");
+        tcp.write_all(
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("send");
+        let mut raw = Vec::new();
+        tcp.read_to_end(&mut raw).await.expect("read");
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        text.split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_owned())
+            .unwrap_or(text)
+    }
+
+    /// Publishes the TXT record `value` at `name`. A name can hold several values.
+    pub async fn set_txt(&self, name: &str, value: &str) {
+        self.dns(
+            "/set-txt",
+            &json!({"host": format!("{name}."), "value": value}),
+        )
+        .await;
+    }
+
+    /// Removes every TXT record at `name`.
+    pub async fn clear_txt(&self, name: &str) {
+        self.dns("/clear-txt", &json!({"host": format!("{name}.")}))
+            .await;
+    }
+
+    /// How many TXT queries the DNS server has answered for `name`: what the CA asked.
+    pub async fn txt_queries(&self, name: &str) -> usize {
+        let history = self
+            .dns("/dns-request-history", &json!({"host": name}))
+            .await;
+        let entries: Vec<Value> = serde_json::from_str(&history).expect("history is JSON");
+        entries
+            .iter()
+            .filter(|entry| entry["Question"]["Qtype"] == 16)
+            .count()
     }
 
     /// pebble's root certificate, for a client that must trust what pebble issues.

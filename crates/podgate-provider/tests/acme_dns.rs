@@ -673,7 +673,7 @@ async fn wildcard_issued_through_provider_rfc2136() {
 
         // pebble created one authorization per identifier it did not reuse, and the provider
         // published exactly one record for each challenge the daemon emitted.
-        let created = common::pebble_authorizations_created(&pebble.pki.read("pebble.log"));
+        let created = pebble.authorizations_created();
         let events = daemon.events().await;
         let challenges = count_events(&events, "acme_challenge", "dns-01");
         assert_eq!(challenges, created, "{events:?}");

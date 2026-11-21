@@ -975,7 +975,7 @@ async fn broker_http01_end_to_end() {
 
         // What pebble created is what the provider answered: one challenge per authorization
         // (pebble reuses one now and then, and an order that reuses has none to answer).
-        let created = common::pebble_authorizations_created(&setup.pebble.pki.read("pebble.log"));
+        let created = setup.pebble.authorizations_created();
         let events = setup.daemon.events().await;
         assert_eq!(
             count_events(&events, "acme_challenge"),
@@ -1014,7 +1014,7 @@ async fn broker_tls_alpn01_end_to_end() {
         let root = setup.pebble.root().await;
         let body = serves_over_tls(&setup, &root, Duration::from_secs(120)).await;
         assert_eq!(body, "from-the-backend");
-        let created = common::pebble_authorizations_created(&setup.pebble.pki.read("pebble.log"));
+        let created = setup.pebble.authorizations_created();
         let events = setup.daemon.events().await;
         let answered = events
             .iter()
@@ -1035,7 +1035,7 @@ async fn broker_survives_restarts() {
         let root = setup.pebble.root().await;
         let provider = Provider::start(&setup, &state);
         serves_over_tls(&setup, &root, Duration::from_secs(120)).await;
-        let created = common::pebble_authorizations_created(&setup.pebble.pki.read("pebble.log"));
+        let created = setup.pebble.authorizations_created();
         provider.stop().await;
 
         // The provider restarts: the certificate comes from disk, nothing is ordered again.
@@ -1070,7 +1070,7 @@ async fn broker_survives_restarts() {
             "the restarted podgate ordered again: {events:?}"
         );
         assert_eq!(
-            common::pebble_authorizations_created(&setup.pebble.pki.read("pebble.log")),
+            setup.pebble.authorizations_created(),
             created,
             "no new authorization after either restart"
         );
