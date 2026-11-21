@@ -75,6 +75,8 @@ In `response_filter` the chain's `response_head` hooks (the `buffering` response
 
 The failure capture sees the upstream's bytes before compression, so a recorded 5xx is replayable as it was.
 
+An HTTP/2 upstream response may end in trailers, so its last DATA frame does not end the stream. The encoder is finished just before the trailers (`ProxyHttp::response_body_before_trailers`), and its last bytes go through the chain's response body hooks like every other compressed byte: a `buffering` stage that holds the body holds them too, then releases everything ahead of the trailers. The client gets a whole encoding followed by the trailers.
+
 ## Differences from Traefik and Caddy
 
 - `min_bytes` is not applied to bodies of unknown length (above).

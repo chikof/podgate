@@ -919,20 +919,37 @@ impl ProxyHttp for Gateway {
         Ok(())
     }
 
+    /// The body is over but its last DATA frame did not say so: the encoder is finished here,
+    /// as at a normal end. Its last bytes go through the chain's body hooks like every other
+    /// compressed byte, so a stage that holds the body back holds them too, then the chain
+    /// releases what it holds.
     fn response_body_before_trailers(
         &self,
         _session: &mut Session,
         ctx: &mut Ctx,
     ) -> pingora::Result<Option<Bytes>> {
-        ctx.matched
-            .and_then(|matched| ctx.table.router(matched))
-            .map_or(Ok(None), |(app, router)| {
-                middleware::run_response_before_trailers(
-                    app.stages(),
-                    router.chain(),
-                    &mut ctx.chain,
-                )
-            })
+        let mut tail = None;
+        compress::filter(&mut ctx.compression, &mut tail, true)
+            .map_err(|err| Error::because(InternalError, "compression failed", err))?;
+        let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) else {
+            return Ok(tail);
+        };
+        if tail.is_some() {
+            middleware::run_response_body(
+                app.stages(),
+                router.chain(),
+                &mut tail,
+                false,
+                &mut ctx.chain,
+            )?;
+        }
+        let released =
+            middleware::run_response_before_trailers(app.stages(), router.chain(), &mut ctx.chain)?;
+        // What a stage held back is older than the encoder's last bytes.
+        Ok(match (released, tail) {
+            (Some(held), Some(tail)) => Some(Bytes::from([held, tail].concat())),
+            (held, tail) => held.or(tail),
+        })
     }
 
     async fn response_trailer_filter(

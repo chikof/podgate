@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use common::{Podgate, app, serving, snapshot, with_buffering, with_middleware};
+use bytes::Bytes;
+use common::grpc::Client;
+use common::{Podgate, TestCert, app, serving, snapshot, with_buffering, with_middleware};
+use http::{HeaderMap, HeaderValue, Response};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -187,24 +190,29 @@ impl Got {
 
     /// The body after the content encoding is undone by a real decoder.
     fn decoded(&self) -> Vec<u8> {
-        match self.encoding() {
-            None => self.wire.clone(),
-            Some("gzip") => {
-                assert_eq!(self.wire[..3], [0x1f, 0x8b, 8], "gzip header");
-                let raw = &self.wire[10..self.wire.len() - 8];
-                let inflated = miniz_oxide::inflate::decompress_to_vec(raw).expect("deflate");
-                let trailer = &self.wire[self.wire.len() - 8..];
-                assert_eq!(trailer[..4], crc32fast::hash(&inflated).to_le_bytes());
-                inflated
-            }
-            Some("br") => {
-                let mut out = Vec::new();
-                brotli::BrotliDecompress(&mut &*self.wire, &mut out).expect("valid brotli");
-                out
-            }
-            Some("zstd") => zstd::stream::decode_all(&*self.wire).expect("valid zstd"),
-            Some(other) => panic!("unexpected content-encoding {other}"),
+        decode(self.encoding(), &self.wire)
+    }
+}
+
+/// `wire` after the content encoding `encoding` is undone by a real decoder.
+fn decode(encoding: Option<&str>, wire: &[u8]) -> Vec<u8> {
+    match encoding {
+        None => wire.to_vec(),
+        Some("gzip") => {
+            assert_eq!(wire[..3], [0x1f, 0x8b, 8], "gzip header");
+            let raw = &wire[10..wire.len() - 8];
+            let inflated = miniz_oxide::inflate::decompress_to_vec(raw).expect("deflate");
+            let trailer = &wire[wire.len() - 8..];
+            assert_eq!(trailer[..4], crc32fast::hash(&inflated).to_le_bytes());
+            inflated
         }
+        Some("br") => {
+            let mut out = Vec::new();
+            brotli::BrotliDecompress(&mut &*wire, &mut out).expect("valid brotli");
+            out
+        }
+        Some("zstd") => zstd::stream::decode_all(wire).expect("valid zstd"),
+        Some(other) => panic!("unexpected content-encoding {other}"),
     }
 }
 
@@ -740,5 +748,95 @@ async fn compress_budget_holds_all_algorithms() {
         assert!(sampled_max.load(Ordering::Relaxed) <= MIB);
         assert_eq!(series(&metrics, "podgate_tenant_buffer_bytes"), 0);
         assert!(series(&metrics, "podgate_tenant_compression_skipped_total") >= identity);
+    }
+}
+
+/// An HTTP/2 cleartext upstream whose every response is a `text/plain` body in two DATA frames
+/// (`first`, `second`, a pause between) that do not end the stream, then the trailers
+/// `x-checksum: abc123`.
+async fn trailer_upstream(first: Vec<u8>, second: Vec<u8>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let (first, second) = (first.clone(), second.clone());
+            tokio::spawn(async move {
+                let Ok(mut connection) = h2::server::handshake(tcp).await else {
+                    return;
+                };
+                while let Some(Ok((_request, mut respond))) = connection.accept().await {
+                    let (first, second) = (first.clone(), second.clone());
+                    tokio::spawn(async move {
+                        let head = Response::builder()
+                            .status(200)
+                            .header("content-type", "text/plain");
+                        let Ok(mut send) =
+                            respond.send_response(head.body(()).expect("head"), false)
+                        else {
+                            return;
+                        };
+                        drop(send.send_data(Bytes::from(first), false));
+                        sleep(Duration::from_millis(20)).await;
+                        drop(send.send_data(Bytes::from(second), false));
+                        sleep(Duration::from_millis(20)).await;
+                        let mut trailers = HeaderMap::new();
+                        trailers.insert("x-checksum", HeaderValue::from_static("abc123"));
+                        drop(send.send_trailers(trailers));
+                    });
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// A compressed HTTP/2 upstream response that ends in trailers is a whole encoding: the encoder
+/// is finished ahead of the trailers, with and without the buffering middleware holding the
+/// body, and the trailers arrive after the body.
+#[tokio::test]
+async fn compress_finishes_stream_before_h2_trailers() {
+    const HOST: &str = "t.test";
+    let (first, second) = (text(4000), text(6000));
+    let whole = [first.clone(), second.clone()].concat();
+    for (algorithm, token) in [("gzip", "gzip"), ("brotli", "br"), ("zstd", "zstd")] {
+        for buffered in [false, true] {
+            let label = format!("{algorithm}, buffered {buffered}");
+            let upstream = trailer_upstream(first.clone(), second.clone()).await;
+            let podgate = Podgate::start().await;
+            let cert = TestCert::new(&[HOST]);
+            let mut revision = serving("r1", upstream);
+            revision["services"][0]["servers"][0]["url"] = json!(format!("h2c://{upstream}"));
+            let mut app = with_middleware(
+                app("t", &[HOST], &[revision]),
+                "z",
+                "compress",
+                json!({ "algorithms": [algorithm] }),
+            );
+            if buffered {
+                let config = json!({ "max_response_body_bytes": 65536, "buffer_response": true });
+                app = with_middleware(app, "buffer", "buffering", config);
+            }
+            let mut pushed = snapshot(1, &[app]);
+            pushed["certificates"] = json!([cert.entry(&[HOST])]);
+            let reply = podgate.push_snapshot(&pushed).await;
+            assert_eq!(reply.status, 200, "{label}: {}", reply.body);
+
+            let client = Client::tls(podgate.tls_addr, HOST, &cert.der).await;
+            let mut call = client
+                .start_request(
+                    "GET",
+                    "text/plain",
+                    "/",
+                    &[("accept-encoding", "gzip, br, zstd")],
+                )
+                .await;
+            call.finish();
+            let raw = call.raw().await;
+            assert_eq!(raw.status, 200, "{label}");
+            assert_eq!(raw.header("content-encoding"), Some(token), "{label}");
+            assert_eq!(decode(Some(token), &raw.body), whole, "{label}");
+            let trailers = raw.trailers.expect("the trailers arrive");
+            assert_eq!(trailers.get("x-checksum").expect("checksum"), "abc123");
+        }
     }
 }
