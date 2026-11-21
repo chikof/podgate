@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use podgate_provider::docker::DockerSource;
 use podgate_provider::file::FileSource;
 use podgate_provider::quarantine::Verdict;
 use podgate_provider::{Config, Engine, UpstreamPolicy};
@@ -53,6 +54,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<(Command, Pa
 fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> {
     for source in &config.sources {
         match &*source.kind {
+            "docker" => engine.add_source(DockerSource::from_config(source)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
             kind => bail!(
                 "source {:?}: kind {kind:?} is not built into this binary",

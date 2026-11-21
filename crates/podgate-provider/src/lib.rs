@@ -14,6 +14,8 @@
 //! - [`quarantine`]: leaving out the objects podgate rejects, found by `declared_by` or by
 //!   bisection.
 //! - [`mod@file`]: the source that reads YAML, TOML and JSON files and watches them.
+//! - [`docker`]: the source that turns Docker and Podman containers into apps through their
+//!   `podgate.*` labels.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -21,6 +23,7 @@
 
 pub mod acme;
 pub mod config;
+pub mod docker;
 pub mod engine;
 pub mod file;
 pub mod merge;
