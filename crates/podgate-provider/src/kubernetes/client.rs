@@ -29,7 +29,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::hash::{BuildHasher, RandomState};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,6 +51,8 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep, timeout};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
+
+use crate::push::Backoff;
 
 /// The largest list page or error body read, in bytes.
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -1181,31 +1182,6 @@ pub enum Event<R> {
     Outage(Box<str>),
 }
 
-/// The delay between retries: doubles from a minimum to a maximum, with up to a quarter of
-/// jitter so many watchers do not retry in step.
-#[derive(Debug)]
-struct Backoff {
-    min: Duration,
-    max: Duration,
-    failures: u32,
-}
-
-impl Backoff {
-    fn next(&mut self) -> Duration {
-        let shift = self.failures.min(16);
-        self.failures = self.failures.saturating_add(1);
-        let base = self.min.saturating_mul(1 << shift).min(self.max);
-        // `RandomState` is randomly keyed per instance: enough jitter without a new dependency.
-        let random = RandomState::new().hash_one(self.failures);
-        let spread = base.as_millis().max(4) as u64 / 4;
-        base + Duration::from_millis(random % spread)
-    }
-
-    fn reset(&mut self) {
-        self.failures = 0;
-    }
-}
-
 enum Phase {
     /// The next call lists.
     List,
@@ -1244,11 +1220,7 @@ impl<R: Resource> Watcher<R> {
             client,
             query,
             phase: Phase::List,
-            backoff: Backoff {
-                min: tuning.backoff_min,
-                max: tuning.backoff_max,
-                failures: 0,
-            },
+            backoff: Backoff::new(tuning.backoff_min, tuning.backoff_max).jittered(),
             wait: None,
             marker: std::marker::PhantomData,
         }
@@ -1350,7 +1322,7 @@ impl<R: Resource> Watcher<R> {
                         Ok(None) => {
                             // The server ended the watch (its `timeoutSeconds`): resume.
                             if !got && opened.elapsed() < MIN_WATCH_LIFE {
-                                self.wait = Some(self.backoff.next());
+                                self.wait = Some(self.backoff.next_delay());
                             }
                             self.phase = Phase::Watch {
                                 resource_version,
@@ -1363,7 +1335,7 @@ impl<R: Resource> Watcher<R> {
                             // balancer, an API server restart): resume quietly. If the reconnect
                             // fails too, that is an outage and is reported as one.
                             debug!(kind = R::KIND, error = %err, "the watch ended abnormally; resuming");
-                            self.wait = Some(self.backoff.next());
+                            self.wait = Some(self.backoff.next_delay());
                             self.phase = Phase::Watch {
                                 resource_version,
                                 stream: None,
@@ -1390,7 +1362,11 @@ impl<R: Resource> Watcher<R> {
         );
         self.phase = Phase::List;
         // Rare, but a server that answers 410 to every list would otherwise spin.
-        self.wait = Some(self.backoff.next().min(self.client.tuning().backoff_min));
+        self.wait = Some(
+            self.backoff
+                .next_delay()
+                .min(self.client.tuning().backoff_min),
+        );
     }
 
     fn fail(&mut self, err: &ClientError, resume: Phase) -> Event<R> {
@@ -1399,7 +1375,7 @@ impl<R: Resource> Watcher<R> {
             ClientError::Gone(_) => Phase::List,
             _ => resume,
         };
-        self.wait = Some(self.backoff.next());
+        self.wait = Some(self.backoff.next_delay());
         Event::Outage(format!("cannot watch {}: {err}", R::PLURAL).into())
     }
 }
