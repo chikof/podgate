@@ -16,6 +16,7 @@
 
 pub mod dns;
 pub mod pebble;
+pub mod ws;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
