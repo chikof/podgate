@@ -505,7 +505,7 @@ fn route_parents(
     out
 }
 
-fn patch(meta: &ObjectMeta, status: Value) -> Value {
+fn patch(meta: &ObjectMeta, status: &Value) -> Value {
     let mut body = json!({ "status": status });
     if let Some(version) = &meta.resource_version {
         body["metadata"] = json!({ "resourceVersion": version });
@@ -553,7 +553,7 @@ pub fn plan(
         if !current(existing, &status) {
             writes.push(Write {
                 target: Target::Class(name.clone()),
-                body: patch(&class.metadata, status),
+                body: patch(&class.metadata, &status),
             });
         }
     }
@@ -572,7 +572,7 @@ pub fn plan(
         if !current(gateway.status.as_ref(), &status) {
             writes.push(Write {
                 target: Target::Gateway(report.key.clone()),
-                body: patch(&gateway.metadata, status),
+                body: patch(&gateway.metadata, &status),
             });
         }
     }
@@ -593,7 +593,7 @@ pub fn plan(
         if let Some(status) = route_status(Kind::Http, &route.metadata, route.status.as_ref()) {
             writes.push(Write {
                 target: Target::Http(route.metadata.key()),
-                body: patch(&route.metadata, status),
+                body: patch(&route.metadata, &status),
             });
         }
     }
@@ -601,7 +601,7 @@ pub fn plan(
         if let Some(status) = route_status(Kind::Grpc, &route.metadata, route.status.as_ref()) {
             writes.push(Write {
                 target: Target::Grpc(route.metadata.key()),
-                body: patch(&route.metadata, status),
+                body: patch(&route.metadata, &status),
             });
         }
     }

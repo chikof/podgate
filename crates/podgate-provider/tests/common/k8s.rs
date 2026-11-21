@@ -521,11 +521,11 @@ struct Head {
 }
 
 impl Head {
-    fn parse(buffer: &[u8]) -> Option<Option<Self>> {
+    fn parse(buffer: &[u8]) -> Option<Self> {
         let mut headers = [httparse::EMPTY_HEADER; 32];
         let mut request = httparse::Request::new(&mut headers);
         match request.parse(buffer) {
-            Ok(httparse::Status::Complete(size)) => Some(Some(Self {
+            Ok(httparse::Status::Complete(size)) => Some(Self {
                 size,
                 method: request.method?.to_owned(),
                 target: request.path?.to_owned(),
@@ -539,9 +539,8 @@ impl Head {
                         )
                     })
                     .collect(),
-            })),
-            Ok(httparse::Status::Partial) => Some(None),
-            Err(_) => None,
+            }),
+            _ => None,
         }
     }
 
@@ -565,7 +564,7 @@ async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> Option<Seen> {
         if buffer.len() > 1024 * 1024 {
             return None;
         }
-        let Some(head) = Head::parse(&buffer)? else {
+        let Some(head) = Head::parse(&buffer) else {
             continue;
         };
         let length: usize = head

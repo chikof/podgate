@@ -1581,3 +1581,52 @@ async fn status_is_not_written_again_when_nothing_changed() {
     let after = api.writes().iter().filter(|s| s.is_status_write()).count();
     assert_eq!(before, after, "an unchanged status was patched again");
 }
+
+#[tokio::test]
+async fn gateway_status_can_be_turned_off() {
+    let api = FakeApi::start().await;
+    world(&api);
+    api.put("httproutes", shop(json!([parent("gw")])));
+    let dir = dir("off");
+    let kubeconfig = api.kubeconfig_also(&dir, "token");
+    let text = format!(
+        "{TENANTS}\n[[source]]\nkind = \"kubernetes\"\nname = \"k8s\"\nkubeconfig = {:?}\nnamespace_tenants = {{ team-a = \"acme\" }}\ngateway_api = true\ngateway_status = false\n",
+        kubeconfig.display().to_string()
+    );
+    // The Lease keys mean nothing without status.
+    let with_lease = base_config(
+        &dir.join("admin.sock"),
+        &format!("{text}lease_name = \"x\"\n"),
+    );
+    let why = KubernetesSource::from_config(&with_lease.sources[0], &with_lease)
+        .expect_err("lease_name is refused")
+        .to_string();
+    assert!(why.contains("lease_name and lease_namespace need"), "{why}");
+
+    let config = base_config(&dir.join("admin.sock"), &text);
+    let mut source = KubernetesSource::from_config(&config.sources[0], &config)
+        .expect("a valid source")
+        .with_tuning(tuning())
+        .with_settle(Duration::from_millis(20));
+    let (_engine, status) = FakeEngine::new(Mode::Accept);
+    source.observe(status);
+    let (tx, mut updates) = mpsc::channel(64);
+    let run = tokio::spawn(source.run(tx));
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            match updates.recv().await.expect("the source runs").body {
+                UpdateBody::State(state) if !state.apps.is_empty() => return,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("a state with the route");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        api.writes().is_empty(),
+        "nothing is written: {:?}",
+        api.writes()
+    );
+    run.abort();
+}

@@ -92,10 +92,6 @@ fn default_lease_namespace() -> String {
         .unwrap_or_else(|| "default".to_owned())
 }
 
-const fn enabled() -> bool {
-    true
-}
-
 /// The default time a burst of changes is merged before the state is recomputed.
 const DEFAULT_SETTLE: Duration = Duration::from_millis(100);
 
@@ -128,8 +124,7 @@ struct Settings {
     gateway_api: bool,
     gateway_class: Option<String>,
     listener_entry_points: Option<BTreeMap<String, String>>,
-    #[serde(default = "enabled")]
-    gateway_status: bool,
+    gateway_status: Option<bool>,
     lease_name: Option<String>,
     lease_namespace: Option<String>,
 }
@@ -235,7 +230,7 @@ impl KubernetesSource {
         } else {
             None
         };
-        let status = if gateway.is_some() && settings.gateway_status {
+        let status = if gateway.is_some() && settings.gateway_status.unwrap_or(true) {
             let name = settings
                 .lease_name
                 .unwrap_or_else(|| lease::DEFAULT_NAME.to_owned());
