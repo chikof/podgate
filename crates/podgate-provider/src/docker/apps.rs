@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use crate::source::{Origin, SourceApp, TenantClaim};
 
 use super::Settings;
-use super::TenantSource;
 use super::labels::{self, Labels, Member};
 use super::model::{Container, Readiness};
 
@@ -158,12 +157,12 @@ fn candidate<'a>(settings: &Settings, container: &'a Container) -> Result<Candid
         .port
         .ok_or("podgate.port: is required, the port the container listens on")?;
 
-    let reachable: Vec<(&String, std::net::IpAddr)> = settings
+    let reachable: Vec<(&str, std::net::IpAddr)> = settings
         .networks
         .iter()
         .filter_map(|network| {
             let address = container.networks.get(network).copied().flatten()?;
-            Some((network, address))
+            Some((network.as_str(), address))
         })
         .collect();
     let Some(&(_, address)) = reachable.first() else {
@@ -174,32 +173,8 @@ fn candidate<'a>(settings: &Settings, container: &'a Container) -> Result<Candid
         ));
     };
 
-    let claim = match &settings.tenants {
-        TenantSource::Fixed(tenant) => TenantClaim::mapped(tenant),
-        TenantSource::Network(mapping) => {
-            let tenants: BTreeSet<&str> = reachable
-                .iter()
-                .filter_map(|(network, _)| mapping.get(*network).map(|tenant| &**tenant))
-                .collect();
-            match tenants.len() {
-                1 => TenantClaim::mapped(tenants.first().copied().unwrap_or_default()),
-                _ => {
-                    return Err(format!(
-                        "it is attached to the networks of several tenants ({tenants:?}); it must belong to one"
-                    ));
-                }
-            }
-        }
-        TenantSource::Label(mapped) => {
-            let claim = mapped
-                .as_deref()
-                .map_or_else(TenantClaim::none, TenantClaim::mapped);
-            match &labels.tenant {
-                Some(tenant) => claim.with_label(tenant),
-                None => claim,
-            }
-        }
-    };
+    let names: Vec<&str> = reachable.iter().map(|(network, _)| *network).collect();
+    let claim = settings.tenants.claim(&names, labels.tenant.as_deref())?;
     Ok(Candidate {
         container,
         labels,

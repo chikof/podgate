@@ -32,7 +32,7 @@ pub(crate) mod client;
 pub mod labels;
 pub(crate) mod model;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,7 +46,7 @@ use tracing::{debug, warn};
 use crate::abort::Abort;
 use crate::config::SourceConfig;
 use crate::push::Backoff;
-use crate::source::{Source, State, Update, UpdateBody};
+use crate::source::{Source, State, TenantClaim, Update, UpdateBody};
 
 use client::{Client, ClientError};
 
@@ -71,16 +71,36 @@ pub struct DockerConfigError {
     pub reason: Box<str>,
 }
 
+/// The `network` key: one name or a list of names.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Networks {
+pub(crate) enum Networks {
     One(String),
     Many(Vec<String>),
 }
 
+impl Networks {
+    /// The names, in the order given.
+    ///
+    /// # Errors
+    ///
+    /// The reason, naming the key, when no name is given or one is empty.
+    pub(crate) fn names(self) -> Result<Vec<String>, String> {
+        let networks = match self {
+            Self::One(network) => vec![network],
+            Self::Many(networks) => networks,
+        };
+        if networks.is_empty() || networks.iter().any(String::is_empty) {
+            return Err("network: must name at least one network".to_owned());
+        }
+        Ok(networks)
+    }
+}
+
+/// The `tenant_from` key.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TenantFrom {
+pub(crate) enum TenantFrom {
     #[default]
     Fixed,
     Network,
@@ -101,15 +121,105 @@ struct Raw {
     resync_secs: Option<u64>,
 }
 
-/// Where the tenant of a container comes from.
+/// Where the tenant of a container (or service) comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TenantSource {
+pub(crate) enum TenantSource {
     /// The operator names one tenant for the whole source.
     Fixed(Box<str>),
     /// The tenant of the network the container is on.
     Network(BTreeMap<String, Box<str>>),
     /// The container names it; the core honours that only for tenants that trust the source.
     Label(Option<Box<str>>),
+}
+
+/// The tenant source of the keys `tenant_from`, `tenant` and `network_tenants`, for the
+/// source's `networks`.
+///
+/// # Errors
+///
+/// The reason, naming the key, when the keys do not fit `tenant_from`.
+pub(crate) fn tenant_source(
+    from: TenantFrom,
+    tenant: Option<String>,
+    network_tenants: Option<BTreeMap<String, String>>,
+    networks: &[String],
+) -> Result<TenantSource, String> {
+    if tenant.as_deref().is_some_and(str::is_empty) {
+        return Err("tenant: is empty".to_owned());
+    }
+    match (from, network_tenants) {
+        (TenantFrom::Fixed, None) => Ok(TenantSource::Fixed(
+            tenant.unwrap_or_else(|| OWN_TENANT.to_owned()).into(),
+        )),
+        (TenantFrom::Label, None) => Ok(TenantSource::Label(tenant.map(Into::into))),
+        (TenantFrom::Network, Some(mapping)) if tenant.is_none() => {
+            let unmapped: Vec<&String> = networks
+                .iter()
+                .filter(|network| !mapping.contains_key(*network))
+                .collect();
+            if !unmapped.is_empty() {
+                return Err(format!(
+                    "network_tenants: has no tenant for network {unmapped:?}"
+                ));
+            }
+            if let Some(extra) = mapping.keys().find(|key| !networks.contains(key)) {
+                return Err(format!(
+                    "network_tenants: {extra:?} is not one of the source's networks"
+                ));
+            }
+            Ok(TenantSource::Network(
+                mapping
+                    .into_iter()
+                    .map(|(network, tenant)| (network, tenant.into()))
+                    .collect(),
+            ))
+        }
+        (TenantFrom::Network, _) => Err(
+            "tenant_from = \"network\" needs network_tenants and takes no tenant".to_owned(),
+        ),
+        (_, Some(_)) => Err("network_tenants: only for tenant_from = \"network\"".to_owned()),
+    }
+}
+
+impl TenantSource {
+    /// The claim of an object that has an address on `reachable` networks and names `label` as
+    /// its tenant, if it does.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when the object is on the networks of several tenants.
+    pub(crate) fn claim(
+        &self,
+        reachable: &[&str],
+        label: Option<&str>,
+    ) -> Result<TenantClaim, String> {
+        let claim = match self {
+            Self::Fixed(tenant) => TenantClaim::mapped(tenant),
+            Self::Network(mapping) => {
+                let tenants: BTreeSet<&str> = reachable
+                    .iter()
+                    .filter_map(|network| mapping.get(*network).map(|tenant| &**tenant))
+                    .collect();
+                match tenants.len() {
+                    1 => TenantClaim::mapped(tenants.first().copied().unwrap_or_default()),
+                    _ => {
+                        return Err(format!(
+                            "it is attached to the networks of several tenants ({tenants:?}); it must belong to one"
+                        ));
+                    }
+                }
+            }
+            Self::Label(mapped) => {
+                mapped
+                    .as_deref()
+                    .map_or_else(TenantClaim::none, TenantClaim::mapped)
+            }
+        };
+        Ok(match (self, label) {
+            (Self::Label(_), Some(tenant)) => claim.with_label(tenant),
+            _ => claim,
+        })
+    }
 }
 
 /// The validated `[[source]]` entry.
@@ -148,15 +258,7 @@ impl DockerSource {
         };
         let raw = Raw::deserialize(toml::Value::Table(config.settings.clone()))
             .map_err(|err| invalid(err.to_string()))?;
-        let networks = match raw.network {
-            Networks::One(network) => vec![network],
-            Networks::Many(networks) => networks,
-        };
-        if networks.is_empty() || networks.iter().any(String::is_empty) {
-            return Err(invalid(
-                "network: must name at least one network".to_owned(),
-            ));
-        }
+        let networks = raw.network.names().map_err(invalid)?;
         let socket = raw.socket.unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
         if socket.as_os_str().is_empty() {
             return Err(invalid("socket: is empty".to_owned()));
@@ -165,48 +267,13 @@ impl DockerSource {
         if resync_secs == 0 {
             return Err(invalid("resync_secs: must be at least 1".to_owned()));
         }
-        if raw.tenant.as_deref().is_some_and(str::is_empty) {
-            return Err(invalid("tenant: is empty".to_owned()));
-        }
-        let tenants = match (raw.tenant_from, raw.network_tenants) {
-            (TenantFrom::Fixed, None) => {
-                TenantSource::Fixed(raw.tenant.unwrap_or_else(|| OWN_TENANT.to_owned()).into())
-            }
-            (TenantFrom::Label, None) => TenantSource::Label(raw.tenant.map(Into::into)),
-            (TenantFrom::Network, Some(mapping)) if raw.tenant.is_none() => {
-                let unmapped: Vec<&String> = networks
-                    .iter()
-                    .filter(|network| !mapping.contains_key(*network))
-                    .collect();
-                if !unmapped.is_empty() {
-                    return Err(invalid(format!(
-                        "network_tenants: has no tenant for network {unmapped:?}"
-                    )));
-                }
-                if let Some(extra) = mapping.keys().find(|key| !networks.contains(key)) {
-                    return Err(invalid(format!(
-                        "network_tenants: {extra:?} is not one of the source's networks"
-                    )));
-                }
-                TenantSource::Network(
-                    mapping
-                        .into_iter()
-                        .map(|(network, tenant)| (network, tenant.into()))
-                        .collect(),
-                )
-            }
-            (TenantFrom::Network, _) => {
-                return Err(invalid(
-                    "tenant_from = \"network\" needs network_tenants and takes no tenant"
-                        .to_owned(),
-                ));
-            }
-            (_, Some(_)) => {
-                return Err(invalid(
-                    "network_tenants: only for tenant_from = \"network\"".to_owned(),
-                ));
-            }
-        };
+        let tenants = tenant_source(
+            raw.tenant_from,
+            raw.tenant,
+            raw.network_tenants,
+            &networks,
+        )
+        .map_err(invalid)?;
         Ok(Self {
             name: config.name.clone(),
             settings: Settings {
