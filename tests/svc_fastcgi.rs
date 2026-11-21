@@ -519,6 +519,22 @@ async fn fastcgi_explain_shows_upstream_and_index() {
 
 // -- a real PHP-FPM ----------------------------------------------------------------------------
 
+/// Makes the child receive SIGTERM when this process dies, however it dies: a test binary that
+/// is killed (SIGKILL, a timeout, the OOM killer) never runs `Drop`, and php-fpm would live on
+/// with its workers. The master stops its workers on SIGTERM.
+#[allow(unsafe_code)] // `pre_exec` is unsafe; the closure makes one prctl call, see SAFETY.
+fn die_with_parent(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs between fork and exec and calls only `prctl`, a plain
+    // async-signal-safe syscall wrapper: no allocation, no locks, no access to shared state.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))
+                .map_err(std::io::Error::from)
+        });
+    }
+}
+
 /// A `php-fpm` serving `<dir>/www` on a unix socket. Missing `php-fpm` fails the test (it is on
 /// PATH in `devenv shell`); nothing is skipped. Killed on drop.
 struct PhpFpm {
@@ -542,7 +558,8 @@ impl PhpFpm {
             ),
         )
         .expect("write php-fpm.conf");
-        let child = Command::new("php-fpm")
+        let mut command = Command::new("php-fpm");
+        command
             .arg("--nodaemonize")
             .arg("-n")
             .arg("-R")
@@ -550,7 +567,9 @@ impl PhpFpm {
             .arg(&config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        die_with_parent(&mut command);
+        let child = command
             .spawn()
             .expect("php-fpm must be on PATH (it is in `devenv shell`)");
         let deadline = Instant::now() + Duration::from_secs(15);

@@ -50,7 +50,7 @@ podgate-model = { version = "0.1.0", path = "crates/podgate-model", features = [
 prost = "0.14"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 regex = "1.13.2"
-rustix = { version = "1.1.6", features = ["fs", "net"] }
+rustix = { version = "1.1.6", features = ["fs", "net", "process"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 ruzstd = "0.9.1"
