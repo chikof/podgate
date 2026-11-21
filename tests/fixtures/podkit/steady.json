@@ -1,0 +1,23 @@
+{
+  "version": 41,
+  "tenants": [
+    { "id": "team-7", "weight": 1, "budget": { "max_inflight": 1000, "max_buffer_bytes": 67108864 } }
+  ],
+  "apps": [
+    {
+      "id": "app-42", "tenant": "team-7", "declared_by": "podkit/agent",
+      "tls": { "mode": "acme" },
+      "routers": [
+        { "name": "web", "entry_points": ["web"],
+          "match": { "host": ["shop.apps.example.com"] }, "service": "web" },
+        { "name": "websecure", "entry_points": ["websecure"],
+          "match": { "host": ["shop.acme-corp.dev"] }, "service": "web" }
+      ],
+      "revisions": [
+        { "id": "d-1001", "state": "serving", "weight": 100,
+          "services": [ { "name": "web", "type": "loadbalancer",
+                          "servers": [ { "url": "http://10.89.0.21:3000" } ] } ] }
+      ]
+    }
+  ]
+}
