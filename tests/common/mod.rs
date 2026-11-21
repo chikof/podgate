@@ -304,6 +304,11 @@ impl Podgate {
         std::fs::read_to_string(self.dir.join("podgate.log")).unwrap_or_default()
     }
 
+    /// The process id of the running `podgate`, for a test that reads its `/proc` entry.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// The address of the entry point called `name`.
     pub fn entry_addr(&self, name: &str) -> SocketAddr {
         self.listeners
@@ -452,11 +457,6 @@ impl Podgate {
                 .collect::<Vec<_>>(),
             self.child.id()
         ))
-    }
-
-    /// The process id of the podgate under test.
-    pub fn pid(&self) -> u32 {
-        self.child.id()
     }
 
     /// `GET path` on the admin socket.

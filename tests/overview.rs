@@ -548,6 +548,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"pem": true, "info": {"subject": {"common_name": true}}}),
         ),
         ("compress", json!({})),
+        (
+            "grpc_web",
+            json!({"allow_origins": ["https://app.example.com"]}),
+        ),
         ("ip_allow_list", json!({"source_range": ["203.0.113.0/24"]})),
         (
             "rate_limit",

@@ -165,7 +165,7 @@ struct Compiled {
 
 /// CORS, validated: what the response and the preflight carry, and which origins get them.
 #[derive(Debug)]
-struct CompiledCors {
+pub(crate) struct CompiledCors {
     any: bool,
     exact: BTreeSet<String>,
     regexes: Vec<Regex>,
@@ -386,7 +386,7 @@ fn token_list(
     value(what, &items.join(", ")).map(Some)
 }
 
-fn cors(config: &Cors) -> Result<CompiledCors, Invalid> {
+pub(crate) fn cors(config: &Cors) -> Result<CompiledCors, Invalid> {
     if config.allow_origins.is_empty() && config.allow_origin_regexes.is_empty() {
         return Err(invalid(
             "cors needs `allow_origins` or `allow_origin_regexes`",
@@ -439,7 +439,7 @@ fn cors(config: &Cors) -> Result<CompiledCors, Invalid> {
 impl CompiledCors {
     /// The `Access-Control-Allow-Origin` value for `origin`: `*` when any origin is allowed,
     /// otherwise the origin itself, and only when the configuration names it.
-    fn allow(&self, origin: &str) -> Option<HeaderValue> {
+    pub(crate) fn allow(&self, origin: &str) -> Option<HeaderValue> {
         if self.any {
             return Some(HeaderValue::from_static("*"));
         }
@@ -448,7 +448,10 @@ impl CompiledCors {
         listed.then(|| HeaderValue::from_str(origin).ok()).flatten()
     }
 
-    fn preflight(&self, allow_origin: HeaderValue) -> pingora::Result<Box<ResponseHeader>> {
+    pub(crate) fn preflight(
+        &self,
+        allow_origin: HeaderValue,
+    ) -> pingora::Result<Box<ResponseHeader>> {
         let mut head = ResponseHeader::build(204, Some(8))?;
         head.insert_header("access-control-allow-origin", allow_origin)?;
         self.credentials_header(&mut head)?;
@@ -474,10 +477,33 @@ impl CompiledCors {
         }
         Ok(())
     }
+
+    /// What a response to a request from an allowed origin carries: the allowed origin, the
+    /// credentials flag and the exposed headers.
+    pub(crate) fn apply(
+        &self,
+        response: &mut ResponseHeader,
+        allow_origin: HeaderValue,
+    ) -> pingora::Result<()> {
+        response.insert_header("access-control-allow-origin", allow_origin)?;
+        self.credentials_header(response)?;
+        if let Some(expose) = &self.expose {
+            response.insert_header("access-control-expose-headers", expose.clone())?;
+        }
+        Ok(())
+    }
+
+    /// Adds `Vary: Origin` when the configuration says responses depend on the origin.
+    pub(crate) fn add_vary(&self, response: &mut ResponseHeader) -> pingora::Result<()> {
+        if self.vary {
+            vary(response, "Origin")?;
+        }
+        Ok(())
+    }
 }
 
 /// The request's only `Origin` header, when it has exactly one and it is plain ASCII.
-fn single_origin(request: &RequestHeader) -> Option<&str> {
+pub(crate) fn single_origin(request: &RequestHeader) -> Option<&str> {
     let mut all = request.headers.get_all("origin").iter();
     let first = all.next()?;
     if all.next().is_some() {
@@ -486,7 +512,7 @@ fn single_origin(request: &RequestHeader) -> Option<&str> {
     first.to_str().ok()
 }
 
-fn is_preflight(request: &RequestHeader) -> bool {
+pub(crate) fn is_preflight(request: &RequestHeader) -> bool {
     request.method == Method::OPTIONS
         && request
             .headers
@@ -575,15 +601,9 @@ impl Kind for Headers {
         }
         if let Some(cors) = &self.rest.cors {
             if let Some(allow_origin) = state.allow_origin.take() {
-                response.insert_header("access-control-allow-origin", allow_origin)?;
-                cors.credentials_header(response)?;
-                if let Some(expose) = &cors.expose {
-                    response.insert_header("access-control-expose-headers", expose.clone())?;
-                }
+                cors.apply(response, allow_origin)?;
             }
-            if cors.vary {
-                vary(response, "Origin")?;
-            }
+            cors.add_vary(response)?;
         }
         Ok(())
     }

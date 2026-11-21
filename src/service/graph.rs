@@ -359,6 +359,28 @@ fn visit<'a>(graph: &'a dyn Graph, node: Node, walk: &mut Walk<'a>) -> Result<()
     Ok(())
 }
 
+/// The first service reachable from `node` that cannot carry gRPC, with its name and why: every
+/// leaf below a `weighted` or `failover` service counts (both of a `failover`'s, the children of
+/// a `weighted` that have weight; a child of weight `0` is never chosen). `None` when every
+/// reachable leaf speaks HTTP/2.
+pub(crate) fn http2_refusal(graph: &dyn Graph, node: Node, depth: usize) -> Option<(&str, String)> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let named = graph.named(node)?;
+    if named.service.is_graph() {
+        return graph
+            .links(node)
+            .iter()
+            .filter(|link| link.weight > 0)
+            .find_map(|link| http2_refusal(graph, link.node, depth + 1));
+    }
+    named
+        .service
+        .http2_refusal()
+        .map(|reason| (&*named.name, reason))
+}
+
 /// Whether the service at `node` can ever take a request: it has a server, or is a `static`
 /// service. A `weighted` service needs a child with weight that is backed, a `failover` its
 /// primary: a primary without servers is asleep, and the fallback must not hide that.

@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::{HeaderValue, Method};
+use http::{HeaderMap, HeaderValue, Method};
 use pingora::Error;
 use pingora::ErrorSource;
 use pingora::ErrorType::{
@@ -851,6 +851,7 @@ impl ProxyHttp for Gateway {
                 settings,
             );
         }
+        let mut complete = None;
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             middleware::run_response(
                 app.stages(),
@@ -858,11 +859,48 @@ impl ProxyHttp for Gateway {
                 upstream_response,
                 &mut ctx.chain,
             )?;
+            complete =
+                middleware::run_response_complete(app.stages(), router.chain(), &mut ctx.chain);
+        }
+        // A head that is all the upstream sent (a gRPC trailers-only response) ends the stream
+        // before any body task exists, so no body hook could add the body a stage needs. Like an
+        // error page, it is written here and the request then ends with an error Pingora does
+        // not send.
+        if let Some(body) = complete {
+            let mut head = upstream_response.clone();
+            // As Pingora does for every response it forwards from an HTTP/2 upstream.
+            head.set_version(http::Version::HTTP_11);
+            session.write_response_header(Box::new(head), false).await?;
+            session.write_response_body(Some(body), true).await?;
+            ctx.error_page = errors::Attempt::Replaced;
+            return Err(Error::explain(
+                HTTPStatus(status),
+                "completed by a middleware",
+            ));
         }
         // Last, so a Cache-Control that the chain set counts: see `shared_cacheable`.
         skew::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         sticky::set_cookie(session, &ctx.table, ctx.route.as_ref(), upstream_response)?;
         Ok(())
+    }
+
+    async fn response_trailer_filter(
+        &self,
+        _session: &mut Session,
+        trailers: &mut HeaderMap,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<Option<Bytes>> {
+        Ok(ctx
+            .matched
+            .and_then(|matched| ctx.table.router(matched))
+            .and_then(|(app, router)| {
+                middleware::run_response_trailers(
+                    app.stages(),
+                    router.chain(),
+                    trailers,
+                    &mut ctx.chain,
+                )
+            }))
     }
 
     fn response_body_filter(
@@ -1106,6 +1144,16 @@ impl ProxyHttp for Gateway {
             let counted =
                 middleware::run_request_body(app.stages(), router.chain(), read, &mut ctx.chain);
             if let Err(err) = counted {
+                return Err(respond::abort(session, &err).await);
+            }
+            let chunk = middleware::run_request_body_chunk(
+                app.stages(),
+                router.chain(),
+                body,
+                end_of_stream,
+                &mut ctx.chain,
+            );
+            if let Err(err) = chunk {
                 return Err(respond::abort(session, &err).await);
             }
         }

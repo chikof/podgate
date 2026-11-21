@@ -320,7 +320,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
-    let apps = snapshot
+    let apps: Vec<CompiledApp> = snapshot
         .apps
         .iter()
         .zip(routers)
@@ -349,11 +349,56 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             },
         )
         .collect();
+    let refused = grpc_needs_http2(snapshot, &apps);
+    if !refused.is_empty() {
+        return Err(CompileError::Rejected(refused));
+    }
     Ok(Built {
         apps,
         certificates: CertStore::build(&snapshot.certificates)?,
         acme: Plan::compile(snapshot, &claims)?,
     })
+}
+
+/// gRPC cannot be spoken over HTTP/1.1, so a router whose chain has a `grpc_web` stage may only
+/// reach services that speak HTTP/2 in every revision that takes requests.
+fn grpc_needs_http2(snapshot: &Snapshot, apps: &[CompiledApp]) -> Vec<Rejected> {
+    let mut rejected = Vec::new();
+    for (app, compiled) in snapshot.apps.iter().zip(apps) {
+        for (router_index, router) in compiled.routers().iter().enumerate() {
+            let Some(stage) = router
+                .chain()
+                .iter()
+                .filter_map(|index| compiled.stages().get(*index))
+                .find(|named| matches!(named.stage, Stage::GrpcWeb(_)))
+            else {
+                continue;
+            };
+            for (revision_index, revision) in compiled.revisions().iter().enumerate() {
+                if revision.state() == RevisionState::Draining {
+                    continue;
+                }
+                let Some((leaf, reason)) = compiled
+                    .root(revision_index, router_index)
+                    .and_then(|root| service::graph::http2_refusal(compiled, root, 0))
+                else {
+                    continue;
+                };
+                rejected.push(Rejected::new(
+                    app,
+                    format!("router {} revision {}", router.name(), revision.id()),
+                    Invalid::new(
+                        "invalid_middleware",
+                        format!(
+                            "middleware {} (grpc_web) needs an HTTP/2 upstream, and service {leaf} {reason}",
+                            stage.name
+                        ),
+                    ),
+                ));
+            }
+        }
+    }
+    rejected
 }
 
 /// A digest of everything the app declares except where it was declared.

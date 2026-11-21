@@ -679,6 +679,18 @@ impl LoadBalancer {
         }
     }
 
+    /// The first server declared that cannot speak HTTP/2: a plain `http://` one, or an
+    /// `https://` one whose transport says `http2: false`. An `h2c://` server and an `https://`
+    /// server that is offered `h2` can; a gRPC route needs every server to.
+    #[must_use]
+    pub fn http1_only_server(&self) -> Option<&str> {
+        let offered = !self.transport.disables_http2();
+        self.entries
+            .iter()
+            .find(|entry| !(entry.h2c || (entry.tls && offered)))
+            .map(|entry| &*entry.url)
+    }
+
     /// The address of the server a new request goes to, with the [`Lease`] that counts the
     /// request on it until dropped. Lock-free and allocation-free.
     #[must_use]

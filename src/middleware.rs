@@ -50,6 +50,7 @@ pub mod content_type;
 pub mod digest_auth;
 pub mod errors;
 pub mod forward_auth;
+pub mod grpc_web;
 pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
@@ -398,6 +399,43 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Runs on every chunk of the request body the proxy reads from the client, in chain order,
+    /// after the counting hooks. May rewrite the chunk and may refuse the request; the refusal
+    /// is written as the response when none was written yet. A chunk with nothing left is
+    /// `Some` of no bytes, never `None`: `None` ends the upstream request.
+    ///
+    /// # Errors
+    ///
+    /// The [`AppError`] that ends the request.
+    fn request_body_chunk(
+        &self,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        _state: &mut Self::State,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    /// Runs on the upstream's response trailers, last stage first. Returns the last bytes of the
+    /// body when the trailers become part of it: the trailers are then not sent as trailers, and
+    /// the chain's body hooks do not see these bytes. The first stage that returns some ends the
+    /// run.
+    fn response_trailers(
+        &self,
+        _trailers: &mut http::HeaderMap,
+        _state: &mut Self::State,
+    ) -> Option<Bytes> {
+        None
+    }
+
+    /// Runs once the response head has passed every response hook, last stage first, for a head
+    /// that is all the upstream sent (no body will follow). Returns the body that completes the
+    /// response: the proxy writes the head and this body itself. The first stage that returns
+    /// some ends the run.
+    fn response_complete(&self, _state: &mut Self::State) -> Option<Bytes> {
+        None
+    }
+
     /// Runs on the upstream's response head before the client has seen any of it, in reverse
     /// chain order, ahead of [`Self::response`]. May refuse the response: the refusal is written
     /// instead of it.
@@ -703,6 +741,48 @@ macro_rules! kinds {
                 }
             }
 
+            fn request_body_chunk(
+                &self,
+                body: &mut Option<bytes::Bytes>,
+                end_of_stream: bool,
+                state: &mut StageState,
+            ) -> Result<(), $crate::error::AppError> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::request_body_chunk(kind, body, end_of_stream, state)
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
+
+            fn response_trailers(
+                &self,
+                trailers: &mut http::HeaderMap,
+                state: &mut StageState,
+            ) -> Option<bytes::Bytes> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_trailers(kind, trailers, state)
+                        }
+                    )*
+                    _ => None,
+                }
+            }
+
+            fn response_complete(&self, state: &mut StageState) -> Option<bytes::Bytes> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_complete(kind, state)
+                        }
+                    )*
+                    _ => None,
+                }
+            }
+
             async fn response_page(
                 &self,
                 cx: &$crate::middleware::PageCx<'_>,
@@ -771,7 +851,7 @@ kinds! {
 
     "pass_tls_client_cert" => PassTlsClientCert(pass_tls_client_cert::PassTlsClientCert),
 
-    "grpc_web" => unbuilt,
+    "grpc_web" => GrpcWeb(grpc_web::GrpcWeb),
 
     "respond" => Respond(respond::Respond),
 }
@@ -839,6 +919,8 @@ schemas! {
     "respond" => respond::Config,
 
     "pass_tls_client_cert" => pass_tls_client_cert::Config,
+
+    "grpc_web" => grpc_web::Config,
 }
 
 /// A compiled middleware and the name it was declared under.
@@ -1160,6 +1242,62 @@ pub fn run_response_head(
         }
     }
     Ok(())
+}
+
+/// Runs the request-body chunk hooks of `chain` on one chunk, in chain order.
+///
+/// # Errors
+///
+/// The first refusal a hook returns.
+pub fn run_request_body_chunk(
+    stages: &[Named],
+    chain: &[usize],
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    state: &mut State,
+) -> Result<(), AppError> {
+    for (position, index) in chain.iter().enumerate() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.request_body_chunk(body, end_of_stream, slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs the trailer hooks of `chain`, last stage first: the last bytes of the body the first
+/// stage that takes the trailers into the body returns, `None` when the trailers go on as they
+/// are.
+pub fn run_response_trailers(
+    stages: &[Named],
+    chain: &[usize],
+    trailers: &mut http::HeaderMap,
+    state: &mut State,
+) -> Option<Bytes> {
+    chain
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(position, index)| {
+            let (named, slot) = (stages.get(*index)?, state.stages.get_mut(position)?);
+            named.stage.response_trailers(trailers, slot)
+        })
+}
+
+/// Runs the completion hooks of `chain`, last stage first: the body that completes a response
+/// whose head is all the upstream sent, `None` when the head stands alone.
+pub fn run_response_complete(
+    stages: &[Named],
+    chain: &[usize],
+    state: &mut State,
+) -> Option<Bytes> {
+    chain
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(position, index)| {
+            let (named, slot) = (stages.get(*index)?, state.stages.get_mut(position)?);
+            named.stage.response_complete(slot)
+        })
 }
 
 /// Runs the page hooks of `chain` for a response with status `cx.status`, last stage first, and

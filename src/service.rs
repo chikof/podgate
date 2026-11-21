@@ -403,6 +403,23 @@ impl Service {
         }
     }
 
+    /// Why this service cannot carry gRPC, which needs HTTP/2 to the upstream; `None` when it
+    /// can. A `weighted` or `failover` service has no server of its own and answers `None` here:
+    /// `graph::http2_refusal` asks every service reachable below it, and names the one that
+    /// refuses.
+    #[must_use]
+    pub fn http2_refusal(&self) -> Option<String> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.http1_only_server().map(|url| {
+                format!(
+                    "has the server {url}, which is reached over HTTP/1.1 (use `h2c://`, or `https://` with a transport that does not set `http2: false`)"
+                )
+            }),
+            Self::Static(_) => Some("is a static service, which answers no gRPC".to_owned()),
+            Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+        }
+    }
+
     /// The address of the server a new request goes to and the [`Lease`] that counts the request
     /// on it, or `None` when no server can take it. Keep the lease until the request is done.
     /// A `weighted` or `failover` service picks nothing by itself: its children are in the
