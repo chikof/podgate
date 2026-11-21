@@ -57,6 +57,44 @@ impl Drop for Daemon {
     }
 }
 
+/// Whether process `pid` has a TCP socket listening on loopback `port`.
+///
+/// A copy of the TCP half of `listens` in the daemon's own `tests/common/mod.rs`: Pingora reports
+/// ready (and `/readyz` answers 200) before its listeners are bound, so readiness alone does not
+/// mean the proxy accepts connections. Matching on the pid keeps another process that holds the
+/// port from counting.
+fn listens(pid: u32, port: u16) -> bool {
+    let wanted = format!(":{port:04X}");
+    let inodes: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|table| std::fs::read_to_string(table).ok())
+        .flat_map(|table| {
+            table
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let columns: Vec<&str> = line.split_whitespace().collect();
+                    // Columns: sl, local_address, rem_address, st, ..., inode (index 9).
+                    let local = columns.get(1)?;
+                    let state = columns.get(3)?;
+                    (*state == "0A" && local.ends_with(&wanted))
+                        .then(|| format!("socket:[{}]", columns.get(9).copied().unwrap_or("")))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.filter_map(Result::ok)
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .any(|target| {
+            inodes
+                .iter()
+                .any(|inode| target.to_string_lossy() == *inode)
+        })
+}
+
 async fn http(
     stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
     request: &str,
@@ -144,7 +182,11 @@ impl Daemon {
                     "GET /readyz HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n",
                 )
                 .await;
-                if status == 200 {
+                // `/readyz` alone is not enough (see `listens`): wait for the listeners too.
+                if status == 200
+                    && listens(self.child.id(), self.proxy.port())
+                    && listens(self.child.id(), self.tls.port())
+                {
                     return true;
                 }
             }
