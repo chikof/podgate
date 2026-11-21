@@ -27,7 +27,11 @@ const USAGE: &str = "usage: podgate-provider <run|print|check> --config <file>
 
 usage: podgate-provider print-crd (--socket <admin socket> | --schema <file>) [--out <dir>] [--save-schema <file>]
 
-  print-crd   generate the PodgateRoute and PodgateMiddleware CRDs from the daemon's GET /v1/schema";
+  print-crd   generate the PodgateRoute and PodgateMiddleware CRDs from the daemon's GET /v1/schema
+
+usage: podgate-provider convert-traefik [--lenient] <file>...
+
+  convert-traefik   convert Traefik dynamic configuration files to the file source format";
 
 #[derive(Clone, Copy)]
 enum Command {
@@ -173,6 +177,15 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         };
+    }
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("convert-traefik") {
+        let code = podgate_provider::traefik_file::cli::run(
+            &args[2..],
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+        return ExitCode::from(code);
     }
     let (command, config) = match parse_args(std::env::args()) {
         Ok(parsed) => parsed,

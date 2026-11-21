@@ -1,0 +1,40 @@
+# Kinds the shop does not use, and the UDP side. Converted, not served.
+http:
+  routers:
+    cert:
+      rule: Host(`mtls.test`)
+      service: backend
+      middlewares: [client-cert, digest, web]
+      tls: {}
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: h2c://127.0.0.1:9100
+  middlewares:
+    client-cert:
+      passTLSClientCert:
+        pem: true
+        info:
+          notAfter: true
+          subject:
+            commonName: true
+          issuer:
+            organization: true
+    digest:
+      digestAuth:
+        users: ["alice:traefik:0123456789abcdef0123456789abcdef"]
+        removeHeader: true
+    web:
+      grpcWeb:
+        allowOrigins: ["https://app.mtls.test"]
+udp:
+  routers:
+    dns:
+      entryPoints: [dns]
+      service: resolvers
+  services:
+    resolvers:
+      loadBalancer:
+        servers:
+          - address: 10.0.0.5:53

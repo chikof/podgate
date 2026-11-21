@@ -3005,6 +3005,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]

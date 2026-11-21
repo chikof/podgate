@@ -1,0 +1,143 @@
+# A representative Traefik dynamic configuration: what a shop behind Traefik would have.
+http:
+  routers:
+    api:
+      rule: Host(`shop.test`) && PathPrefix(`/api`)
+      entryPoints: [web]
+      service: shop
+      middlewares: [strip-api, guard@file]
+    site:
+      rule: Host(`shop.test`)
+      entryPoints: [websecure]
+      service: split
+      middlewares: [site-chain]
+      tls:
+        certResolver: le
+    static:
+      rule: Host(`static.shop.test`)
+      service: pages
+      middlewares: [site-chain]
+      priority: 7
+      observability:
+        accessLogs: false
+  services:
+    shop:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: http://127.0.0.1:9001
+            weight: 3
+          - url: http://127.0.0.1:9002
+        healthCheck:
+          path: /healthz
+          interval: 10s
+          timeout: 3s
+        sticky:
+          cookie:
+            name: shop_node
+            secure: true
+    secure:
+      loadBalancer:
+        servers:
+          - url: https://127.0.0.1:9005
+        serversTransport: internal@file
+    canary:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:9003
+    split:
+      weighted:
+        services:
+          - name: shop
+            weight: 9
+          - name: canary
+            weight: 1
+    pages:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:9004
+    mirrored:
+      mirroring:
+        service: shop
+        maxBodySize: 65536
+        mirrors:
+          - name: canary
+            percent: 10
+    safe:
+      failover:
+        service: shop
+        fallback: canary
+        healthCheck: {}
+  middlewares:
+    strip-api:
+      stripPrefix:
+        prefixes: [/api]
+    guard:
+      chain:
+        middlewares: [limit, office]
+    limit:
+      rateLimit:
+        average: 100
+        burst: 50
+    office:
+      ipAllowList:
+        sourceRange: [10.0.0.0/8, 192.168.0.0/16]
+    site-chain:
+      chain:
+        middlewares: [compress, security, sso, cap, uploads, error-pages, plain]
+    compress:
+      compress: {}
+    security:
+      headers:
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Powered-By: ""
+    sso:
+      forwardAuth:
+        address: http://127.0.0.1:9091/verify
+        trustForwardHeader: true
+        authResponseHeaders: [X-User, X-Groups]
+    cap:
+      inFlightReq:
+        amount: 20
+        sourceCriterion:
+          requestHeaderName: X-Api-Key
+    uploads:
+      buffering:
+        maxRequestBodyBytes: 32768
+        maxResponseBodyBytes: 1048576
+    error-pages:
+      errors:
+        status: ["500-599", "404"]
+        service: pages
+        query: "/{status}.html"
+    plain:
+      contentType:
+        autoDetect: false
+  serversTransports:
+    internal:
+      serverName: backend.internal
+      forwardingTimeouts:
+        dialTimeout: 5s
+        idleConnTimeout: 90s
+tcp:
+  routers:
+    db:
+      rule: HostSNI(`db.shop.test`) && ALPN(`postgresql`)
+      entryPoints: [edge]
+      service: pg
+      middlewares: [db-office]
+      tls:
+        passthrough: true
+  services:
+    pg:
+      loadBalancer:
+        terminationDelay: 200ms
+        proxyProtocol:
+          version: 2
+        servers:
+          - address: 127.0.0.1:5432
+  middlewares:
+    db-office:
+      ipAllowList:
+        sourceRange: [10.0.0.0/8]

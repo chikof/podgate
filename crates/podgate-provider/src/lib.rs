@@ -21,6 +21,8 @@
 //!   called by the sources next to their own labels.
 //! - [`nomad`]: the source that turns Nomad service registrations into apps through their
 //!   `podgate.*` tags.
+//! - [`traefik_file`]: the converter of Traefik dynamic configuration files (YAML or TOML), also the
+//!   `convert-traefik` command.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -40,6 +42,7 @@ pub mod push;
 pub mod quarantine;
 pub mod source;
 pub mod traefik;
+pub mod traefik_file;
 pub mod trust;
 
 pub use config::{Config, ConfigError};
