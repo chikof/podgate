@@ -175,7 +175,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Validate without applying | none | `caddy validate` | built (`POST /v1/snapshot/validate`, the same compile as the push), plan built |
 | Explain a route | none | none | built, extended by 0022 |
 | Read-only overview API | `/api/*` | admin API | built (one document with filters and a cursor, 4 MiB cap, no secrets, `GET` only; `summary.writer` shows the pinned writer) |
-| Dashboard (web UI) | `dashboard` | none | 0088 (embedded, read-only, separate listener, never shows events or secrets) |
+| Dashboard (web UI) | `dashboard` | none | Built: embedded, read-only, separate listener, Host check and optional Basic auth, never shows events or secrets (`docs/ref/dashboard.md`) |
 | Config reload without dropping connections | yes | yes | built (atomic swap) |
 | Auto-revert of a bad config | none | none | built |
 | Benchmark against both | n/a | n/a | 0020 |
