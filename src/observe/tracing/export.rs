@@ -372,6 +372,32 @@ pub(super) enum Failure {
     Refused(String),
 }
 
+/// Encodes `batch` as requests of at most `limit` bytes each, splitting it in halves as often as
+/// needed, in order. Returns each request as its span count and body, and the number of spans
+/// that alone exceed `limit` and so cannot be sent.
+fn split_requests(
+    service_name: &str,
+    batch: Vec<Span>,
+    limit: usize,
+) -> (Vec<(usize, Bytes)>, usize) {
+    let mut requests = Vec::new();
+    let mut oversized = 0;
+    let mut work = vec![batch];
+    while let Some(mut batch) = work.pop() {
+        let body = otlp::encode(service_name, &batch);
+        if body.len() <= limit {
+            requests.push((batch.len(), Bytes::from(body)));
+        } else if batch.len() > 1 {
+            let upper = batch.split_off(batch.len() / 2);
+            work.push(upper);
+            work.push(batch);
+        } else {
+            oversized += batch.len();
+        }
+    }
+    (requests, oversized)
+}
+
 /// The wire spans go out on.
 enum Wire {
     Http {
@@ -543,24 +569,16 @@ impl TraceService {
     /// Sends `batch`, split until each request fits [`MAX_MESSAGE`]; counts the spans exported or
     /// lost.
     async fn export(&self, batch: Vec<Span>, attempts: u32) {
-        let mut work = vec![batch];
-        while let Some(mut batch) = work.pop() {
-            let body = otlp::encode(&self.service_name, &batch);
-            if body.len() > MAX_MESSAGE {
-                if batch.len() > 1 {
-                    let upper = batch.split_off(batch.len() / 2);
-                    work.push(upper);
-                    work.push(batch);
-                } else {
-                    self.tracer.lost(batch.len());
-                    ::tracing::warn!(
-                        "dropped a span: it alone is larger than the 4 MiB message limit"
-                    );
-                }
-                continue;
-            }
-            self.export_one(batch.len(), Bytes::from(body), attempts)
-                .await;
+        let (requests, oversized) = split_requests(&self.service_name, batch, MAX_MESSAGE);
+        if oversized > 0 {
+            self.tracer.lost(oversized);
+            ::tracing::warn!(
+                spans = oversized,
+                "dropped spans: each alone is larger than the 4 MiB message limit"
+            );
+        }
+        for (count, body) in requests {
+            self.export_one(count, body, attempts).await;
         }
     }
 
@@ -812,5 +830,95 @@ mod test {
         ])
         .expect_err("a path on a gRPC endpoint");
         assert_eq!(err.var, "OTEL_EXPORTER_OTLP_ENDPOINT");
+    }
+
+    fn span(id: u8, name_len: usize) -> Span {
+        use super::super::context::{SpanId, TraceId};
+        use super::super::span::Kind;
+        Span {
+            trace_id: TraceId([1; 16]),
+            span_id: SpanId([id; 8]),
+            parent: None,
+            trace_state: None,
+            name: "n".repeat(name_len).into(),
+            kind: Kind::Server,
+            start_unix_nanos: 1,
+            end_unix_nanos: 2,
+            attributes: Vec::new(),
+            error: false,
+        }
+    }
+
+    /// The span ids of an encoded request, in order.
+    fn ids(body: &[u8]) -> Vec<u8> {
+        use prost::Message;
+        otlp::ExportTraceServiceRequest::decode(body)
+            .expect("decodes")
+            .resource_spans
+            .iter()
+            .flat_map(|resource| &resource.scope_spans)
+            .flat_map(|scope| &scope.spans)
+            .map(|span| span.span_id[0])
+            .collect()
+    }
+
+    #[test]
+    fn request_split_halves_a_batch_just_over_the_limit() {
+        let batch: Vec<Span> = (1..=8).map(|id| span(id, 100)).collect();
+        let whole = otlp::encode("edge", &batch).len();
+
+        let (requests, oversized) = split_requests("edge", batch.clone(), whole);
+        assert_eq!(oversized, 0);
+        assert_eq!(requests.len(), 1, "a batch at the limit is one request");
+        assert_eq!(requests[0].0, 8);
+        assert_eq!(ids(&requests[0].1), (1..=8).collect::<Vec<u8>>());
+
+        let (requests, oversized) = split_requests("edge", batch, whole - 1);
+        assert_eq!(oversized, 0);
+        assert_eq!(requests.len(), 2, "one byte over splits it once");
+        let mut all = Vec::new();
+        for (count, body) in &requests {
+            assert!(body.len() < whole, "each half is under the limit");
+            let sent = ids(body);
+            assert_eq!(sent.len(), *count);
+            all.extend(sent);
+        }
+        assert_eq!(
+            all,
+            (1..=8).collect::<Vec<u8>>(),
+            "every span, in order, once"
+        );
+        assert_eq!((requests[0].0, requests[1].0), (4, 4));
+    }
+
+    #[test]
+    fn request_split_keeps_halving_until_every_request_fits() {
+        let batch: Vec<Span> = (1..=16).map(|id| span(id, 100)).collect();
+        let one = otlp::encode("edge", &batch[..1]).len();
+        let (requests, oversized) = split_requests("edge", batch, one + 10);
+        assert_eq!(oversized, 0);
+        assert_eq!(requests.len(), 16, "only single spans fit");
+        assert!(
+            requests
+                .iter()
+                .all(|(count, body)| *count == 1 && body.len() <= one + 10)
+        );
+        let all: Vec<u8> = requests.iter().flat_map(|(_, body)| ids(body)).collect();
+        assert_eq!(all, (1..=16).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn request_split_drops_and_counts_a_span_over_the_limit() {
+        let small = otlp::encode("edge", &[span(1, 10)]).len();
+        let limit = small + 20;
+        let (requests, oversized) =
+            split_requests("edge", vec![span(1, 10), span(2, 1000), span(3, 10)], limit);
+        assert_eq!(oversized, 1, "the big span alone exceeds the limit");
+        let all: Vec<u8> = requests.iter().flat_map(|(_, body)| ids(body)).collect();
+        assert_eq!(all, vec![1, 3], "the others are still sent");
+
+        let (requests, oversized) = split_requests("edge", vec![span(2, 1000)], limit);
+        assert!(requests.is_empty());
+        assert_eq!(oversized, 1);
     }
 }
