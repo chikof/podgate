@@ -137,9 +137,9 @@ A static service has no server, so there is no backend admission and no wake: th
 its revision slot and the tenant's in-flight slot, then is answered from `request_filter`. The
 router's middlewares run as for any router: request hooks (auth, rewrites, redirects) before, and
 the response hooks (`headers`, compression, failure capture) on the static response. A static
-service is never failed over. `mirroring` is not built yet; the spec that builds it must refuse
-a static service as a mirror source or target (`invalid_service`), because a copy of a request
-has no server to dial.
+service is never failed over. `mirroring` (`docs/ref/svc-mirroring.md`) refuses a static service
+as the mirrored service or as a mirror (`invalid_service`), because a copy of a request has no
+server to dial.
 
 Settings: `STATIC_ROOTS_FILE`, `STATIC_MAX_CONCURRENT_READS`; see the configuration table in
 `docs/architecture.md`.

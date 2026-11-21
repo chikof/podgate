@@ -227,7 +227,7 @@ impl Passive {
 fn passive_of(service: &Service) -> Option<&Passive> {
     match service {
         Service::LoadBalancer(balancer) => balancer.passive(),
-        Service::Static(_) => None,
+        Service::Static(_) | Service::Mirroring(_) => None,
     }
 }
 

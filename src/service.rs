@@ -1,9 +1,10 @@
 //! Services: where a routed request goes. A router names a service; the service picks a server.
 //!
-//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer` and `static`
-//! are built (a `static` service has no server: it answers from an operator-declared directory);
-//! `weighted`, `mirroring` and `failover` are planned and refused with `service_not_built`; any
-//! other type is `invalid_service`. A router's service is looked up in the revision the request
+//! A service is a [`podgate_model::Declared`] object of one `type`. `loadbalancer`, `static` and
+//! `mirroring` are built (a `static` service has no server: it answers from an operator-declared
+//! directory; a `mirroring` service has none either: the table routes to its main service and
+//! hands the copies to [`mirroring`]); `weighted` and `failover` are planned and refused with
+//! `service_not_built`; any other type is `invalid_service`. A router's service is looked up in the revision the request
 //! picked, then in the app's own services. Each kind lives in its own file:
 //!
 //! | Type | File |
@@ -29,7 +30,7 @@ mod failover;
 pub mod health;
 pub mod lb;
 mod loadbalancer;
-mod mirroring;
+pub mod mirroring;
 pub mod outlier;
 mod resolve;
 pub mod state;
@@ -48,6 +49,7 @@ use podgate_model::{Declared, SkewSecret};
 pub use lb::PickCx;
 pub(crate) use lb::RingBudget;
 pub use loadbalancer::{LoadBalancer, Server};
+pub use mirroring::Mirroring;
 pub(crate) use state::Registry;
 pub use state::{Lease, ServerState, ServiceState};
 pub(crate) use static_files::serve as serve_static;
@@ -61,12 +63,12 @@ pub use transport::{
 };
 
 /// Service types that are planned and not built yet.
-pub const UNBUILT: [&str; 3] = ["weighted", "mirroring", "failover"];
+pub const UNBUILT: [&str; 2] = ["weighted", "failover"];
 
 /// Every service type `Service::compile` builds. `compile` refuses a type that is not listed here
 /// before it looks at its arms, so an arm for a new type is dead until its name is listed; the
 /// schema guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
-pub const BUILT: [&str; 2] = ["loadbalancer", "static"];
+pub const BUILT: [&str; 3] = ["loadbalancer", "static", "mirroring"];
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built type, whose
 /// configuration struct derives `schemars::JsonSchema`. Keep one entry per line, a blank line
@@ -86,6 +88,8 @@ schemas! {
     "loadbalancer" => loadbalancer::Config,
 
     "static" => static_files::Config,
+
+    "mirroring" => mirroring::Config,
 }
 
 /// The `type` of an upstream transport in a snapshot and its JSON Schema.
@@ -101,6 +105,8 @@ pub enum Service {
     LoadBalancer(Box<LoadBalancer>),
     /// `static`: files from an operator-declared directory. Has no server.
     Static(Arc<StaticSite>),
+    /// `mirroring`: copies of a share of the requests of another service. Has no server.
+    Mirroring(Box<Mirroring>),
 }
 
 /// A service and the name it was declared under.
@@ -140,6 +146,9 @@ impl Service {
             "static" => {
                 StaticSite::compile(declared, static_roots).map(|site| Self::Static(Arc::new(site)))
             }
+            "mirroring" => {
+                Mirroring::compile(declared).map(|mirroring| Self::Mirroring(Box::new(mirroring)))
+            }
             other => Err(Invalid::new(
                 "invalid_service",
                 format!("unknown service type {other}"),
@@ -153,6 +162,7 @@ impl Service {
         match self {
             Self::LoadBalancer(_) => "loadbalancer",
             Self::Static(_) => "static",
+            Self::Mirroring(_) => "mirroring",
         }
     }
 
@@ -161,7 +171,7 @@ impl Service {
     pub fn algorithm(&self) -> Option<&'static str> {
         match self {
             Self::LoadBalancer(balancer) => Some(balancer.algorithm()),
-            Self::Static(_) => None,
+            Self::Static(_) | Self::Mirroring(_) => None,
         }
     }
 
@@ -170,7 +180,7 @@ impl Service {
     pub fn has_health_check(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.health_check().is_some(),
-            Self::Static(_) => false,
+            Self::Static(_) | Self::Mirroring(_) => false,
         }
     }
 
@@ -179,7 +189,7 @@ impl Service {
     pub fn has_outlier_detection(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.passive().is_some(),
-            Self::Static(_) => false,
+            Self::Static(_) | Self::Mirroring(_) => false,
         }
     }
 
@@ -188,7 +198,7 @@ impl Service {
     pub fn servers(&self) -> &[Server] {
         match self {
             Self::LoadBalancer(balancer) => balancer.servers(),
-            Self::Static(_) => &[],
+            Self::Static(_) | Self::Mirroring(_) => &[],
         }
     }
 
@@ -198,7 +208,7 @@ impl Service {
     pub fn ring_points(&self) -> u64 {
         match self {
             Self::LoadBalancer(balancer) => balancer.ring_points(),
-            Self::Static(_) => 0,
+            Self::Static(_) | Self::Mirroring(_) => 0,
         }
     }
 
@@ -207,7 +217,7 @@ impl Service {
     pub fn sticky(&self) -> Option<&Sticky> {
         match self {
             Self::LoadBalancer(balancer) => balancer.sticky(),
-            Self::Static(_) => None,
+            Self::Static(_) | Self::Mirroring(_) => None,
         }
     }
 
@@ -224,7 +234,7 @@ impl Service {
     ) -> Result<(), Invalid> {
         match self {
             Self::LoadBalancer(balancer) => balancer.bind_sticky(secret, app, service),
-            Self::Static(_) => Ok(()),
+            Self::Static(_) | Self::Mirroring(_) => Ok(()),
         }
     }
 
@@ -246,7 +256,16 @@ impl Service {
     pub fn as_static(&self) -> Option<&Arc<StaticSite>> {
         match self {
             Self::Static(site) => Some(site),
-            Self::LoadBalancer(_) => None,
+            Self::LoadBalancer(_) | Self::Mirroring(_) => None,
+        }
+    }
+
+    /// The compiled `mirroring` service, or `None` for any other type.
+    #[must_use]
+    pub fn as_mirroring(&self) -> Option<&Mirroring> {
+        match self {
+            Self::Mirroring(mirroring) => Some(mirroring),
+            Self::LoadBalancer(_) | Self::Static(_) => None,
         }
     }
 
@@ -256,7 +275,7 @@ impl Service {
     pub fn upstream(&self, addr: SocketAddr) -> Option<Upstream<'_>> {
         match self {
             Self::LoadBalancer(balancer) => balancer.upstream(addr),
-            Self::Static(_) => None,
+            Self::Static(_) | Self::Mirroring(_) => None,
         }
     }
 
@@ -266,7 +285,7 @@ impl Service {
     pub fn skips_tls_verification(&self) -> bool {
         match self {
             Self::LoadBalancer(balancer) => balancer.skips_tls_verification(),
-            Self::Static(_) => false,
+            Self::Static(_) | Self::Mirroring(_) => false,
         }
     }
 
@@ -277,6 +296,8 @@ impl Service {
         match self {
             Self::LoadBalancer(balancer) => balancer.pick(cx),
             Self::Static(site) => Some((NO_SERVER, site.lease())),
+            // The table never routes a request to a mirroring service: it routes to its main.
+            Self::Mirroring(_) => None,
         }
     }
 }

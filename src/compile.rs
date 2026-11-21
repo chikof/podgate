@@ -30,6 +30,7 @@ use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
 use crate::router::{self, CompiledRouter, Tier};
+use crate::service::mirroring::{Plan as MirrorPlan, Scope as MirrorScope, Scopes as MirrorScopes};
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{self, NamedTransport, RingBudget, Service, TenantRoots, Transport};
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
@@ -801,6 +802,7 @@ fn services_of(
     rejected: &mut Vec<Rejected>,
 ) -> (Vec<service::Named>, Vec<CompiledRevision>) {
     let Limits { statics, rings } = limits;
+    let problems = rejected.len();
     // Once a cap on hash rings is exceeded the snapshot is rejected: the remaining services are
     // not built, so one push cannot make the proxy build rings without end.
     let compile =
@@ -817,6 +819,12 @@ fn services_of(
                     if let Some(site) = service.as_static()
                         && let Err(invalid) =
                             site.check_budget(&app.tenant, statics.max_buffer_bytes)
+                    {
+                        rejected.push(Rejected::new(app, at.as_str(), invalid));
+                    }
+                    if let Some(mirroring) = service.as_mirroring()
+                        && let Err(invalid) =
+                            mirroring.check_budget(&app.tenant, statics.max_buffer_bytes)
                     {
                         rejected.push(Rejected::new(app, at.as_str(), invalid));
                     }
@@ -848,39 +856,58 @@ fn services_of(
             )
         })
         .collect();
-    let shared_at: HashMap<&str, usize> = shared
+    let owns: Vec<Vec<service::Named>> = app
+        .revisions
         .iter()
-        .enumerate()
-        .map(|(index, named)| (&*named.name, index))
+        .map(|revision| {
+            revision
+                .services
+                .iter()
+                .filter_map(|declared| {
+                    compile(
+                        declared,
+                        format!("revision {} service {}", revision.id, declared.name),
+                        rings,
+                        rejected,
+                    )
+                })
+                .collect()
+        })
         .collect();
-    let mut revisions = Vec::with_capacity(app.revisions.len());
-    for revision in &app.revisions {
-        let own: Vec<service::Named> = revision
-            .services
-            .iter()
-            .filter_map(|declared| {
-                compile(
-                    declared,
-                    format!("revision {} service {}", revision.id, declared.name),
-                    rings,
-                    rejected,
-                )
-            })
-            .collect();
-        let own_at: HashMap<&str, usize> = own
-            .iter()
-            .enumerate()
-            .map(|(index, named)| (&*named.name, index))
-            .collect();
+    // Mirror names are resolved once every service of every revision exists, because `name@rev`
+    // reaches into another revision. A snapshot that already has a problem in this app is not
+    // resolved: its missing services would only add noise to the real error.
+    let resolvable = rejected.len() == problems && !rings.refused();
+    let scopes: Vec<MirrorScope<'_>> = app
+        .revisions
+        .iter()
+        .zip(&owns)
+        .map(|(revision, own)| MirrorScope {
+            id: &revision.id,
+            draining: revision.state == RevisionState::Draining,
+            own,
+        })
+        .collect();
+    let scoped = MirrorScopes {
+        shared: &shared,
+        revisions: &scopes,
+    };
+    let mut wiring = Vec::with_capacity(app.revisions.len());
+    for (at, revision) in app.revisions.iter().enumerate() {
+        let own = &owns[at];
+        let plans = mirror_plans(app, &scoped, at, resolvable, rejected);
         let mut routes = Vec::with_capacity(routers.len());
+        let mut mirrors = Vec::with_capacity(routers.len());
         for router in routers {
-            let found = own_at
-                .get(router.service())
-                .map(|index| ServiceRef::Own(*index))
+            let found = own
+                .iter()
+                .position(|named| &*named.name == router.service())
+                .map(ServiceRef::Own)
                 .or_else(|| {
-                    shared_at
-                        .get(router.service())
-                        .map(|index| ServiceRef::App(*index))
+                    shared
+                        .iter()
+                        .position(|named| &*named.name == router.service())
+                        .map(ServiceRef::App)
                 });
             if found.is_none() && revision.state != RevisionState::Draining && !rings.refused() {
                 rejected.push(Rejected::new(
@@ -895,7 +922,15 @@ fn services_of(
                     ),
                 ));
             }
-            routes.push(found);
+            // A router whose service mirrors is answered by the mirroring service's main.
+            let planned =
+                found.and_then(|found| plans.iter().find(|(declared, _)| *declared == found));
+            let plan = planned.and_then(|(_, plan)| plan.clone());
+            routes.push(match planned {
+                Some(_) => plan.as_ref().map(|plan| plan.main()),
+                None => found,
+            });
+            mirrors.push(plan);
         }
         let backed = routes.iter().flatten().any(|route| {
             match route {
@@ -904,9 +939,64 @@ fn services_of(
             }
             .is_some_and(|named| named.service.is_backed())
         });
-        revisions.push(CompiledRevision::new(revision, own, routes, backed));
+        wiring.push((routes, mirrors, backed));
     }
+    let revisions = app
+        .revisions
+        .iter()
+        .zip(owns)
+        .zip(wiring)
+        .map(|((revision, own), (routes, mirrors, backed))| {
+            CompiledRevision::new(revision, own, routes, mirrors, backed)
+        })
+        .collect();
     (shared, revisions)
+}
+
+/// Resolves every `mirroring` service of `app` for revision `at`: the plan for each, or none when
+/// the revision is `draining` and lacks its main service. A refusal is recorded when `resolvable`.
+fn mirror_plans(
+    app: &App,
+    scopes: &MirrorScopes<'_>,
+    at: usize,
+    resolvable: bool,
+    rejected: &mut Vec<Rejected>,
+) -> Vec<(ServiceRef, Option<Arc<MirrorPlan>>)> {
+    let Some(scope) = scopes.revisions.get(at) else {
+        return Vec::new();
+    };
+    let own = scope
+        .own
+        .iter()
+        .enumerate()
+        .map(|(index, named)| (ServiceRef::Own(index), named));
+    let shared = scopes
+        .shared
+        .iter()
+        .enumerate()
+        .map(|(index, named)| (ServiceRef::App(index), named));
+    own.chain(shared)
+        .filter_map(|(found, named)| Some((found, named, named.service.as_mirroring()?)))
+        .map(
+            |(found, named, mirroring)| match mirroring.resolve(scopes, at) {
+                Ok(plan) => (found, plan.map(Arc::new)),
+                Err(invalid) => {
+                    if resolvable {
+                        let at = match found {
+                            ServiceRef::Own(_) => {
+                                format!("revision {} service {}", scope.id, named.name)
+                            }
+                            ServiceRef::App(_) => {
+                                format!("service {} revision {}", named.name, scope.id)
+                            }
+                        };
+                        rejected.push(Rejected::new(app, at, invalid));
+                    }
+                    (found, None)
+                }
+            },
+        )
+        .collect()
 }
 
 /// Hashes anything that is `Hash`, for fingerprints that only need equality within a process.

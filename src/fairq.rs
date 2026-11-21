@@ -612,6 +612,18 @@ impl Backends {
         limiter
     }
 
+    /// Takes a slot of `addr`'s limiter only when one is free right now and nobody waits for it:
+    /// never queues, never waits. Background work (a mirrored copy of a request) uses this so it
+    /// can only consume what real traffic leaves unused.
+    #[must_use]
+    pub fn try_admit(&self, table: &RoutingTable, addr: SocketAddr) -> Option<Permit> {
+        let limiter = self.limiter(table, addr);
+        if limiter.queued() > 0 {
+            return None;
+        }
+        limiter.try_acquire()
+    }
+
     /// Admits a routed request to its backend: takes a slot of the picked upstream's limiter,
     /// waiting in the tenant's fair queue when the limit is reached.
     ///

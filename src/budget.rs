@@ -78,6 +78,24 @@ impl TenantBudget {
         })
     }
 
+    /// Takes an in-flight slot for background work (a mirrored copy of a request, see
+    /// [`crate::service`]'s `mirroring`) only while the tenant keeps a quarter of
+    /// `max_inflight` free for real requests, so background work is shed before any real request
+    /// is refused. A refusal is not counted as a rejected request.
+    #[must_use]
+    pub fn admit_background(self: &Arc<Self>) -> Option<TenantSlot> {
+        let limit = self.max_inflight.load(Ordering::Relaxed);
+        let ceiling = limit - limit / 4;
+        self.inflight
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |now| {
+                (now < ceiling).then_some(now + 1)
+            })
+            .ok()?;
+        Some(TenantSlot {
+            tenant: Arc::clone(self),
+        })
+    }
+
     /// Charges `bytes` of buffer memory, or returns `None` when that would pass
     /// `max_buffer_bytes`. Call it before allocating; the charge ends when the guard drops.
     #[must_use]

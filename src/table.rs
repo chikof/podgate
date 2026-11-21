@@ -124,6 +124,8 @@ pub struct CompiledRevision {
     services: Box<[service::Named]>,
     /// For each router of the app, in order: the service it uses in this revision.
     routes: Box<[Option<ServiceRef>]>,
+    /// For each router, in order: where the copies go when its service is a `mirroring` one.
+    mirrors: Box<[Option<Arc<service::mirroring::Plan>>]>,
     /// Whether some router's service here can answer: it has a server, or is a static service.
     backed: bool,
 }
@@ -133,6 +135,7 @@ impl CompiledRevision {
         revision: &Revision,
         services: Vec<service::Named>,
         routes: Vec<Option<ServiceRef>>,
+        mirrors: Vec<Option<Arc<service::mirroring::Plan>>>,
         backed: bool,
     ) -> Self {
         Self {
@@ -142,6 +145,7 @@ impl CompiledRevision {
             live: Arc::new(AtomicU16::new(0)),
             services: services.into_boxed_slice(),
             routes: routes.into_boxed_slice(),
+            mirrors: mirrors.into_boxed_slice(),
             backed,
         }
     }
@@ -492,6 +496,28 @@ impl CompiledApp {
     pub fn service(&self, revision: usize, router: usize) -> Option<&service::Service> {
         let revision = self.revisions.get(revision)?;
         match (*revision.routes.get(router)?)? {
+            ServiceRef::Own(index) => revision.services.get(index),
+            ServiceRef::App(index) => self.services.get(index),
+        }
+        .map(|named| &named.service)
+    }
+
+    /// Where the copies of a request go, when router `router`'s service in revision `revision`
+    /// is a `mirroring` service: its resolved mirrors and settings. `None` for any other service.
+    #[must_use]
+    pub fn mirror_plan(&self, revision: usize, router: usize) -> Option<&service::mirroring::Plan> {
+        self.revisions
+            .get(revision)?
+            .mirrors
+            .get(router)?
+            .as_deref()
+    }
+
+    /// The service a mirror of a [`Self::mirror_plan`] copies to.
+    #[must_use]
+    pub fn mirror_service(&self, target: &service::mirroring::Target) -> Option<&service::Service> {
+        let revision = self.revisions.get(target.revision)?;
+        match target.service {
             ServiceRef::Own(index) => revision.services.get(index),
             ServiceRef::App(index) => self.services.get(index),
         }

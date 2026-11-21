@@ -79,7 +79,7 @@ use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
 use crate::service::upstream_policy::UpstreamPolicy;
-use crate::service::{Lease, StaticReads, outlier, serve_static, sticky};
+use crate::service::{Lease, StaticReads, mirroring, outlier, serve_static, sticky};
 use crate::skew;
 use crate::sni;
 use crate::table::{RoutingTable, TableHandle};
@@ -151,6 +151,8 @@ pub struct Ctx {
     /// Whether an error page was tried for this response, the loop guard of the `errors`
     /// middleware.
     pub error_page: errors::Attempt,
+    /// What the request did about its mirrors.
+    pub mirror: mirroring::State,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -535,6 +537,7 @@ impl ProxyHttp for Gateway {
             metrics: metrics::InFlight::begin(&self.entry),
             trace: trace::State::default(),
             error_page: errors::Attempt::default(),
+            mirror: mirroring::State::default(),
         }
     }
 
@@ -753,7 +756,7 @@ impl ProxyHttp for Gateway {
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut RequestHeader,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
@@ -766,6 +769,14 @@ impl ProxyHttp for Gateway {
             )?;
         }
         ctx.trace.inject(upstream_request)?;
+        // Last: the copy of the request is the upstream request as it goes out.
+        mirroring::begin(
+            &self.backends,
+            &self.upstream_policy,
+            session,
+            upstream_request,
+            ctx,
+        );
         Ok(())
     }
 
@@ -909,6 +920,7 @@ impl ProxyHttp for Gateway {
                 .finish(&ctx.table, ctx.matched, ctx.route.is_some(), status);
         }
         self.finish_chain(session, error, ctx);
+        mirroring::finish(ctx);
         access_log::log(self.access_log.as_ref(), session, ctx);
         trace::finish(&self.tracer, session, error, ctx);
         ctx.compression = None;
@@ -999,10 +1011,17 @@ impl ProxyHttp for Gateway {
         &self,
         session: &mut Session,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         ctx.failures.request_chunk(body.as_ref());
+        mirroring::tee(
+            &self.backends,
+            &self.upstream_policy,
+            body.as_ref(),
+            end_of_stream,
+            ctx,
+        );
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             let read = u64::try_from(session.body_bytes_read()).unwrap_or(u64::MAX);
             let counted =
