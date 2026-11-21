@@ -86,6 +86,11 @@ fn document() -> Value {
             Vec::new(),
         ),
         (
+            "tcp_middleware",
+            crate::l4::middleware::schemas(),
+            Vec::new(),
+        ),
+        (
             "udp_service",
             vec![("loadbalancer", of::<crate::l4::udp::ServiceConfig>())],
             Vec::new(),

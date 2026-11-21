@@ -76,25 +76,36 @@ impl<T> Registry<T> {
     /// other keeps the fresh state compiled for it. Entries the new table does not have are
     /// dropped; requests that still hold them keep them.
     pub(crate) fn settle(&self, apps: &mut [CompiledApp], slot: Slot<T>) {
+        self.settle_entries(apps.iter_mut().flat_map(|app| {
+            let app_id: Box<str> = app.id().into();
+            app.stages_mut().iter_mut().filter_map(move |named| {
+                let (fingerprint, state) = slot(&mut named.stage)?;
+                Some((app_id.clone(), named.name.clone(), fingerprint, state))
+            })
+        }));
+    }
+
+    /// [`Self::settle`] over any middlewares of the new table, given as (app, name, fingerprint,
+    /// state): what a kind that lives outside the HTTP chain (the TCP middlewares of
+    /// [`crate::l4::middleware`]) uses.
+    pub(crate) fn settle_entries<'a>(
+        &self,
+        entries: impl Iterator<Item = (Box<str>, Box<str>, u64, &'a mut Arc<T>)>,
+    ) where
+        T: 'a,
+    {
         let mut settled = self.settled.lock().unwrap_or_else(PoisonError::into_inner);
         let mut kept = HashMap::new();
-        for app in apps {
-            let app_id: Box<str> = app.id().into();
-            for named in app.stages_mut() {
-                let name = named.name.clone();
-                let Some((fingerprint, state)) = slot(&mut named.stage) else {
-                    continue;
-                };
-                let key = Key {
-                    app: app_id.clone(),
-                    middleware: name,
-                    fingerprint,
-                };
-                if let Some(old) = settled.get(&key) {
-                    *state = Arc::clone(old);
-                }
-                kept.insert(key, Arc::clone(state));
+        for (app, middleware, fingerprint, state) in entries {
+            let key = Key {
+                app,
+                middleware,
+                fingerprint,
+            };
+            if let Some(old) = settled.get(&key) {
+                *state = Arc::clone(old);
             }
+            kept.insert(key, Arc::clone(state));
         }
         *settled = kept;
     }

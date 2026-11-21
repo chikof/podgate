@@ -104,7 +104,7 @@ On `GET /metrics`, in `podgate_l4_refused_total{reason}`, besides the reasons of
 
 ## How it is wired
 
-- `tcp::App::serve` (`src/l4/tcp/app.rs`) peeks, routes, charges, replays and terminates; `dial` and `copy::relay` are unchanged, so the PROXY header towards the server of change 0061 goes between `dial` and `relay`, before the ClientHello of a passthrough connection.
+- `tcp::App::serve` (`src/l4/tcp/app.rs`) peeks, routes, runs the router's `chain`, charges, replays and terminates. The PROXY header towards the server of change 0061 is written by the dial itself, before the first byte is copied, so it comes before the ClientHello of a passthrough connection (`docs/ref/l4-middleware.md`).
 - `src/l4/tls.rs`: `peek` (the 16 KiB, 5 second read through `crate::tls::hello::read_hello`), `Owners` (which tenant claims each name of a table), `Terminator` (the handshake).
 - The server name and ALPN reach the matcher through `View::hello` (`src/router/matcher.rs`), which is `Hello::NONE` for an HTTP request.
 - A passthrough connection is replayed with `Stream::rewind`, not `try_peek`: `try_peek` reads and rewinds too, but the hello reader needs several reads, so the bytes are collected and rewound once.

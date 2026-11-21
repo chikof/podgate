@@ -51,6 +51,10 @@ pub mod kind {
 /// name (`entry_point:web`); its `app` is empty.
 pub const ENTRY_POINT_PREFIX: &str = "entry_point:";
 
+/// What stands in the `host` of a [`PostureChange`] that is about the TCP routers of an app,
+/// followed by the app's id (`tcp:db`): a TCP router has no host. Its `app` is that app.
+pub const TCP_PREFIX: &str = "tcp:";
+
 /// One relaxation, for one host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PostureChange {
@@ -152,6 +156,26 @@ fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str>
     kinds
 }
 
+/// What got weaker in the TCP routers of an app: a TCP middleware removed or loosened,
+/// or a TCP service that no longer verifies its servers' certificates. A TCP router has no host,
+/// so these are listed under [`TCP_PREFIX`] and the app, not per host.
+fn l4_relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    let unverified = live.unverified_tcp_services();
+    if candidate
+        .unverified_tcp_services()
+        .iter()
+        .any(|name| !unverified.contains(name))
+    {
+        kinds.push(kind::UPSTREAM_TLS_VERIFICATION_DISABLED);
+    }
+    kinds.extend(crate::l4::middleware::relaxations(
+        live.l4().tcp(),
+        candidate.l4().tcp(),
+    ));
+    kinds
+}
+
 /// Diffs `candidate` against `live`.
 #[must_use]
 pub fn diff(live: &RoutingTable, candidate: &RoutingTable) -> Plan {
@@ -187,6 +211,22 @@ pub fn diff(live: &RoutingTable, candidate: &RoutingTable) -> Plan {
                         kind,
                     }),
             );
+    }
+    let live_apps: HashMap<&str, &CompiledApp> =
+        live.apps().iter().map(|app| (app.id(), app)).collect();
+    for app in candidate.apps() {
+        if let Some(previous) = live_apps.get(app.id()) {
+            plan.posture_changes
+                .extend(
+                    l4_relaxations(previous, app)
+                        .into_iter()
+                        .map(|kind| PostureChange {
+                            host: format!("{TCP_PREFIX}{}", app.id()).into(),
+                            app: app.id().into(),
+                            kind,
+                        }),
+                );
+        }
     }
     let mut entry_points: Vec<_> = candidate.forwarded_trusts().collect();
     entry_points.sort_unstable_by_key(|(name, _)| *name);

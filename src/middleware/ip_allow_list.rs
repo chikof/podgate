@@ -33,7 +33,7 @@ use crate::compile::Invalid;
 use podgate_model::Declared;
 
 /// Most blocks in `source_range`.
-const MAX_RANGES: usize = 4096;
+pub(crate) const MAX_RANGES: usize = 4096;
 
 /// Most blocks in `ip_strategy.excluded`: each is tested against every address of the chain.
 const MAX_EXCLUDED: usize = 64;

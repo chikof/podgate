@@ -37,9 +37,13 @@ pub(super) enum Refused {
     TlsPolicy,
     /// The client certificate did not satisfy the app's `client_auth`.
     ClientCert,
+    /// An `ip_allow_list` of the router's chain does not list the peer.
+    IpNotAllowed,
+    /// An `in_flight_conn` of the router's chain found the peer at its limit.
+    OverConnections,
 }
 
-const REFUSED: [(Refused, &str); 11] = [
+const REFUSED: [(Refused, &str); 13] = [
     (Refused::NoRoute, "no_route"),
     (Refused::OverInflight, "over_inflight"),
     (Refused::OverBudget, "over_budget"),
@@ -51,6 +55,8 @@ const REFUSED: [(Refused, &str); 11] = [
     (Refused::TlsHandshake, "tls_handshake"),
     (Refused::TlsPolicy, "tls_policy"),
     (Refused::ClientCert, "client_cert"),
+    (Refused::IpNotAllowed, "ip_not_allowed"),
+    (Refused::OverConnections, "in_flight_conn"),
 ];
 
 /// Why a connection that reached a server ended.
@@ -64,13 +70,16 @@ pub(super) enum Closed {
     Error,
     /// The process is stopping and the grace period ran out.
     Shutdown,
+    /// The client closed its side and the service's `termination_delay_ms` ran out.
+    Terminated,
 }
 
-const CLOSED: [(Closed, &str); 4] = [
+const CLOSED: [(Closed, &str); 5] = [
     (Closed::Done, "done"),
     (Closed::Idle, "idle"),
     (Closed::Error, "error"),
     (Closed::Shutdown, "shutdown"),
+    (Closed::Terminated, "termination_delay"),
 ];
 
 /// The counters.

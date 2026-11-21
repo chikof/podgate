@@ -7,9 +7,10 @@
 //! Each protocol owns its own module and adds one field to [`Compiled`] and one call to
 //! `compile` and `detect`:
 //!
-//! - [`tcp`]: TCP routers and services and TLS on TCP routers (with the
-//!   [`tls`] module). TCP middlewares are not built, and [`reject`] refuses a snapshot that
-//!   carries them with `l4_not_built`, so nothing is silently left unrouted.
+//! - [`tcp`]: TCP routers and services, TLS on TCP routers (with the
+//!   [`tls`] module), and change 0061: the TCP middlewares a router's `chain` runs
+//!   ([`middleware`]) and what a service does towards its servers, a PROXY protocol header,
+//!   upstream TLS and the termination delay ([`upstream`]).
 //! - [`udp`]: UDP routers and services. Built.
 //!
 //! What every L4 protocol needs is here: `reserve` checks that the entry point a router
@@ -19,9 +20,11 @@
 //! address and applies the upstream address policy.
 
 pub mod health;
+pub mod middleware;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
+pub mod upstream;
 
 use std::net::SocketAddr;
 
@@ -55,21 +58,6 @@ impl Compiled {
     pub fn udp(&self) -> &udp::Compiled {
         &self.udp
     }
-}
-
-/// The refusal for an app that declares TCP middlewares (not built), `None` when it declares
-/// none.
-#[must_use]
-pub fn reject(app: &App) -> Option<Invalid> {
-    app.tcp
-        .as_ref()
-        .is_some_and(|tcp| !tcp.middlewares.is_empty())
-        .then(|| {
-            Invalid::new(
-                "l4_not_built",
-                "TCP middlewares are planned and not built yet",
-            )
-        })
 }
 
 /// Compiles the L4 routers and services of `app`; every problem goes to `rejected`. `names`

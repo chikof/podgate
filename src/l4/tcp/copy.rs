@@ -3,7 +3,9 @@
 //! `tokio::io::copy_bidirectional_with_sizes` moves the bytes: one buffer of [`COPY_BUFFER`] for
 //! each direction, nothing else held, so the memory of a connection is the two buffers it
 //! charged. When one side sends FIN the copy shuts down the write half of the other and goes on
-//! with the opposite direction, which is the half-close of a real proxy.
+//! with the opposite direction, which is the half-close of a real proxy. After the client's FIN
+//! the server's direction has `termination_delay` more and is then cut, so a reply
+//! still on its way gets through and a server that never ends does not hold the connection.
 //!
 //! The client side is wrapped in [`Wire`], which stamps every byte that moves in either
 //! direction (the clock the idle timeout reads) and counts them. The copy is raced against that
@@ -19,16 +21,19 @@ use std::time::{Duration, Instant};
 use pingora::protocols::Stream;
 use pingora::server::ShutdownWatch;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
+use tokio::sync::Notify;
 use tokio::time::sleep;
 
 use super::COPY_BUFFER;
 use super::stats::{Closed, STATS};
 
-/// When the last byte moved, in milliseconds since the connection started.
+/// When the last byte moved, in milliseconds since the connection started, and the signal that
+/// the client has hung up.
 #[derive(Debug)]
 struct Clock {
     start: Instant,
     last_ms: AtomicU64,
+    hung_up: Notify,
 }
 
 impl Clock {
@@ -36,6 +41,7 @@ impl Clock {
         Self {
             start: Instant::now(),
             last_ms: AtomicU64::new(0),
+            hung_up: Notify::new(),
         }
     }
 
@@ -69,12 +75,16 @@ impl AsyncRead for Wire<'_> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
+        let room = buf.remaining() > 0;
         let polled = Pin::new(&mut *self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = &polled {
             let moved = buf.filled().len() - before;
             if moved > 0 {
                 self.clock.touch();
                 STATS.client_sent(moved);
+            } else if room {
+                // A read that returns nothing into a buffer with room is the client's FIN.
+                self.clock.hung_up.notify_one();
             }
         }
         polled
@@ -120,11 +130,13 @@ async fn shutdown_deadline(mut shutdown: ShutdownWatch, grace: Duration) {
 }
 
 /// Copies between `client` and `server` until both directions finish, a read or write fails, no
-/// byte moves for `idle`, or `grace` has passed since shutdown began. Returns why it ended.
+/// byte moves for `idle`, `termination_delay` has passed since the client's FIN, or `grace` has
+/// passed since shutdown began. Returns why it ended.
 pub(super) async fn relay(
     client: &mut Stream,
     server: &mut Stream,
     idle: Duration,
+    termination_delay: Duration,
     shutdown: ShutdownWatch,
     grace: Duration,
 ) -> Closed {
@@ -137,6 +149,11 @@ pub(super) async fn relay(
     tokio::pin!(copy);
     let stopping = shutdown_deadline(shutdown, grace);
     tokio::pin!(stopping);
+    let terminating = async {
+        clock.hung_up.notified().await;
+        sleep(termination_delay).await;
+    };
+    tokio::pin!(terminating);
     loop {
         let wait = idle.saturating_sub(clock.quiet_for());
         tokio::select! {
@@ -144,6 +161,7 @@ pub(super) async fn relay(
                 return if result.is_ok() { Closed::Done } else { Closed::Error };
             }
             () = &mut stopping => return Closed::Shutdown,
+            () = &mut terminating => return Closed::Terminated,
             () = sleep(wait) => {
                 if clock.quiet_for() >= idle {
                     return Closed::Idle;

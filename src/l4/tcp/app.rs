@@ -2,8 +2,9 @@
 //!
 //! Pingora's listening service accepts the connection and hands its `Stream` to
 //! [`ServerApp::process_new`]; its accept loop, TCP options and shutdown signal stay Pingora's.
-//! Servers are reached through [`TransportConnector::new_stream`] on a `BasicPeer` (a cleartext
-//! TCP peer), so the dial timeout, the socket options and the connect path are Pingora's too.
+//! Servers are reached through [`TransportConnector::new_stream`] on an `HttpPeer`: a cleartext
+//! TCP peer, or a TLS one for a server with `tls: true` (see [`crate::l4::upstream`]), so the dial
+//! timeout, the socket options and the connect path are Pingora's too.
 //!
 //! One connection:
 //!
@@ -15,10 +16,13 @@
 //!    and that offer pick the router among the routers of the live table that listen here. A
 //!    router with `tls` that is not limited to literal server names never takes a name another
 //!    tenant claims.
-//! 3. It takes a `max_inflight` slot of the router's tenant and charges its two copy buffers to
-//!    `max_buffer_bytes`; either refusal closes it at once. The bytes read in step 1 go back to
-//!    the stream, and a terminating router (`tls` without `passthrough`) runs the TLS handshake
-//!    with the app's certificates and `client_auth` before any server is dialled.
+//! 3. The router's `chain` runs on the client address (`ip_allow_list`,
+//!    `in_flight_conn`), before the tenant's slot is taken and before any server is dialled; a
+//!    refused connection is closed without a byte and counted. Then it takes a `max_inflight`
+//!    slot of the router's tenant and charges its two copy buffers to `max_buffer_bytes`; either
+//!    refusal closes it at once. The bytes read in step 1 go back to the stream, and a
+//!    terminating router (`tls` without `passthrough`) runs the TLS handshake with the app's
+//!    certificates and `client_auth` before any server is dialled.
 //! 4. It tries up to [`CONNECT_ATTEMPTS`] servers: the balancer picks one (skipping the ones
 //!    already tried), the upstream address policy checks its exact address, and that address is
 //!    dialled. A failed dial moves on to the next server. No byte of the client has been read
@@ -32,9 +36,10 @@
 //! table. A snapshot that removes its router or service therefore changes what new connections
 //! do and lets this one finish.
 //!
-//! A PROXY protocol header towards the server goes on the stream `dial` returns,
-//! before `relay` copies the first byte, and so before the client's ClientHello reaches a
-//! passthrough server.
+//! A PROXY protocol header towards the server is written by the dial itself
+//! ([`crate::l4::upstream`]): after the TCP connect and before the TLS handshake of a `tls`
+//! server, so before the first payload byte, which for a passthrough router is the client's
+//! ClientHello.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
@@ -47,9 +52,10 @@ use pingora::connectors::TransportConnector;
 use pingora::http::RequestHeader;
 use pingora::protocols::GetSocketDigest;
 use pingora::protocols::Stream;
+use pingora::protocols::l4::socket::SocketAddr as PingoraAddr;
 use pingora::protocols::l4::stream::Stream as L4Stream;
 use pingora::server::ShutdownWatch;
-use pingora::upstreams::peer::BasicPeer;
+use pingora::upstreams::peer::HttpPeer;
 use tokio::time::timeout;
 
 use super::copy::relay;
@@ -57,7 +63,9 @@ use super::stats::{Refused, STATS};
 use super::{CONNECT_ATTEMPTS, CONNECTION_BYTES, Router, Service, Tls};
 use crate::budget::Budgets;
 use crate::client_ip::normalize;
+use crate::l4::middleware;
 use crate::l4::tls::{self, Cause, Failed, Offer, Owners, Terminator};
+use crate::l4::upstream::Flow;
 use crate::router::matcher::Spec;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
@@ -231,15 +239,19 @@ impl App {
         })
     }
 
-    /// Connects to `addr` for `tenant`, after the policy has checked the exact address.
-    async fn dial(&self, tenant: &str, addr: SocketAddr) -> Result<Stream, Dial> {
+    /// Connects to `addr` for `tenant` through `peer`, after the policy has checked the exact
+    /// address. `limit` bounds the connect, the PROXY header and the TLS handshake together.
+    async fn dial(
+        &self,
+        tenant: &str,
+        addr: SocketAddr,
+        peer: &HttpPeer,
+        limit: Duration,
+    ) -> Result<Stream, Dial> {
         if self.policy.check(tenant, addr.ip()).is_err() {
             return Err(Dial::Forbidden);
         }
-        let mut peer = BasicPeer::new(&addr.to_string());
-        peer.options.connection_timeout = Some(self.dial);
-        peer.options.total_connection_timeout = Some(self.dial);
-        match timeout(self.dial, Box::pin(self.connector.new_stream(&peer))).await {
+        match timeout(limit, Box::pin(self.connector.new_stream(peer))).await {
             Ok(Ok(stream)) => Ok(stream),
             Ok(Err(err)) => {
                 tracing::debug!(%addr, %err, "cannot connect to a TCP server");
@@ -254,13 +266,20 @@ impl App {
 
     async fn serve(&self, mut client: L4Stream, shutdown: ShutdownWatch) {
         STATS.accepted();
-        let Some(peer) = client
-            .get_socket_digest()
-            .and_then(|digest| digest.peer_addr().and_then(|addr| addr.as_inet().copied()))
-            .map(|addr| normalize(addr.ip()))
+        let Some(digest) = client.get_socket_digest() else {
+            STATS.refused(Refused::NoRoute);
+            return;
+        };
+        let inet = |addr: Option<&PingoraAddr>| addr.and_then(|addr| addr.as_inet().copied());
+        let (Some(source), Some(entry)) = (inet(digest.peer_addr()), inet(digest.local_addr()))
         else {
             STATS.refused(Refused::NoRoute);
             return;
+        };
+        let peer = normalize(source.ip());
+        let flow = Flow {
+            client: SocketAddr::new(peer, source.port()),
+            entry,
         };
         let live = self.table.load();
         let plan = self.plan(&live);
@@ -289,6 +308,20 @@ impl App {
             return;
         };
         let account = self.budgets.tenant(tenant, limits);
+        // The chain runs before the tenant's slot, so a connection it refuses costs the tenant
+        // nothing; its permits are held until the connection ends.
+        let _held =
+            match middleware::admit(app.l4().tcp().middlewares(), router.chain(), peer, &account) {
+                Ok(held) => held,
+                Err(refusal) => {
+                    STATS.refused(match refusal {
+                        middleware::Refusal::NotAllowed => Refused::IpNotAllowed,
+                        middleware::Refusal::OverSource => Refused::OverConnections,
+                        middleware::Refusal::OverBudget => Refused::OverBudget,
+                    });
+                    return;
+                }
+            };
         let Some(_slot) = account.admit() else {
             STATS.refused(Refused::OverInflight);
             return;
@@ -340,13 +373,23 @@ impl App {
                 break None;
             };
             tried.push(addr);
-            match self.dial(tenant, addr).await {
+            let Some((server, limit)) =
+                service
+                    .upstream()
+                    .peer(service.balancer(), addr, self.dial, flow)
+            else {
+                // The name the address came from resolved to something else in between.
+                STATS.connect_failed();
+                continue;
+            };
+            match self.dial(tenant, addr, &server, limit).await {
                 Ok(stream) => break Some((stream, lease)),
                 Err(Dial::Forbidden) => forbidden += 1,
                 Err(Dial::Failed) => STATS.connect_failed(),
             }
         };
         let idle = service.idle();
+        let delay = service.upstream().termination_delay();
         // No attempt was made because the health check has marked every server down.
         let unhealthy = connected.is_none() && tried.is_empty() && service.all_down();
         drop(live);
@@ -361,7 +404,7 @@ impl App {
             return;
         };
         let _open = Open::new();
-        STATS.closed(relay(&mut client, &mut server, idle, shutdown, self.grace).await);
+        STATS.closed(relay(&mut client, &mut server, idle, delay, shutdown, self.grace).await);
     }
 }
 
@@ -432,15 +475,20 @@ mod test {
     async fn tcp_dial_obeys_upstream_policy_at_connect() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
+        let peer = HttpPeer::new(addr, false, String::new());
+        let limit = Duration::from_secs(2);
         let denying = UpstreamPolicy::parse(r#"{"deny": ["127.0.0.0/8"]}"#).expect("policy");
         assert_eq!(
-            app(denying).dial("t", addr).await.err(),
+            app(denying).dial("t", addr, &peer, limit).await.err(),
             Some(Dial::Forbidden)
         );
         let allowing = app(UpstreamPolicy::allow_all());
-        assert!(allowing.dial("t", addr).await.is_ok());
+        assert!(allowing.dial("t", addr, &peer, limit).await.is_ok());
         // A closed port is a failed connect, not a refusal of the policy.
         drop(listener);
-        assert_eq!(allowing.dial("t", addr).await.err(), Some(Dial::Failed));
+        assert_eq!(
+            allowing.dial("t", addr, &peer, limit).await.err(),
+            Some(Dial::Failed)
+        );
     }
 }

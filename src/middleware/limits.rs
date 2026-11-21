@@ -74,10 +74,10 @@ use crate::table::RoutingTable;
 use podgate_model::Snapshot;
 
 /// Sources a table holds when `max_sources` is absent.
-pub(super) const DEFAULT_MAX_SOURCES: u32 = 10_000;
+pub(crate) const DEFAULT_MAX_SOURCES: u32 = 10_000;
 
 /// Most sources a table may hold.
-pub(super) const MAX_SOURCES: u32 = 1_000_000;
+pub(crate) const MAX_SOURCES: u32 = 1_000_000;
 
 /// Most blocks in `source.ip.excluded`: each is tested against every address of the chain.
 const MAX_EXCLUDED: usize = 64;
@@ -85,7 +85,7 @@ const MAX_EXCLUDED: usize = 64;
 /// Prefix length an IPv6 client is counted by when `ipv6_subnet_bits` is absent: a client that
 /// owns a /64 has 2^64 addresses, and counting each would let it spread over every set of the
 /// table.
-const DEFAULT_IPV6_SUBNET_BITS: u8 = 64;
+pub(crate) const DEFAULT_IPV6_SUBNET_BITS: u8 = 64;
 
 /// Entries per set: the most sources that can share one mutex.
 const WAYS: usize = 8;
@@ -155,6 +155,26 @@ fn subnet_of(addr: IpAddr, bits: u8) -> IpAddr {
     }
 }
 
+/// Calls `f` with the bytes that identify the source `addr`, counted by its first `bits` bits
+/// when it is IPv6: a tag for the family, then the subnet. The same on every node and run.
+pub(crate) fn ip_material<R>(addr: IpAddr, bits: u8, f: impl FnOnce(&[u8]) -> R) -> R {
+    let addr = subnet_of(normalize(addr), bits);
+    let mut bytes = [0_u8; 17];
+    let len = match addr {
+        IpAddr::V4(v4) => {
+            bytes[0] = 4;
+            bytes[1..5].copy_from_slice(&v4.octets());
+            5
+        }
+        IpAddr::V6(v6) => {
+            bytes[0] = 6;
+            bytes[1..].copy_from_slice(&v6.octets());
+            17
+        }
+    };
+    f(&bytes[..len])
+}
+
 impl Source {
     /// Validates `config`.
     ///
@@ -202,23 +222,7 @@ impl Source {
             Self::Ip {
                 strategy,
                 subnet_bits,
-            } => {
-                let addr = subnet_of(normalize(ClientIp::resolve(view, strategy)), *subnet_bits);
-                let mut bytes = [0_u8; 17];
-                let len = match addr {
-                    IpAddr::V4(v4) => {
-                        bytes[0] = 4;
-                        bytes[1..5].copy_from_slice(&v4.octets());
-                        5
-                    }
-                    IpAddr::V6(v6) => {
-                        bytes[0] = 6;
-                        bytes[1..].copy_from_slice(&v6.octets());
-                        17
-                    }
-                };
-                f(&bytes[..len])
-            }
+            } => ip_material(ClientIp::resolve(view, strategy), *subnet_bits, f),
             Self::Header(name) => f(request
                 .headers
                 .get(name)
@@ -258,7 +262,7 @@ const SET_BYTES: u64 = size_of::<Mutex<Set>>() as u64;
 
 /// The fixed-size table of per-source values. See the module docs.
 #[derive(Debug)]
-pub(super) struct SourceTable {
+pub(crate) struct SourceTable {
     sets: Box<[Mutex<Set>]>,
     /// Entries the table may hold, `max_sources`; the last set can have fewer than [`WAYS`].
     capacity: usize,
@@ -270,7 +274,7 @@ pub(super) struct SourceTable {
 
 impl SourceTable {
     /// Bytes a table of `max_sources` entries takes, what is charged to the tenant first.
-    pub(super) fn bytes(max_sources: u32) -> u64 {
+    pub(crate) fn bytes(max_sources: u32) -> u64 {
         u64::from(max_sources).div_ceil(WAYS as u64) * SET_BYTES + size_of::<Self>() as u64
     }
 
@@ -299,7 +303,7 @@ impl SourceTable {
     /// Runs `update` on the value of source `key`. A source with no entry takes an empty one,
     /// or one whose value `idle` calls reclaimable, starting from zero. `None` when every entry
     /// of the source's set holds a live source: the caller uses [`Self::overflow`].
-    pub(super) fn with<R>(
+    pub(crate) fn with<R>(
         &self,
         key: u64,
         idle: impl Fn(u64) -> bool,
@@ -319,7 +323,7 @@ impl SourceTable {
     }
 
     /// Runs `update` on the value of source `key` when it has an entry.
-    pub(super) fn with_existing(&self, key: u64, update: impl FnOnce(&mut u64)) {
+    pub(crate) fn with_existing(&self, key: u64, update: impl FnOnce(&mut u64)) {
         let (set, ways) = self.set_of(key);
         let mut set = set.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(found) = set[..ways].iter_mut().find(|entry| entry.key == key) {
@@ -328,17 +332,17 @@ impl SourceTable {
     }
 
     /// The value the sources without an entry share.
-    pub(super) fn overflow(&self) -> &AtomicU64 {
+    pub(crate) fn overflow(&self) -> &AtomicU64 {
         &self.overflow
     }
 
     /// Counts a request that used [`Self::overflow`].
-    pub(super) fn count_overflow(&self) {
+    pub(crate) fn count_overflow(&self) {
         self.overflowed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Requests that used [`Self::overflow`] so far.
-    pub(super) fn overflowed(&self) -> u64 {
+    pub(crate) fn overflowed(&self) -> u64 {
         self.overflowed.load(Ordering::Relaxed)
     }
 }
@@ -363,7 +367,7 @@ struct Charged {
 }
 
 impl Limiter {
-    pub(super) fn new(max_sources: u32) -> Self {
+    pub(crate) fn new(max_sources: u32) -> Self {
         Self {
             hasher: RandomState::new(),
             started: Instant::now(),
@@ -374,7 +378,7 @@ impl Limiter {
         }
     }
 
-    pub(super) fn hasher(&self) -> &RandomState {
+    pub(crate) fn hasher(&self) -> &RandomState {
         &self.hasher
     }
 
@@ -387,7 +391,7 @@ impl Limiter {
     /// tenant's budget cannot take it right now; nothing is allocated then and the next call
     /// tries again. A request with no tenant budget (an app index the table does not know)
     /// allocates uncharged, as the other kinds do.
-    pub(super) fn table(&self, tenant: Option<&Arc<TenantBudget>>) -> Option<&SourceTable> {
+    pub(crate) fn table(&self, tenant: Option<&Arc<TenantBudget>>) -> Option<&SourceTable> {
         if let Some(charged) = self.table.get() {
             return Some(&charged.table);
         }
@@ -407,16 +411,16 @@ impl Limiter {
     }
 
     /// The table, when a request has allocated it.
-    pub(super) fn allocated(&self) -> Option<&SourceTable> {
+    pub(crate) fn allocated(&self) -> Option<&SourceTable> {
         self.table.get().map(|charged| &charged.table)
     }
 
     /// Counts a refused request.
-    pub(super) fn count_rejected(&self) {
+    pub(crate) fn count_rejected(&self) {
         self.rejected.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(super) fn stats(&self) -> Stats {
+    pub(crate) fn stats(&self) -> Stats {
         let table = self.allocated();
         Stats {
             overflow: table.map_or(0, SourceTable::overflowed),
@@ -424,11 +428,48 @@ impl Limiter {
             bytes: table.map_or(0, |_| SourceTable::bytes(self.max_sources)),
         }
     }
+
+    /// Takes one of `amount` slots of source `key` in `table`, or `None` when the source has
+    /// them all. A source whose set of the table is full counts in the shared overflow value.
+    /// Dropping the permit returns the slot.
+    pub(crate) fn acquire(
+        self: &Arc<Self>,
+        table: &SourceTable,
+        key: u64,
+        amount: u32,
+    ) -> Option<Permit> {
+        let amount = u64::from(amount);
+        let slot = match table.with(
+            key,
+            |count| count == 0,
+            |count| {
+                (*count < amount).then(|| {
+                    *count += 1;
+                })
+            },
+        ) {
+            Some(taken) => taken.map(|()| Slot::Entry(key))?,
+            None => {
+                table.count_overflow();
+                table
+                    .overflow()
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < amount).then(|| count + 1)
+                    })
+                    .ok()
+                    .map(|_| Slot::Overflow)?
+            }
+        };
+        Some(Permit {
+            limiter: Arc::clone(self),
+            slot,
+        })
+    }
 }
 
 /// What a limiter reports.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Stats {
+pub(crate) struct Stats {
     overflow: u64,
     rejected: u64,
     bytes: u64,
@@ -445,11 +486,52 @@ impl Stats {
     }
 }
 
+/// Where a held slot is counted.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    /// The entry of the source with this key.
+    Entry(u64),
+    /// The table's shared overflow counter.
+    Overflow,
+}
+
+/// One slot of a source's count (`in_flight_req`, `in_flight_conn`). Dropping it returns the
+/// slot, whatever ended the request or connection.
+#[derive(Debug)]
+pub(crate) struct Permit {
+    limiter: Arc<Limiter>,
+    slot: Slot,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let Some(table) = self.limiter.allocated() else {
+            return;
+        };
+        match self.slot {
+            Slot::Entry(key) => table.with_existing(key, |count| *count = count.saturating_sub(1)),
+            Slot::Overflow => {
+                // Never below zero: `try_update` stops at `None`.
+                let _ = table
+                    .overflow()
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        count.checked_sub(1)
+                    });
+            }
+        }
+    }
+}
+
 /// Rejects the apps whose limiter tables, added up per tenant, do not fit the tenant's declared
 /// `max_buffer_bytes`. `stages` holds the compiled middlewares of each app of `snapshot`, in
-/// order. A table is charged on first use, but fitting is checked for every declared one, so a
-/// later request cannot be the first to find out.
-pub(crate) fn over_budget(snapshot: &Snapshot, stages: &[&[Named]]) -> Vec<Rejected> {
+/// order, and `l4` those of its TCP routers. A table is charged on first use, but
+/// fitting is checked for every declared one, so a later request cannot be the first to find
+/// out.
+pub(crate) fn over_budget(
+    snapshot: &Snapshot,
+    stages: &[&[Named]],
+    l4: &[&[crate::l4::middleware::Named]],
+) -> Vec<Rejected> {
     let budgets: HashMap<&str, u64> = snapshot
         .tenants
         .iter()
@@ -457,16 +539,40 @@ pub(crate) fn over_budget(snapshot: &Snapshot, stages: &[&[Named]]) -> Vec<Rejec
         .collect();
     let mut used: HashMap<&str, u64> = HashMap::new();
     let mut rejected = Vec::new();
-    for (app, stages) in snapshot.apps.iter().zip(stages) {
+    for (at, (app, stages)) in snapshot.apps.iter().zip(stages).enumerate() {
         let Some(&budget) = budgets.get(&*app.tenant) else {
             continue;
         };
-        for named in *stages {
-            let (kind, max_sources, tables) = match &named.stage {
-                Stage::RateLimit(limit) => ("rate_limit", limit.max_sources(), limit.tables()),
-                Stage::InFlightReq(limit) => ("in_flight_req", limit.max_sources(), 1),
-                _ => continue,
-            };
+        let http = stages.iter().filter_map(|named| match &named.stage {
+            Stage::RateLimit(limit) => Some((
+                format!("middleware {}", named.name),
+                "rate_limit",
+                limit.max_sources(),
+                limit.tables(),
+            )),
+            Stage::InFlightReq(limit) => Some((
+                format!("middleware {}", named.name),
+                "in_flight_req",
+                limit.max_sources(),
+                1,
+            )),
+            _ => None,
+        });
+        let tcp = l4
+            .get(at)
+            .into_iter()
+            .flat_map(|stages| stages.iter())
+            .filter_map(|named| {
+                named.stage.max_sources().map(|max_sources| {
+                    (
+                        format!("tcp middleware {}", named.name),
+                        "in_flight_conn",
+                        max_sources,
+                        1,
+                    )
+                })
+            });
+        for (place, kind, max_sources, tables) in http.chain(tcp) {
             let bytes = SourceTable::bytes(max_sources).saturating_mul(tables);
             let note = if tables > 1 {
                 ", counting the second table of its local fallback"
@@ -478,7 +584,7 @@ pub(crate) fn over_budget(snapshot: &Snapshot, stages: &[&[Named]]) -> Vec<Rejec
             if *total > budget {
                 rejected.push(Rejected::new(
                     app,
-                    format!("middleware {}", named.name),
+                    place,
                     Invalid::new(
                         "invalid_middleware",
                         format!(
@@ -517,12 +623,17 @@ pub(crate) fn render(live: &RoutingTable) -> String {
             };
             rows.push((app.id(), &*named.name, kind, stats));
         }
+        for named in app.l4().tcp().middlewares() {
+            if let Some(stats) = named.stage.stats() {
+                rows.push((app.id(), &*named.name, "in_flight_conn", stats));
+            }
+        }
     }
     let families = [
         Family {
             name: "podgate_limiter_rejected_total",
             kind: "counter",
-            help: "Requests a rate_limit or in_flight_req middleware refused with 429.",
+            help: "Requests a rate_limit or in_flight_req middleware refused with 429, and connections an in_flight_conn middleware closed.",
             value: |stats| stats.rejected,
         },
         Family {

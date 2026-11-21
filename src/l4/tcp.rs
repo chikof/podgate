@@ -33,9 +33,16 @@
 //! the algorithms that need nothing from an HTTP request are built here: `round_robin`,
 //! `weighted_round_robin`, `least_conn`, `random` and `hrw` (the client address).
 //!
+//! Change 0061 adds three things to it. A router's `chain` names TCP middlewares of the app
+//! (`ip_allow_list`, `in_flight_conn`, see [`super::middleware`]) that every connection passes
+//! before it takes a tenant slot or reaches a server. A server with `tls: true` is reached over
+//! TLS with the service's `transport` (the `servers_transport` of the HTTP services), and the
+//! service's `proxy_protocol` and `termination_delay_ms` are in [`super::upstream`].
+//!
 //! This file is the compiled model; the runtime is in `app` (the Pingora application of an entry
 //! point), `copy` (the byte copy) and `stats` (the metrics), and the TLS side is in
-//! [`super::tls`]. `docs/ref/l4-tcp.md` and `docs/ref/l4-tls.md` have the operator's view.
+//! [`super::tls`]. `docs/ref/l4-tcp.md`, `docs/ref/l4-tls.md` and `docs/ref/l4-middleware.md`
+//! have the operator's view.
 
 mod app;
 mod copy;
@@ -52,16 +59,17 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::Compiled as L4;
-use super::health;
 use super::tls::Offer;
+use super::{health, middleware, upstream};
 use crate::compile::{Invalid, Rejected};
 use crate::conflict::Conflict;
 use crate::entry::{CompileContext, Protocol};
 use crate::host::{HostPattern, overlaps};
 use crate::router::Matcher;
 use crate::router::matcher::{self, Claim, Dialect, Spec, View};
+use crate::service::extras::ProxyProtocolConfig;
 use crate::service::resolve::{self, NameBudget};
-use crate::service::{self, Lease, PickCx};
+use crate::service::{self, Lease, NamedTransport, PickCx, Transport};
 use podgate_model::{App, Declared, Snapshot};
 
 pub use app::App as Listener;
@@ -111,6 +119,10 @@ pub struct RouterConfig {
     /// `sni_regexp` or `alpn`).
     #[serde(default)]
     tls: Option<TlsConfig>,
+    /// Names of the app's TCP middlewares (`ip_allow_list`, `in_flight_conn`), run in this order
+    /// before the connection is routed to a server, the tenant takes a slot or a server is dialled.
+    #[serde(default)]
+    chain: Vec<Box<str>>,
 }
 
 /// What a TCP router does with TLS.
@@ -151,6 +163,19 @@ pub struct ServiceConfig {
     #[serde(default)]
     #[schemars(with = "Option<health::Config>")]
     health_check: Option<Value>,
+    /// Write a PROXY protocol header, `{"version": 1|2}`, first on every connection to a server:
+    /// the client's real address and the entry point's. Absent: none.
+    #[serde(default)]
+    proxy_protocol: Option<ProxyProtocolConfig>,
+    /// Milliseconds the server's side of a connection lives on after the client half-closed, so a
+    /// late reply is not cut: 0 to 86,400,000, default 100.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 86_400_000))]
+    termination_delay_ms: Option<u64>,
+    /// The `servers_transport` of the app that reaches the servers with `tls: true`. Only its TLS
+    /// fields and `dial_timeout_secs` apply to a TCP service.
+    #[serde(default)]
+    transport: Option<Box<str>>,
 }
 
 fn algorithm_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -175,6 +200,10 @@ struct ServerConfig {
     /// `a` (the default): `address` is `host:port`. `srv`: `address` is an SRV owner name.
     #[serde(default)]
     resolve: Option<ResolveKind>,
+    /// Reach the server over TLS, with the service's `transport` (SNI, CA, client certificate).
+    /// Default `false`: plain TCP.
+    #[serde(default)]
+    tls: Option<bool>,
 }
 
 /// How a server's `address` is resolved.
@@ -200,6 +229,8 @@ pub struct Router {
     claims: Vec<HostPattern>,
     /// The ALPN protocols the matcher names, which a handshake of this router can negotiate.
     protocols: Box<[Box<[u8]>]>,
+    /// The router's `chain`, resolved to indices into the app's TCP middlewares.
+    chain: Box<[usize]>,
 }
 
 impl Router {
@@ -238,6 +269,13 @@ impl Router {
     #[must_use]
     pub fn is_claimed(&self) -> bool {
         !self.claims.is_empty()
+    }
+
+    /// The middlewares the router runs before it takes a connection, as indices into
+    /// [`Compiled::middlewares`], in order.
+    #[must_use]
+    pub fn chain(&self) -> &[usize] {
+        &self.chain
     }
 
     /// The ALPN protocols the matcher names: what a terminating handshake can negotiate.
@@ -294,6 +332,7 @@ pub struct Service {
     balancer: service::Service,
     idle: Duration,
     health: Option<Arc<health::Check>>,
+    upstream: upstream::Settings,
 }
 
 impl Service {
@@ -320,6 +359,12 @@ impl Service {
     #[must_use]
     pub fn health_check(&self) -> Option<&Arc<health::Check>> {
         self.health.as_ref()
+    }
+
+    /// The service's PROXY protocol header and termination delay.
+    #[must_use]
+    pub fn upstream(&self) -> &upstream::Settings {
+        &self.upstream
     }
 
     /// Whether the service has a `health_check` that has marked every one of its servers down:
@@ -355,6 +400,7 @@ impl Service {
 pub struct Compiled {
     routers: Box<[Router]>,
     services: Box<[Service]>,
+    middlewares: Box<[middleware::Named]>,
 }
 
 impl Compiled {
@@ -368,6 +414,17 @@ impl Compiled {
     #[must_use]
     pub fn services(&self) -> &[Service] {
         &self.services
+    }
+
+    /// The app's TCP middlewares, the ones a router's `chain` indexes.
+    #[must_use]
+    pub fn middlewares(&self) -> &[middleware::Named] {
+        &self.middlewares
+    }
+
+    /// [`Self::middlewares`], mutable, for the registry that carries their counts across a push.
+    pub(crate) fn middlewares_mut(&mut self) -> &mut [middleware::Named] {
+        &mut self.middlewares
     }
 
     /// The balancer of every service with its name and the fingerprint of its `health_check`
@@ -430,10 +487,11 @@ pub(super) fn compile(
             );
         }
     }
+    let transports = transports_of(app);
     let mut services = Vec::with_capacity(tcp.services.len());
     let mut broken: HashSet<&str> = HashSet::new();
     for declared in &tcp.services {
-        match compile_service(declared, app, context, names) {
+        match compile_service(declared, app, context, names, &transports) {
             Ok(service) => services.push(service),
             Err(invalid) => {
                 broken.insert(&declared.name);
@@ -441,6 +499,7 @@ pub(super) fn compile(
             }
         }
     }
+    let (middlewares, broken_middlewares) = middleware::compile_all(&tcp.middlewares, &mut problem);
     let mut routers = Vec::with_capacity(tcp.routers.len());
     let mut taken = HashSet::new();
     for value in &tcp.routers {
@@ -464,7 +523,13 @@ pub(super) fn compile(
                 ),
             );
         }
-        match compile_router(&config, app, snapshot, context, &services, &broken) {
+        let scope = Scope {
+            services: &services,
+            broken_services: &broken,
+            middlewares: &middlewares,
+            broken_middlewares: &broken_middlewares,
+        };
+        match compile_router(&config, app, snapshot, context, &scope) {
             Ok(router) => routers.push(router),
             Err(invalids) => {
                 for invalid in invalids {
@@ -476,31 +541,36 @@ pub(super) fn compile(
     Compiled {
         routers: routers.into_boxed_slice(),
         services: services.into_boxed_slice(),
+        middlewares: middlewares.into_boxed_slice(),
     }
 }
 
-/// The fields of a router that belong to later specs: refused by name, not as unknown.
-const ROUTER_PLANNED: [&str; 1] = ["chain"];
-/// The fields of a service that belong to later specs.
-const SERVICE_PLANNED: [&str; 2] = ["proxy_protocol", "termination_delay_ms"];
-
 fn router_config(value: &Value) -> Result<RouterConfig, Invalid> {
-    if let Some(field) = ROUTER_PLANNED
-        .iter()
-        .find(|field| value.get(**field).is_some())
-    {
-        return Err(Invalid::new(
-            "l4_not_built",
-            format!("tcp router {field} is planned and not built yet (TCP middlewares)"),
-        ));
-    }
     serde_json::from_value(value.clone())
         .map_err(|err| Invalid::new("invalid_router", format!("tcp router: {err}")))
 }
 
-/// `host:port` as a server of the balancer: its `http://` URL (the scheme is the balancer's
-/// vocabulary and never reaches a connection) and whether the host is a DNS name.
+/// The transports of `app`, compiled when a TCP service names one. A transport that does not
+/// compile is replaced by the default one here and refused once, by the compile step of the HTTP
+/// side, which compiles every transport of the app whether or not a service names it.
+fn transports_of(app: &App) -> Vec<NamedTransport> {
+    let named = app.tcp.as_ref().is_some_and(|tcp| {
+        tcp.services
+            .iter()
+            .any(|service| service.config.contains_key("transport"))
+    });
+    if named {
+        crate::compile::transports_of(app, &mut Vec::new())
+    } else {
+        Vec::new()
+    }
+}
+
+/// `host:port` as a server of the balancer: its URL (the scheme, `http` or `https`, is the
+/// balancer's vocabulary for plain and TLS, and never reaches a connection) and whether the host
+/// is a DNS name.
 fn server_url(
+    scheme: &str,
     text: &str,
     service: &str,
     app: &App,
@@ -508,7 +578,7 @@ fn server_url(
 ) -> Result<String, Invalid> {
     if text.parse::<SocketAddr>().is_ok() {
         let addr = super::server_address(text, service, Protocol::Tcp, app, context)?;
-        return Ok(format!("http://{addr}"));
+        return Ok(format!("{scheme}://{addr}"));
     }
     let named = text.rsplit_once(':').and_then(|(host, port)| {
         let port = port.parse::<u16>().ok()?;
@@ -519,9 +589,9 @@ fn server_url(
             "invalid_service",
             format!("service {service} server {text}: the port must not be 0"),
         )),
-        Some((host, port)) => Ok(format!("http://{host}:{port}")),
+        Some((host, port)) => Ok(format!("{scheme}://{host}:{port}")),
         None => super::server_address(text, service, Protocol::Tcp, app, context)
-            .map(|addr| format!("http://{addr}")),
+            .map(|addr| format!("{scheme}://{addr}")),
     }
 }
 
@@ -530,6 +600,7 @@ fn compile_service(
     app: &App,
     context: &CompileContext,
     names: &mut NameBudget,
+    transports: &[NamedTransport],
 ) -> Result<Service, Invalid> {
     if &*declared.kind != "loadbalancer" {
         return Err(Invalid::new(
@@ -542,28 +613,9 @@ fn compile_service(
         ));
     }
     let invalid = |why: String| Invalid::new("invalid_service", format!("tcp loadbalancer: {why}"));
-    if let Some(field) = SERVICE_PLANNED
-        .iter()
-        .find(|field| declared.config.contains_key(**field))
-    {
-        return Err(Invalid::new(
-            "service_not_built",
-            format!("tcp loadbalancer {field} is planned and not built yet"),
-        ));
-    }
-    let planned_tls = declared
-        .config
-        .get("servers")
-        .and_then(Value::as_array)
-        .is_some_and(|servers| servers.iter().any(|server| server.get("tls").is_some()));
-    if planned_tls {
-        return Err(Invalid::new(
-            "service_not_built",
-            "tcp loadbalancer server tls is planned and not built yet",
-        ));
-    }
     let config: ServiceConfig = serde_json::from_value(Value::Object(declared.config.clone()))
         .map_err(|err| invalid(err.to_string()))?;
+    let upstream = upstream::Settings::compile(config.proxy_protocol, config.termination_delay_ms)?;
     if config.servers.is_empty() || config.servers.len() > MAX_SERVERS {
         return Err(invalid(format!(
             "declares {} servers, between 1 and {MAX_SERVERS} are required",
@@ -595,15 +647,20 @@ fn compile_service(
         .servers
         .iter()
         .map(|server| {
+            let scheme = if server.tls == Some(true) {
+                "https"
+            } else {
+                "http"
+            };
             if server.resolve == Some(ResolveKind::Srv) {
                 let mut entry =
-                    json!({ "url": format!("http://{}", server.address), "resolve": "srv" });
+                    json!({ "url": format!("{scheme}://{}", server.address), "resolve": "srv" });
                 if let Some(weight) = server.weight {
                     entry["weight"] = json!(weight);
                 }
                 return Ok(entry);
             }
-            let url = server_url(&server.address, &declared.name, app, context)?;
+            let url = server_url(scheme, &server.address, &declared.name, app, context)?;
             let mut entry = json!({ "url": url });
             if let Some(weight) = server.weight {
                 entry["weight"] = json!(weight);
@@ -616,16 +673,29 @@ fn compile_service(
     if let Some(algorithm) = &config.algorithm {
         balancer.insert("algorithm".to_owned(), json!(algorithm));
     }
+    if let Some(transport) = &config.transport {
+        balancer.insert("transport".to_owned(), json!(transport));
+    }
     let derived = Declared {
         name: declared.name.clone(),
         kind: "loadbalancer".into(),
         config: balancer,
     };
-    let balancer = service::Service::compile(&derived, &[], None, &app.tenant, context.resolver())
-        .map_err(|mut err| {
-            err.message = err.message.replace("http://", "");
-            err
-        })?;
+    let balancer =
+        service::Service::compile(&derived, transports, None, &app.tenant, context.resolver())
+            .map_err(|mut err| {
+                err.message = err.message.replace("https://", "").replace("http://", "");
+                err
+            })?;
+    if let Some(unsupported) = balancer.transport().and_then(Transport::tcp_refusal) {
+        return Err(Invalid::new(
+            "invalid_transport",
+            format!(
+                "tcp loadbalancer {}: the transport sets {unsupported}, which a TCP service cannot use (it takes the TLS fields and `dial_timeout_secs`)",
+                declared.name
+            ),
+        ));
+    }
     names.charge(&app.tenant, &app.id, balancer.dns_names())?;
     names.charge_srv(&app.tenant, &app.id, balancer.srv_names())?;
     Ok(Service {
@@ -633,6 +703,7 @@ fn compile_service(
         balancer,
         idle: Duration::from_secs(u64::from(idle)),
         health,
+        upstream,
     })
 }
 
@@ -661,13 +732,21 @@ fn literal_claims(matcher: &Matcher) -> Vec<HostPattern> {
     }
 }
 
+/// What the names of a router resolve to in its app: the compiled services and middlewares, and
+/// the names of those that did not compile (the problem is already reported).
+struct Scope<'a> {
+    services: &'a [Service],
+    broken_services: &'a HashSet<&'a str>,
+    middlewares: &'a [middleware::Named],
+    broken_middlewares: &'a HashSet<&'a str>,
+}
+
 fn compile_router(
     config: &RouterConfig,
     app: &App,
     snapshot: &Snapshot,
     context: &CompileContext,
-    services: &[Service],
-    broken: &HashSet<&str>,
+    scope: &Scope<'_>,
 ) -> Result<Router, Vec<Invalid>> {
     let mut problems = Vec::new();
     let tls = config.tls.as_ref().map(|tls| {
@@ -721,14 +800,35 @@ fn compile_router(
             }
         }
     }
-    let service = services
+    let service = scope
+        .services
         .iter()
         .position(|service| service.name == config.service);
-    if service.is_none() && !broken.contains(&*config.service) {
+    if service.is_none() && !scope.broken_services.contains(&*config.service) {
         problems.push(Invalid::new(
             "unknown_service",
             format!("tcp service {} is not declared by the app", config.service),
         ));
+    }
+    let mut chain = Vec::with_capacity(config.chain.len());
+    for (at, name) in config.chain.iter().enumerate() {
+        if config.chain[..at].contains(name) {
+            problems.push(Invalid::new(
+                "duplicate_name",
+                format!("tcp middleware {name} is listed twice in the chain"),
+            ));
+        } else if let Some(index) = scope
+            .middlewares
+            .iter()
+            .position(|named| named.name == *name)
+        {
+            chain.push(index);
+        } else if !scope.broken_middlewares.contains(&**name) {
+            problems.push(Invalid::new(
+                "unknown_middleware_ref",
+                format!("tcp middleware {name} is not declared by the app"),
+            ));
+        }
     }
     match service {
         Some(service) if problems.is_empty() => Ok(Router {
@@ -749,6 +849,7 @@ fn compile_router(
             service,
             tls,
             claims,
+            chain: chain.into_boxed_slice(),
         }),
         _ => Err(problems),
     }
@@ -979,23 +1080,98 @@ mod test {
     }
 
     #[test]
-    fn planned_fields_are_refused_by_name() {
-        let message = refusal(
-            &[router(&json!({ "chain": ["limit"] }))],
-            &[service(&json!({}))],
+    fn a_router_chain_resolves_to_the_declared_middlewares() {
+        let middleware = |name: &str, kind: &str, config: Value| {
+            let mut value = json!({ "name": name, "type": kind });
+            if let (Some(value), Some(config)) = (value.as_object_mut(), config.as_object()) {
+                value.extend(config.clone());
+            }
+            value
+        };
+        let tcp = |chain: Value, middlewares: Vec<Value>| {
+            compiled(&json!({
+                "routers": [router(&json!({ "chain": chain }))],
+                "services": [service(&json!({}))],
+                "middlewares": middlewares,
+            }))
+        };
+        let list = middleware(
+            "office",
+            "ip_allow_list",
+            json!({ "source_range": ["10.0.0.0/8"] }),
         );
-        assert!(message.starts_with("l4_not_built"), "{message}");
-        for field in ["proxy_protocol", "termination_delay_ms"] {
-            let message = refusal(&[router(&json!({}))], &[service(&json!({ field: 1 }))]);
-            assert!(message.starts_with("service_not_built"), "{message}");
+        let cap = middleware("cap", "in_flight_conn", json!({ "amount": 3 }));
+        let ok = tcp(json!(["cap", "office"]), vec![list.clone(), cap.clone()]).expect("compiles");
+        assert_eq!(
+            ok.routers()[0].chain(),
+            [1, 0],
+            "in the order the router lists them"
+        );
+        assert_eq!(ok.middlewares().len(), 2);
+        let message = |chain: Value, middlewares: Vec<Value>| {
+            tcp(chain, middlewares).expect_err("refused").join("; ")
+        };
+        assert!(
+            message(json!(["missing"]), vec![list.clone()]).starts_with("unknown_middleware_ref"),
+            "an unknown name"
+        );
+        assert!(
+            message(json!(["office", "office"]), vec![list.clone()]).starts_with("duplicate_name"),
+            "a name listed twice"
+        );
+        let broken = middleware("office", "ip_allow_list", json!({ "source_range": [] }));
+        let broken_only = message(json!(["office"]), vec![broken]);
+        assert!(
+            broken_only.starts_with("invalid_middleware")
+                && !broken_only.contains("unknown_middleware_ref"),
+            "a router naming a middleware that does not compile adds no second problem: {broken_only}"
+        );
+        let http = middleware("h", "headers", json!({}));
+        assert!(message(json!([]), vec![http]).starts_with("invalid_middleware"));
+        let twice = message(json!([]), vec![list.clone(), list]);
+        assert!(twice.starts_with("duplicate_name"), "{twice}");
+    }
+
+    #[test]
+    fn upstream_settings_are_checked() {
+        for extra in [
+            json!({ "proxy_protocol": { "version": 3 } }),
+            json!({ "proxy_protocol": { "version": 0 } }),
+            json!({ "proxy_protocol": { "version": 2, "extra": 1 } }),
+            json!({ "proxy_protocol": 2 }),
+            json!({ "termination_delay_ms": 86_400_001_u64 }),
+            json!({ "termination_delay_ms": -1 }),
+            json!({ "transport": "missing" }),
+            json!({ "servers": [{ "address": "10.0.0.5:1", "tls": "yes" }] }),
+        ] {
+            let message = refusal(&[router(&json!({}))], &[service(&extra)]);
+            assert!(
+                message.starts_with("invalid_service") || message.starts_with("unknown_transport"),
+                "{extra}: {message}"
+            );
         }
-        let message = refusal(
-            &[router(&json!({}))],
-            &[service(
-                &json!({ "servers": [{ "address": "10.0.0.5:1", "tls": true }] }),
-            )],
-        );
-        assert!(message.starts_with("service_not_built"), "{message}");
+        let tcp = compiled(&json!({
+            "routers": [router(&json!({}))],
+            "services": [service(&json!({
+                "proxy_protocol": { "version": 1 },
+                "termination_delay_ms": 0,
+                "servers": [{ "address": "10.0.0.5:5432", "tls": true }],
+            }))],
+        }))
+        .expect("compiles");
+        let upstream = tcp.services()[0].upstream();
+        assert_eq!(upstream.proxy_protocol(), Some(1));
+        assert_eq!(upstream.termination_delay(), Duration::ZERO);
+        assert!(tcp.services()[0].balancer().servers()[0].tls);
+        let plain = compiled(&json!({
+            "routers": [router(&json!({}))],
+            "services": [service(&json!({}))],
+        }))
+        .expect("compiles");
+        let upstream = plain.services()[0].upstream();
+        assert_eq!(upstream.proxy_protocol(), None);
+        assert_eq!(upstream.termination_delay(), Duration::from_millis(100));
+        assert!(!plain.services()[0].balancer().servers()[0].tls);
     }
 
     #[test]

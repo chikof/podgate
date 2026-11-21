@@ -321,7 +321,13 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     }
     let stage_lists: Vec<&[middleware::Named]> =
         parts.iter().map(|(stages, _)| stages.as_slice()).collect();
-    rejected.extend(middleware::limits::over_budget(snapshot, &stage_lists));
+    let l4_lists: Vec<&[l4::middleware::Named]> =
+        l4s.iter().map(|l4| l4.tcp().middlewares()).collect();
+    rejected.extend(middleware::limits::over_budget(
+        snapshot,
+        &stage_lists,
+        &l4_lists,
+    ));
     rejected.extend(middleware::jwt_auth::check_snapshot(
         snapshot,
         &stage_lists,
@@ -536,9 +542,6 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
             app.transports.iter().map(|declared| &*declared.name),
             &mut problem,
         );
-        if let Some(invalid) = l4::reject(app) {
-            problem("tcp".to_owned(), invalid);
-        }
     }
     rejected
 }
@@ -856,7 +859,7 @@ fn expand_name<'a>(
 /// is refused whether or not it is used. A bad one keeps its name with a placeholder, so the
 /// services naming it do not add an `unknown_transport` to the one real problem; the snapshot is
 /// refused, so the placeholder is never used.
-fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<NamedTransport> {
+pub(crate) fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<NamedTransport> {
     app.transports
         .iter()
         .map(|declared| {

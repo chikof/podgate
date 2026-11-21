@@ -604,6 +604,19 @@ impl CompiledApp {
             .collect()
     }
 
+    /// The names of the TCP services that connect to a `tls: true` server without
+    /// verifying its certificate: [`Self::unverified_services`] for layer 4.
+    #[must_use]
+    pub fn unverified_tcp_services(&self) -> BTreeSet<&str> {
+        self.l4
+            .tcp()
+            .services()
+            .iter()
+            .filter(|service| service.balancer().skips_tls_verification())
+            .map(|service| service.name())
+            .collect()
+    }
+
     /// Where the router's service in revision `revision` starts: a `ServiceRef` of the revision's
     /// scope. `None` when the revision does not define it.
     pub(crate) fn root(&self, revision: usize, router: usize) -> Option<Node> {
@@ -1100,6 +1113,8 @@ pub struct TableHandle {
     rate_limits: Arc<middleware::rate_limit::Registry>,
     // Counts of `in_flight_req` middlewares; touched only by `swap`.
     in_flight_reqs: Arc<middleware::in_flight_req::Registry>,
+    // Counts of `in_flight_conn` middlewares of TCP routers; touched only by `swap`.
+    in_flight_conns: Arc<crate::l4::middleware::Registry>,
     // Permits of `forward_auth` middlewares; touched only by `swap`.
     forward_auths: Arc<middleware::forward_auth::Registry>,
     // Cached keys and counters of `jwt_auth` middlewares; touched only by `swap`.
@@ -1281,6 +1296,7 @@ impl TableHandle {
         self.digest_auth.settle(&mut table.apps);
         self.rate_limits.settle(&mut table.apps);
         self.in_flight_reqs.settle(&mut table.apps);
+        self.in_flight_conns.settle(&mut table.apps);
         self.forward_auths.settle(&mut table.apps);
         self.jwt_auths.settle(&mut table.apps);
         self.oidcs.settle(&mut table.apps);

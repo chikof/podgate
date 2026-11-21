@@ -457,6 +457,7 @@ struct AppView<'a> {
 struct TcpView<'a> {
     routers: Vec<TcpRouterView<'a>>,
     services: Vec<TcpServiceView<'a>>,
+    middlewares: Vec<MiddlewareView<'a>>,
 }
 
 #[derive(Serialize)]
@@ -468,6 +469,8 @@ struct TcpRouterView<'a> {
     matcher: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tls: Option<crate::l4::tcp::Tls>,
+    /// The TCP middlewares run before the connection is taken, in order.
+    chain: Vec<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -479,6 +482,10 @@ struct TcpServiceView<'a> {
     /// The DNS names among the servers.
     names: Vec<&'a str>,
     idle_timeout_secs: u64,
+    /// The PROXY protocol version written to the servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy_protocol: Option<u8>,
+    termination_delay_ms: u128,
 }
 
 /// The app's UDP routers and services.
@@ -691,7 +698,7 @@ fn app_view<'a>(app: &'a CompiledApp, runtime: &Runtime<'_>) -> AppView<'a> {
 /// The TCP side of `app`, `None` when it declares none.
 fn tcp_view(app: &CompiledApp) -> Option<TcpView<'_>> {
     let tcp = app.l4().tcp();
-    if tcp.routers().is_empty() && tcp.services().is_empty() {
+    if tcp.routers().is_empty() && tcp.services().is_empty() && tcp.middlewares().is_empty() {
         return None;
     }
     Some(TcpView {
@@ -704,6 +711,12 @@ fn tcp_view(app: &CompiledApp) -> Option<TcpView<'_>> {
                     service: service.name(),
                     matcher: router.match_json(),
                     tls: router.tls(),
+                    chain: router
+                        .chain()
+                        .iter()
+                        .filter_map(|at| tcp.middlewares().get(*at))
+                        .map(|named| &*named.name)
+                        .collect(),
                 })
             })
             .collect(),
@@ -721,6 +734,17 @@ fn tcp_view(app: &CompiledApp) -> Option<TcpView<'_>> {
                     .collect(),
                 names: service.balancer().dns_names().collect(),
                 idle_timeout_secs: service.idle().as_secs(),
+                proxy_protocol: service.upstream().proxy_protocol(),
+                termination_delay_ms: service.upstream().termination_delay().as_millis(),
+            })
+            .collect(),
+        middlewares: tcp
+            .middlewares()
+            .iter()
+            .map(|named| MiddlewareView {
+                name: &named.name,
+                kind: named.stage.kind(),
+                config: named.stage.describe(),
             })
             .collect(),
     })

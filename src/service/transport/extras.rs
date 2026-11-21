@@ -64,7 +64,7 @@ pub struct ProxyProtocolConfig {
 }
 
 impl ProxyProtocolConfig {
-    fn wire(self) -> Option<Version> {
+    pub(crate) fn wire(self) -> Option<Version> {
         match self.version {
             1 => Some(Version::V1),
             2 => Some(Version::V2),

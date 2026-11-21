@@ -423,6 +423,31 @@ impl Transport {
             || wire.idle.is_some()
             || self.extras.is_set()
     }
+
+    /// What a TCP service cannot take from the transport it names, `None` when it takes all of
+    /// it. A TCP service uses the transport for TLS and the dial timeout; the HTTP version, the
+    /// other timeouts and the tunnel limits mean nothing to raw bytes, and `proxy_protocol` is
+    /// the service's own field (one header, from the connection's real addresses), so a
+    /// transport that sets any of them is refused instead of being ignored.
+    #[must_use]
+    pub fn tcp_refusal(&self) -> Option<&'static str> {
+        let wire = &self.wire;
+        if self.extras.is_set() {
+            Some("proxy_protocol and the tunnel limits")
+        } else if wire.http2.is_some() {
+            Some("http2")
+        } else if wire.read.is_some() || wire.write.is_some() || wire.idle.is_some() {
+            Some("read_timeout_secs, write_timeout_secs and idle_timeout_secs")
+        } else {
+            None
+        }
+    }
+
+    /// The dial timeout the transport sets, connect and TLS handshake together.
+    #[must_use]
+    pub fn dial_timeout(&self) -> Option<Duration> {
+        self.wire.dial
+    }
 }
 
 impl Default for Transport {
@@ -484,7 +509,7 @@ impl Upstream<'_> {
     /// never switches to HTTP/2. No timeouts and no pool partition: the caller sets them. For
     /// proxied requests use [`Upstream::http_peer`].
     #[must_use]
-    fn base_peer(self) -> HttpPeer {
+    pub(crate) fn base_peer(self) -> HttpPeer {
         let server = self.server;
         if !server.tls {
             return HttpPeer::new(server.addr, false, String::new());

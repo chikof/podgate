@@ -1,8 +1,7 @@
 //! TCP and UDP routers and services of an app.
 //!
-//! The model exists so a snapshot can carry them; `src/l4/` compiles them. TCP is refused by name
-//! (`l4_not_built`) until it is built; UDP is built. Routers and services are [`Declared`] objects like
-//! the HTTP ones; their kind modules will own their configuration.
+//! The model exists so a snapshot can carry them; `src/l4/` compiles them. Routers and services
+//! are [`Declared`] objects like the HTTP ones; their kind modules own their configuration.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

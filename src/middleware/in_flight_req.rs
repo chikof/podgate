@@ -19,12 +19,13 @@
 //! - Limits are per node.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::limits::{DEFAULT_MAX_SOURCES, Limiter, MAX_SOURCES, Source, SourceConfig, SourceTable};
+use super::limits::{
+    DEFAULT_MAX_SOURCES, Limiter, MAX_SOURCES, Permit, Source, SourceConfig, SourceTable,
+};
 use super::{CompileCx, FinishCx, Flow, Kind, RequestCx, Stage, state};
 use crate::compile::Invalid;
 use crate::error::AppError;
@@ -62,41 +63,6 @@ pub struct InFlightReq {
     runtime: Arc<Limiter>,
 }
 
-/// Where a request's slot is counted.
-#[derive(Debug, Clone, Copy)]
-enum Slot {
-    /// The entry of the source with this key.
-    Entry(u64),
-    /// The table's shared overflow counter.
-    Overflow,
-}
-
-/// One slot of a source. Dropping it returns the slot, whatever ended the request.
-#[derive(Debug)]
-pub struct Permit {
-    limiter: Arc<Limiter>,
-    slot: Slot,
-}
-
-impl Drop for Permit {
-    fn drop(&mut self) {
-        let Some(table) = self.limiter.allocated() else {
-            return;
-        };
-        match self.slot {
-            Slot::Entry(key) => table.with_existing(key, |count| *count = count.saturating_sub(1)),
-            Slot::Overflow => {
-                // Never below zero: `try_update` stops at `None`.
-                let _ = table
-                    .overflow()
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        count.checked_sub(1)
-                    });
-            }
-        }
-    }
-}
-
 /// Per-request state: the slot, while the request holds one.
 #[derive(Debug, Default)]
 pub struct State {
@@ -118,32 +84,7 @@ impl InFlightReq {
 
     /// Takes a slot of source `key`, or `None` when it already has `amount` in flight.
     fn acquire(&self, table: &SourceTable, key: u64) -> Option<Permit> {
-        let amount = u64::from(self.amount);
-        let slot = match table.with(
-            key,
-            |count| count == 0,
-            |count| {
-                (*count < amount).then(|| {
-                    *count += 1;
-                })
-            },
-        ) {
-            Some(taken) => taken.map(|()| Slot::Entry(key))?,
-            None => {
-                table.count_overflow();
-                table
-                    .overflow()
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        (count < amount).then(|| count + 1)
-                    })
-                    .ok()
-                    .map(|_| Slot::Overflow)?
-            }
-        };
-        Some(Permit {
-            limiter: Arc::clone(&self.runtime),
-            slot,
-        })
+        self.runtime.acquire(table, key, self.amount)
     }
 }
 
