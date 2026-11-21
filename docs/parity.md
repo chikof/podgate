@@ -54,7 +54,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Hash policies | `strategy: hrw` | `ip_hash`, `uri_hash`, `header`, `query`, `cookie` | built: `ip_hash`, `uri_hash`, `header_hash`, `hrw` (consistent hashing on a keyed ketama ring, rendezvous for `hrw`, client address resolved by 0026, random fallback without a key); `query` and `cookie` declined, sticky cookies are 0036 |
 | Active health checks | `healthCheck` | `health_uri` and friends | built (`health_check` with thresholds, status ranges, body regex, per-server jitter and a global probe cap; HTTPS probes use the service's transport: private CA, SNI, client certificate) |
 | Passive ejection | none (circuit breaker only) | `max_fails`, `fail_duration`, `unhealthy_*` | built (`passive` on `loadbalancer`; connect failures, timeouts, 5xx and slow responses eject a server for a growing time, capped by a percentage and never the last available server; see `docs/ref/svc-outlier.md`) |
-| Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | 0035 (connect errors; idempotent replay only; no retry on a response status) |
+| Retries | `retry` middleware | `lb_retries`, `lb_try_duration` | built (0035 done: connect errors for any method; a dead reused connection only for listed methods and a replayable body; no retry on a response status) |
 | Sticky sessions | `sticky.cookie` | `lb_policy cookie` | built (HMAC cookie on `loadbalancer`, falls back and re-pins when the server is gone, unhealthy or ejected; see `docs/ref/svc-sticky.md`) |
 | Weighted service of services | `weighted` | none | 0037 |
 | Failover service | `failover` | `lb_try_duration` partly | 0037 |
