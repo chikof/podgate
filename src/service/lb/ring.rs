@@ -279,7 +279,16 @@ mod test {
     }
 
     fn picks(balancer: &Balancer, servers: &[Server], shared: &ServiceState) -> Vec<Option<usize>> {
-        (0..2000)
+        picks_of(balancer, servers, shared, 2000)
+    }
+
+    fn picks_of(
+        balancer: &Balancer,
+        servers: &[Server],
+        shared: &ServiceState,
+        count: u32,
+    ) -> Vec<Option<usize>> {
+        (0..count)
             .map(|n| pick(balancer, servers, shared, n))
             .collect()
     }
@@ -380,7 +389,7 @@ mod test {
         let up = weighted(&[1, 3]);
         let shared = ServiceState::default();
         let balancer = compile("hrw", &up);
-        let picks = picks(&balancer, &up, &shared);
+        let picks = picks_of(&balancer, &up, &shared, 50_000);
         let light = picks.iter().filter(|pick| **pick == Some(0)).count();
         let heavy = picks.iter().filter(|pick| **pick == Some(1)).count();
         assert_eq!(light + heavy, picks.len());
@@ -394,7 +403,7 @@ mod test {
         let shared = ServiceState::default();
         for name in ["ip_hash", "uri_hash", "header_hash", "hrw"] {
             let balancer = compile(name, &up);
-            let picks = picks(&balancer, &up, &shared);
+            let picks = picks_of(&balancer, &up, &shared, 50_000);
             let count = |index| picks.iter().filter(|pick| **pick == Some(index)).count();
             assert_eq!(count(2), 0, "{name}: weight 0 receives nothing");
             let ratio = count(1) as f64 / count(0) as f64;
