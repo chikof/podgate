@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use common::dns::Dns;
 use common::{Podgate, Upstream, app, serving, snapshot};
 use podgate::RoutingTable;
 use podgate::tls::ocsp::{Fingerprint, Identity, Outcome, Reason, Staples, Verified, verify};
@@ -1305,6 +1306,70 @@ async fn ocsp_responder_metadata_address_refused() {
             .expect("handshake")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn ocsp_responder_dns_rebind_refused() {
+    let pki = Arc::new(Pki::new("ca"));
+    let responder = Responder::start(&pki, Mode::Good).await;
+    let url = format!("http://ocsp.rebind.test:{}/ocsp", responder.addr.port());
+    let leaf = pki.leaf("a.test", Extras::MustStaple, &url);
+    let dns = Dns::start().await;
+    // The name points at the responder on loopback, which this policy denies.
+    dns.set("ocsp.rebind.test", &["127.0.0.1"], 1);
+    let policy = PolicyFile::new(r#"{"deny": ["127.0.0.0/8", "::1/128"]}"#);
+    let podgate = Podgate::start_with_env(&[
+        ("UPSTREAM_POLICY_FILE", policy.path()),
+        ("DNS_SERVERS", &dns.servers()),
+    ])
+    .await;
+    let elsewhere = "10.0.0.1:80".parse().expect("address");
+    push(
+        &podgate,
+        &live_snapshot(1, elsewhere, &["a.test"], &[leaf.entry(None)]),
+    )
+    .await;
+
+    wait_for_rejection(&podgate, "policy").await;
+    assert!(
+        dns.queries_for("ocsp.rebind.test") >= 1,
+        "the name was resolved"
+    );
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        responder.hits(),
+        0,
+        "the answer was refused before any dial"
+    );
+    assert!(
+        staple(&podgate, "a.test")
+            .await
+            .expect("handshake")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn ocsp_responder_resolved_by_name() {
+    let pki = Arc::new(Pki::new("ca"));
+    let responder = Responder::start(&pki, Mode::Good).await;
+    let url = format!("http://ocsp.allowed.test:{}/ocsp", responder.addr.port());
+    let leaf = pki.leaf("a.test", Extras::MustStaple, &url);
+    let dns = Dns::start().await;
+    dns.set("ocsp.allowed.test", &["127.0.0.1"], 60);
+    let upstream = Upstream::start("ok").await;
+    // The harness policy allows loopback, so the name's answer is dialled.
+    let podgate = Podgate::start_with_env(&[("DNS_SERVERS", &dns.servers())]).await;
+    push(
+        &podgate,
+        &live_snapshot(1, upstream.addr, &["a.test"], &[leaf.entry(None)]),
+    )
+    .await;
+
+    let staple_bytes = wait_for_staple(&podgate, "a.test").await;
+    let identity = identity(&leaf, &pki, OcspMode::Auto);
+    verify(&staple_bytes, &identity, &pki.der, SystemTime::now()).expect("verifies");
+    assert!(dns.queries_for("ocsp.allowed.test") >= 1);
 }
 
 #[tokio::test]

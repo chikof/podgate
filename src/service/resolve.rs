@@ -405,6 +405,34 @@ impl Resolver {
         found
     }
 
+    /// Resolves `name` once, now, for a caller that dials the answer immediately and checks every
+    /// address with the upstream policy itself (OCSP responders). Nothing is cached
+    /// and no task is started, so a name that no service uses costs one lookup per call; it
+    /// shares the node-wide query rate and the lookups-in-flight cap with the tasks. The
+    /// addresses are IPv4 then IPv6, sorted, at most [`MAX_ADDRESSES_PER_NAME`]; a failed lookup
+    /// contributes none, so an empty answer means the name did not resolve. Policy-refused
+    /// addresses are not removed here: the caller's `check` counts and logs them.
+    pub async fn resolve_once(&self, name: &str) -> Vec<IpAddr> {
+        let mut found = Vec::new();
+        for family in Family::BOTH {
+            self.inner.limiter.acquire().await;
+            let Ok(_permit) = self.inner.permits.acquire().await else {
+                break;
+            };
+            let key = Key {
+                name: name.into(),
+                family,
+            };
+            if let Ok((addrs, _ttl)) = self.inner.lookup(&key).await {
+                found.extend(addrs);
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found.truncate(MAX_ADDRESSES_PER_NAME);
+        found
+    }
+
     /// A signal that fires whenever an answer changes: gained or lost an address, or went
     /// stale. The value counts changes; read the addresses with [`Self::peek`].
     #[must_use]

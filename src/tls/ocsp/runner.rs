@@ -7,7 +7,7 @@
 //! of at most 64 KiB whose `Content-Type` is `application/ocsp-response`. The policy is asked
 //! about the exact IP before it is dialled, on every attempt.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime};
 
 use pingora::upstreams::peer::HttpPeer;
@@ -18,6 +18,7 @@ use super::responder::{AllowedHosts, Responder};
 use super::staples::{Job, Outcome};
 use super::verify::{MAX_RESPONSE, verify};
 use crate::middleware::errors::fetch::{Failure, Fetcher, Limits, Query};
+use crate::service::resolve::Resolver;
 use crate::service::upstream_policy::UpstreamPolicy;
 
 /// Connect, request and response together.
@@ -31,16 +32,19 @@ pub struct Runner {
     fetcher: Fetcher,
     policy: UpstreamPolicy,
     allowed: AllowedHosts,
+    resolver: Resolver,
 }
 
 impl Runner {
-    /// A runner that dials only what `policy` permits and `allowed` lists.
+    /// A runner that dials only what `policy` permits and `allowed` lists, resolving responder
+    /// host names with `resolver`.
     #[must_use]
-    pub fn new(policy: UpstreamPolicy, allowed: AllowedHosts) -> Self {
+    pub fn new(policy: UpstreamPolicy, allowed: AllowedHosts, resolver: Resolver) -> Self {
         Self {
             fetcher: Fetcher::default(),
             policy,
             allowed,
+            resolver,
         }
     }
 
@@ -52,17 +56,36 @@ impl Runner {
         }
     }
 
+    /// The address to dial: the literal in the URL, or the first address of a fresh resolution of
+    /// the host name that every tenant's policy permits. Every candidate is checked, so a name
+    /// that answers loopback or a metadata address is refused (`policy`), and the IP returned
+    /// is the one dialled: the name is never resolved a second time.
+    async fn address(&self, responder: &Responder, tenants: &[&str]) -> Result<IpAddr, Reason> {
+        let candidates = match responder.address() {
+            Some(ip) => vec![ip],
+            None => self.resolver.resolve_once(responder.host()).await,
+        };
+        if candidates.is_empty() {
+            return Err(Reason::Unresolved);
+        }
+        candidates
+            .into_iter()
+            .find(|ip| {
+                tenants
+                    .iter()
+                    .all(|tenant| self.policy.check(tenant, *ip).is_ok())
+            })
+            .ok_or(Reason::Policy)
+    }
+
     async fn attempt(&self, job: &Job) -> Result<super::verify::Verified, Reason> {
         let tenants = job.scope().tenants().ok_or(Reason::Unowned)?;
         let responder = Responder::parse(job.identity().responder())?;
         if !self.allowed.permits(responder.host()) {
             return Err(Reason::HostNotAllowed);
         }
-        let ip = responder.address().ok_or(Reason::Unresolved)?;
-        for tenant in &tenants {
-            self.policy.check(tenant, ip).map_err(|_| Reason::Policy)?;
-        }
         let _running = metrics::fetch_started();
+        let ip = self.address(&responder, &tenants).await?;
         let peer = HttpPeer::new(
             SocketAddr::new(ip, responder.port()),
             responder.tls(),

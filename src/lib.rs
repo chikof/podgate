@@ -286,7 +286,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     ));
     server.add_service(background_service(
         "dns resolver",
-        service::resolve::ResolveService::new(resolver, table.clone()),
+        service::resolve::ResolveService::new(resolver.clone(), table.clone()),
     ));
     server.add_service(background_service(
         "ocsp stapling",
@@ -296,6 +296,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             tls::ocsp::Runner::new(
                 upstream_policy.clone(),
                 tls::ocsp::AllowedHosts::new(config.ocsp_allowed_hosts.iter().map(AsRef::as_ref)),
+                resolver,
             ),
         ),
     ));

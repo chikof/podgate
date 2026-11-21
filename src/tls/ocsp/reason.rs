@@ -17,7 +17,7 @@ pub enum Reason {
     Scheme,
     /// `OCSP_ALLOWED_HOSTS` does not list the responder host.
     HostNotAllowed,
-    /// The responder host could not be turned into an address.
+    /// The responder host name did not resolve.
     Unresolved,
     /// The upstream address policy refuses the responder's address.
     Policy,

@@ -23,6 +23,7 @@ A fetch starts when a certificate enters the table. The TLS handshake never wait
 The responder URL is text the certificate's supplier chose, and in `certificates` that can be a tenant, so it is fetched like any other address a tenant influences:
 
 - Only `http` or `https`; no user information and no query. The request is the `GET` form of RFC 6960 appendix A.1 (`<url path>/<percent-encoded base64 of the DER request>`), under 512 bytes, one `CertID` hashed with SHA-1, no nonce (RFC 5019).
+- A responder host name is resolved at fetch time by the DNS resolver of `service::resolve` (`DNS_SERVERS` and the other `DNS_*` settings apply; nothing is cached and the name is never resolved a second time). Every address of the answer is checked and the first one every owning tenant's policy permits is dialled, with the name as `Host` (and the SNI of an `https` responder): a name that answers loopback, link-local or a metadata address is refused (`policy`), which is what defeats DNS rebinding. A name that does not resolve is `unresolved`.
 - The exact IP is checked against the upstream address policy (`docs/ref/upstream-policy.md`) immediately before it is dialled, on every attempt. Loopback, link-local, metadata and the other built-in denied ranges are refused unless the operator's policy permits them.
 - The policy applied is the one of the tenant that owns the certificate. A snapshot certificate carries no tenant, so it is derived from the table: the tenants of every app whose hosts overlap the certificate's hosts, and the address must pass the policy of each of them. The `default: true` certificate is the operator's: it is checked as the policy's `default` entry. A certificate that is neither default nor claimed by any app has no owner and is not fetched (`unowned`).
 - No redirect is followed: a `3xx` is a failed fetch (`http_status`). The exchange (connect, request, response) has 5 seconds. The response is at most 64 KiB and its `Content-Type` must be `application/ocsp-response`.
@@ -65,5 +66,4 @@ Reasons: `no_issuer`, `no_responder`, `unowned`, `scheme`, `host_not_allowed`, `
 
 ## Limits
 
-- Responder URLs that name a host (not an IP address) are not fetched yet: they are counted as `unresolved` until DNS resolution is wired.
 - Only the TLS listener entry points staple. TCP passthrough routers never terminate TLS.
