@@ -60,7 +60,7 @@ A call that errors, times out, finds the circuit open, or finds too many calls i
 |`on_store_error`|What the request gets|
 |---|---|
 |`allow`|Admitted only if the node's own count of the source is under `local_fallback.amount`, else `429` with `retry-after: 1`. The request takes the node's slot and no store slot.|
-|`deny`|`503 {"error":"rate limiter unavailable"}` with `retry-after: 1`.|
+|`deny`|`503 {"error":"in-flight limiter unavailable"}` with `retry-after: 1`; the access log's `reason` is `inflight_store_unavailable`.|
 
 Both are capacity refusals: auto-revert does not count them. Like every in-flight refusal they are answered before any tenant `max_inflight` slot, backend permit or upstream is taken.
 

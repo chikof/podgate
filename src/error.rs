@@ -201,6 +201,10 @@ pub enum AppError {
     /// retry in a second.
     #[error("rate limiter unavailable")]
     RateLimiterUnavailable,
+    /// A cluster-scope `in_flight_req` with `on_store_error: "deny"` cannot reach its store:
+    /// `503`, retry in a second.
+    #[error("in-flight limiter unavailable")]
+    InflightStoreUnavailable,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -241,6 +245,7 @@ impl AppError {
             | Self::OidcBusy
             | Self::LimiterBusy
             | Self::RateLimiterUnavailable
+            | Self::InflightStoreUnavailable
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -261,6 +266,7 @@ impl AppError {
             | Self::TooManyInFlight
             | Self::LimiterBusy
             | Self::RateLimiterUnavailable
+            | Self::InflightStoreUnavailable
             | Self::Saturated
             | Self::StaticBusy
             | Self::StaticOverBudget
@@ -294,6 +300,7 @@ impl AppError {
                 | Self::TooManyInFlight
                 | Self::LimiterBusy
                 | Self::RateLimiterUnavailable
+                | Self::InflightStoreUnavailable
                 | Self::Saturated
                 | Self::StaticBusy
                 | Self::StaticOverBudget
@@ -348,6 +355,7 @@ impl AppError {
             Self::TooManyInFlight => "in_flight_limit",
             Self::LimiterBusy => "limiter_busy",
             Self::RateLimiterUnavailable => "rate_limit_store_unavailable",
+            Self::InflightStoreUnavailable => "inflight_store_unavailable",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::WriterOwned { .. } => "writer_owned",
@@ -516,6 +524,19 @@ mod test {
         assert_eq!(err.retry_after_secs(), Some(1));
         assert_eq!(err.body(), json!({"error": "rate limiter unavailable"}));
         assert_eq!(err.log_reason(), "rate_limit_store_unavailable");
+        assert!(err.is_capacity_refusal());
+    }
+
+    #[test]
+    fn inflight_store_unavailable_is_a_503_capacity_refusal_with_its_own_reason() {
+        let err = AppError::InflightStoreUnavailable;
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.retry_after_secs(), Some(1));
+        assert_eq!(
+            err.body(),
+            json!({"error": "in-flight limiter unavailable"})
+        );
+        assert_eq!(err.log_reason(), "inflight_store_unavailable");
         assert!(err.is_capacity_refusal());
     }
 }

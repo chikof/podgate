@@ -470,12 +470,19 @@ async fn inflight_store_killed_deny_503() {
     let mut valkey = Valkey::start().await;
     let backend = Backend::start(Duration::ZERO).await;
     let dir = valkey::scratch("ifr-deny");
-    let podgate = node(&one_store(&dir, valkey::entry(valkey.addr()))).await;
-    push(
-        &podgate,
-        &snapshot(1, &[capped(backend.addr, cap(100, deny()))]),
-    )
+    let stores = one_store(&dir, valkey::entry(valkey.addr()));
+    let access_log = dir.join("access.log");
+    let podgate = Podgate::start_with_env(&[
+        (
+            "RATE_LIMIT_STORES_FILE",
+            stores.to_str().expect("utf-8 path"),
+        ),
+        ("ACCESS_LOG_FILE", access_log.to_str().expect("utf-8 path")),
+    ])
     .await;
+    let mut pushed = snapshot(1, &[capped(backend.addr, cap(100, deny()))]);
+    pushed["observability"] = json!({"access_log": {}});
+    push(&podgate, &pushed).await;
     assert_eq!(hit(&podgate, "/", "client").await.status, 200);
 
     valkey.stop();
@@ -485,8 +492,26 @@ async fn inflight_store_killed_deny_503() {
         assert_eq!(response.header("retry-after"), Some("1"));
         assert_eq!(
             response.json(),
-            json!({"error": "rate limiter unavailable"})
+            json!({"error": "in-flight limiter unavailable"})
         );
+    }
+    // One line for the served request, then one per refusal, each naming the in-flight store.
+    let deadline = Instant::now() + WAIT;
+    let reasons = loop {
+        let text = std::fs::read_to_string(&access_log).unwrap_or_default();
+        let reasons: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("a JSON line")["reason"].clone())
+            .collect();
+        if reasons.len() >= 9 || Instant::now() > deadline {
+            break reasons;
+        }
+        sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(reasons.len(), 9, "{reasons:?}");
+    assert_eq!(reasons[0], Value::Null);
+    for reason in &reasons[1..] {
+        assert_eq!(reason, "inflight_store_unavailable");
     }
     assert_eq!(backend.hits(), 1, "a refusal reaches no upstream");
     let text = metrics(&podgate).await;

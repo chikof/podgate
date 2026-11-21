@@ -20,7 +20,7 @@
 //!   that count is what limits requests while the store gives no verdict.
 //! - A store error is not a verdict. `allow` admits the request only if the node's own count
 //!   is under `local_fallback.amount`, `429` otherwise; `deny` answers
-//!   `503 {"error":"rate limiter unavailable"}` with `retry-after: 1`.
+//!   `503 {"error":"in-flight limiter unavailable"}` with `retry-after: 1`.
 
 use std::fmt::Write as _;
 use std::ops::RangeInclusive;
@@ -371,7 +371,7 @@ impl Cluster {
             tracing::debug!(store = store.name(), %error, "in-flight limit store error");
         }
         let refusal = match self.on_error {
-            OnError::Deny => AppError::RateLimiterUnavailable,
+            OnError::Deny => AppError::InflightStoreUnavailable,
             OnError::Allow { fallback } => {
                 return cap
                     .runtime
