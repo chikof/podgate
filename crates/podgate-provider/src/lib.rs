@@ -19,6 +19,8 @@
 //! - [`kubernetes`]: the source that turns Ingresses and EndpointSlices into routers and servers.
 //! - [`traefik`]: the translator of `traefik.*` labels and tags (rules, services, middlewares),
 //!   called by the sources next to their own labels.
+//! - [`nomad`]: the source that turns Nomad service registrations into apps through their
+//!   `podgate.*` tags.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -31,6 +33,7 @@ pub mod engine;
 pub mod file;
 pub mod kubernetes;
 pub mod merge;
+pub mod nomad;
 pub mod policy;
 pub mod push;
 pub mod quarantine;
