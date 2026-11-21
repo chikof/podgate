@@ -126,7 +126,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 the provider's ACME broker and the solver hook; 0083 the solvers: RFC 2136 with TSIG and a webhook in the provider, two generic mechanisms instead of vendor SDKs); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
-| Internal CA (`tls internal`) | none | yes | 0103 (key material in the provider and offline root, name-constrained intermediate, short-lived leaves) |
+| Internal CA (`tls internal`) | none | yes | built by change 0103 (local CA with root and intermediate, short-lived leaves, trust recipes; the CA is in the provider, no ACME server) |
 | OCSP stapling | none | automatic | built (verified staples, fetched through the upstream policy; must-staple by default, `ocsp: on` for any certificate with a responder, see `docs/ref/ocsp.md`) |
 | Mutual TLS (client auth) | `clientAuth` | `client_auth` | built (0021 enforcement, 0057 modes) |
 | Min and max version, cipher suites, curves, ALPN | `tls.options` | `protocols`, `ciphers`, `curves`, `alpn` | built (`max_version` and `curves` are rejected, not ignored) |
