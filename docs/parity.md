@@ -106,8 +106,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | gRPC-Web | `grpcWeb` | plugin | built: `grpc_web` middleware, binary and text, streaming, trailers as a body frame (trailers-only too, `grpc-status: 13` over 8 KiB, `2` when a response ends without trailers), `allow_origins` never reflected; every service reachable from the router must speak HTTP/2 (`invalid_middleware` otherwise) |
 | Chain of middlewares | `chain` | `route`, `handle` | 0022 |
 | Plugins | Yaegi (Go) plugins | Go modules | WASM filters in process; 0099 out-of-process plugins over a unix socket (no native code in podgate, any language); 0113 runs Traefik Go plugins through a Yaegi host. `dlopen` plugins are rejected |
-| JWT verification | Traefik Hub only | plugins | `jwt_auth` built (JWKS fetched through the upstream policy; names are not resolved until the JWKS fetch uses the 0042 resolver) |
-| OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | 0090 (stateless encrypted cookie sessions; no refresh tokens) |
+| JWT verification | Traefik Hub only | plugins | `jwt_auth` built (JWKS fetched through the upstream policy; names are resolved per call since 0090) |
+| OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | built (stateless encrypted cookie sessions; no refresh tokens) |
 | Response caching | Hub only | `cache` plugin | built: memory only, bounded per tenant (charged to `max_buffer_bytes`, capped share), no disk tier, no distributed mode, purge API |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
 | Static files: `file_server`, `try_files`, precompressed | none | yes | built: operator-declared per-tenant roots opened as `cap-std` handles (`STATIC_ROOTS_FILE`), no `..` or symlink escape, no hidden files, `index`, `try_files`, status pages, validators, ranges, `br`/`gzip` sidecars, file buffers charged to `max_buffer_bytes`; see `docs/ref/svc-static.md` |
