@@ -5,6 +5,7 @@
 //! as a proxied one (`Gateway::response_filter` and `response_body_filter`), so the router's
 //! middlewares (`headers`, compression, failure capture) see a static answer like any other.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -16,12 +17,13 @@ use pingora::{BError, Error};
 use thiserror::Error;
 
 use super::StaticSite;
+use super::browse;
 use super::mime;
 use super::precompressed::{self, Encoding};
 use super::range::{self, Plan};
 use super::reader::{Busy, RESERVATION, Reads, Stream, StreamError};
 use super::roots::{Kind, OpenError, Opened, RelPath};
-use crate::budget::Budgets;
+use crate::budget::{Budgets, TenantBudget};
 use crate::error::AppError;
 use crate::middleware;
 use crate::proxy::{Ctx, Gateway};
@@ -31,15 +33,16 @@ use crate::router::path;
 /// What the request asked, copied out of its header so the session can be borrowed mutably while
 /// the answer is written.
 #[derive(Debug)]
-struct Asked {
+pub(super) struct Asked {
     method: Method,
     /// The normalized path; `None` when it cannot be normalized.
-    path: Option<String>,
-    query: Option<String>,
+    pub(super) path: Option<String>,
+    pub(super) query: Option<String>,
     range: Option<String>,
     if_none_match: Option<String>,
     if_modified_since: Option<String>,
     if_range: Option<String>,
+    pub(super) accept: Option<String>,
     accept_encoding: Vec<String>,
 }
 
@@ -71,6 +74,7 @@ impl Asked {
             if_none_match: joined("if-none-match"),
             if_modified_since: text("if-modified-since"),
             if_range: text("if-range"),
+            accept: text("accept"),
             accept_encoding: request
                 .headers
                 .get_all("accept-encoding")
@@ -84,9 +88,11 @@ impl Asked {
 
 /// Why an answer could not be built.
 #[derive(Debug, Error)]
-enum Failure {
+pub(super) enum Failure {
     #[error(transparent)]
     Busy(#[from] Busy),
+    #[error("the tenant's buffer budget cannot take the listing")]
+    OverBudget,
     #[error("cannot build the response: {0}")]
     Http(Box<Error>),
 }
@@ -350,6 +356,8 @@ async fn answer(
     site: &StaticSite,
     reads: &Reads,
     asked: &Asked,
+    tenant: Option<&Arc<TenantBudget>>,
+    held: &mut browse::Held,
 ) -> Result<(ResponseHeader, Body), Failure> {
     let hit = match find(site, reads, asked).await? {
         Found::File(hit) => *hit,
@@ -359,7 +367,12 @@ async fn answer(
             header.insert_header("content-length", "0")?;
             return Ok((header, Body::Empty));
         }
-        Found::Status(status) => return status_answer(site, reads, status).await,
+        Found::Status(status) => {
+            if let Some((header, page)) = browse::listing(site, reads, tenant, asked, held).await? {
+                return Ok((header, Body::Bytes(page)));
+            }
+            return status_answer(site, reads, status).await;
+        }
     };
     let representation = represent(site, reads, asked, hit).await?;
     let Representation {
@@ -547,14 +560,16 @@ pub(crate) async fn serve(
     } else {
         None
     };
+    let mut held = browse::Held::default();
     let built = if reading {
-        answer(&site, reads, &asked).await
+        answer(&site, reads, &asked, tenant.as_ref(), &mut held).await
     } else {
         method_not_allowed()
     };
     match built {
         Ok((header, body)) => emit(gateway, reads, session, ctx, header, body).await,
         Err(Failure::Busy(Busy)) => refuse(session, ctx, AppError::StaticBusy).await,
+        Err(Failure::OverBudget) => refuse(session, ctx, AppError::StaticOverBudget).await,
         Err(Failure::Http(err)) => Err(err),
     }
 }

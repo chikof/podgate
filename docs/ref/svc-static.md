@@ -2,7 +2,7 @@
 
 A service of type `static` answers requests from a directory on the node instead of dialling a
 server. It is the file-serving half of Caddy's `file_server` and `try_files`. Directory listings
-(`browse`) are change 0101 and `php_fastcgi` is change 0100.
+(`browse`, `docs/ref/svc-static-browse.md`) are change 0101 and `php_fastcgi` is change 0100.
 
 ```json
 { "name": "site", "type": "static", "root": "site",
@@ -59,8 +59,8 @@ In front of that, the request path:
    pages alike. There is no override: a hidden file cannot be served.
 
 A FIFO, socket or device in a root is opened without blocking and then refused (`404`): only
-regular files and directories are served. A directory is never listed: without an index file it is
-`404`.
+regular files and directories are served. A directory is not listed unless the operator and the
+service both opt in (`docs/ref/svc-static-browse.md`): without an index file it is `404`.
 
 The mount points a root crosses are not detected: a bind mount inside the tree is part of the tree.
 That is the operator's tree to keep.

@@ -18,6 +18,7 @@ use std::time::SystemTime;
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt};
+use serde::Deserialize;
 use thiserror::Error;
 
 /// The roots of one tenant, by the label a snapshot service names.
@@ -27,6 +28,23 @@ pub type TenantRoots = HashMap<Box<str>, Arc<Root>>;
 #[derive(Clone, Debug, Default)]
 pub struct StaticRoots {
     tenants: Arc<HashMap<Box<str>, TenantRoots>>,
+}
+
+/// One entry of `STATIC_ROOTS_FILE`: the directory alone, or the directory with the operator's flags.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RootEntry {
+    Path(PathBuf),
+    Flags(RootFlags),
+}
+
+/// The object form of a root entry.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootFlags {
+    path: PathBuf,
+    #[serde(default)]
+    browse: bool,
 }
 
 /// Why `STATIC_ROOTS_FILE` is refused. The message names the file and the entry.
@@ -76,11 +94,11 @@ impl StaticRoots {
             path: shown.clone(),
             source,
         })?;
-        let declared: HashMap<String, HashMap<String, PathBuf>> = serde_json::from_str(&text)
+        let declared: HashMap<String, HashMap<String, RootEntry>> = serde_json::from_str(&text)
             .map_err(|err| LoadError::Parse {
                 path: shown.clone(),
                 reason: format!(
-                    "expected {{\"<tenant>\": {{\"<root>\": \"<directory>\"}}}} ({err})"
+                    "expected {{\"<tenant>\": {{\"<root>\": \"<directory>\" or {{\"path\": \"<directory>\", \"browse\": true}}}}}} ({err})"
                 ),
             })?;
         let mut tenants = HashMap::with_capacity(declared.len());
@@ -95,7 +113,11 @@ impl StaticRoots {
                 return Err(entry("", "the tenant id is empty".into()));
             }
             let mut opened = TenantRoots::with_capacity(roots.len());
-            for (label, directory) in roots {
+            for (label, declared) in roots {
+                let (directory, browse) = match declared {
+                    RootEntry::Path(path) => (path, false),
+                    RootEntry::Flags(RootFlags { path, browse }) => (path, browse),
+                };
                 if label.is_empty() {
                     return Err(entry(&label, "the root name is empty".into()));
                 }
@@ -111,7 +133,7 @@ impl StaticRoots {
                         format!("{} is not a usable directory ({err})", directory.display()),
                     )
                 })?;
-                opened.insert(label.into_boxed_str(), Arc::new(root));
+                opened.insert(label.into_boxed_str(), Arc::new(root.with_browse(browse)));
             }
             tenants.insert(tenant.into_boxed_str(), opened);
         }
@@ -131,6 +153,7 @@ impl StaticRoots {
 pub struct Root {
     dir: Dir,
     path: PathBuf,
+    browse: bool,
 }
 
 impl fmt::Debug for Root {
@@ -332,7 +355,22 @@ impl Root {
         Ok(Self {
             dir,
             path: path.to_owned(),
+            browse: false,
         })
+    }
+
+    /// The root with directory listings allowed or not: the operator's half of the opt-in
+    /// (`"browse": true` in `STATIC_ROOTS_FILE`); a service must ask for them too.
+    #[must_use]
+    pub fn with_browse(mut self, browse: bool) -> Self {
+        self.browse = browse;
+        self
+    }
+
+    /// Whether the operator allows directory listings of this root.
+    #[must_use]
+    pub fn browse_allowed(&self) -> bool {
+        self.browse
     }
 
     /// Opens the file or directory at `path` inside the root. Blocks on the file system: call it

@@ -19,6 +19,7 @@
 //! pick, no backend admission or wake applies, and the proxy answers from the file system
 //! through [`serve`]. The runtime shape of the answer is in `docs/ref/svc-static.md`.
 
+mod browse;
 mod mime;
 mod precompressed;
 mod range;
@@ -35,6 +36,7 @@ use serde::Deserialize;
 
 use super::state::{Lease, ServerState};
 use crate::compile::Invalid;
+use browse::Browse;
 use podgate_model::Declared;
 use precompressed::Encoding;
 use roots::RelPath;
@@ -66,6 +68,12 @@ pub(super) struct Config {
     precompressed: Option<Vec<String>>,
     #[serde(default)]
     max_file_bytes: Option<u64>,
+    #[serde(default)]
+    browse: bool,
+    #[serde(default)]
+    hide: Option<Vec<String>>,
+    #[serde(default)]
+    max_entries: Option<usize>,
 }
 
 /// `Cache-Control` values by file extension.
@@ -97,6 +105,7 @@ pub struct StaticSite {
     cache_by_extension: HashMap<Box<str>, Box<str>>,
     precompressed: Box<[Encoding]>,
     max_file_bytes: u64,
+    browse: Option<Arc<Browse>>,
     state: Arc<ServerState>,
 }
 
@@ -235,6 +244,13 @@ impl StaticSite {
         if max_file_bytes == 0 {
             return Err(invalid("max_file_bytes is 0"));
         }
+        let browse = Browse::compile(
+            config.browse,
+            config.hide,
+            config.max_entries,
+            root,
+            &config.root,
+        )?;
         Ok(Self {
             root: Arc::clone(root),
             label: config.root.into_boxed_str(),
@@ -246,6 +262,7 @@ impl StaticSite {
             precompressed: precompressed.into_boxed_slice(),
             max_file_bytes,
             state: Arc::default(),
+            browse,
         })
     }
 
@@ -263,15 +280,15 @@ impl StaticSite {
     ///
     /// `invalid_service` naming the tenant, the bytes one response needs and the budget.
     pub(crate) fn check_budget(&self, tenant: &str, max_buffer_bytes: u64) -> Result<(), Invalid> {
-        if max_buffer_bytes >= reader::RESERVATION {
+        let needed = reader::RESERVATION + self.browse.as_ref().map_or(0, |browse| browse.charge());
+        if max_buffer_bytes >= needed {
             return Ok(());
         }
         Err(invalid(format!(
-            "tenant {tenant} has max_buffer_bytes {max_buffer_bytes}, below the {} bytes one static response reserves",
-            reader::RESERVATION
+            "tenant {tenant} has max_buffer_bytes {max_buffer_bytes}, below the {needed} bytes one static response reserves"
         ))
         .with("tenant", tenant)
-        .with("needed_bytes", reader::RESERVATION)
+        .with("needed_bytes", needed)
         .with("max_buffer_bytes", max_buffer_bytes))
     }
 
