@@ -10,12 +10,14 @@
 //! - [`snapshot`], [`TestCert`]: build snapshot JSON and self-signed certificates.
 //! - [`dns::Dns`]: a UDP DNS server whose answers, TTLs and failures a test controls.
 //! - [`pebble::Pebble`]: `pebble` and `pebble-challtestsrv` for the ACME tests, with a private CA.
+//! - [`valkey::Valkey`]: a real `valkey-server` for the cluster rate limit tests.
 
 // Each test file compiles this module on its own and uses a different subset of it.
 #![allow(dead_code, unreachable_pub, clippy::needless_pass_by_value)]
 
 pub mod dns;
 pub mod pebble;
+pub mod valkey;
 pub mod ws;
 
 use std::net::SocketAddr;

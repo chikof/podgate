@@ -494,6 +494,7 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     ]);
     let auth_key = plant("forward-auth-key");
     plants.push(auth_key.clone());
+    plants.extend([plant("store-password"), plant("store-host")]);
     let (jwt_secret, jwt_query) = (
         plant("jwt-hmac-secret-padded-to-32-bytes"),
         plant("jwks-uri-key"),
@@ -593,6 +594,22 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     kinds
 }
 
+/// The operator's `RATE_LIMIT_STORES_FILE` for the planted snapshot: a store whose address and
+/// password are the process's secrets, which no overview may show. Returns its path.
+fn planted_stores() -> String {
+    let dir = std::env::temp_dir().join(format!("podgate-overview-stores-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the stores directory");
+    let password = dir.join("password");
+    std::fs::write(&password, plant("store-password")).expect("write the password file");
+    let file = dir.join("stores.json");
+    let stores = json!({"main": {
+        "url": format!("redis://{}:6379", plant("store-host")),
+        "password_file": password, "tenants": ["t1"],
+    }});
+    std::fs::write(&file, stores.to_string()).expect("write the stores file");
+    file.to_string_lossy().into_owned()
+}
+
 /// A snapshot of one app that holds a planted secret in everything that can hold one: every
 /// built middleware kind, the four matcher leaves that carry a client's value, the sticky cookie,
 /// a transport's client key, the client CA, a certificate and its key, the skew secret and the
@@ -658,6 +675,11 @@ fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
             declared
         })
         .collect();
+    a["middlewares"].as_array_mut().expect("array").push(json!({
+        "name": "rate_limit_cluster", "type": "rate_limit", "average": 10, "burst": 20,
+        "source": {"ip": {}}, "max_sources": 64, "scope": "cluster", "store": "main",
+        "on_store_error": "allow", "local_fallback": {"average": 2, "burst": 4},
+    }));
     let mut pushed = snapshot(1, &[a]);
     pushed["certificates"] = json!([cert.entry(&["a.test"])]);
     pushed["skew_secret"] = json!(skew);
@@ -672,7 +694,8 @@ fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
 
 #[tokio::test]
 async fn overview_redacts_secrets() {
-    let podgate = Podgate::start().await;
+    let stores = planted_stores();
+    let podgate = Podgate::start_with_env(&[("RATE_LIMIT_STORES_FILE", &stores)]).await;
     let upstream = Upstream::start("x").await;
     let (pushed, plants) = planted(upstream.addr);
     push(&podgate, &pushed).await;
@@ -768,7 +791,8 @@ fn a_listed_name_holding_a_planted_secret_is_still_caught() {
 
 #[tokio::test]
 async fn every_describe_is_secret_free() {
-    let podgate = Podgate::start().await;
+    let stores = planted_stores();
+    let podgate = Podgate::start_with_env(&[("RATE_LIMIT_STORES_FILE", &stores)]).await;
     let upstream = Upstream::start("x").await;
     let (pushed, _) = planted(upstream.addr);
     push(&podgate, &pushed).await;
