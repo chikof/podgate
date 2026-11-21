@@ -31,6 +31,8 @@
 //!   requirement and limits.
 //! - [`etcd`]: the source that reads a key prefix per tenant from etcd and follows it with a watch.
 //! - [`mod@http`]: the source that polls an HTTP(S) endpoint for apps or a Traefik configuration.
+//! - [`redis`]: the source that reads a key prefix per tenant from a Redis-compatible store with `SCAN` and
+//!   `MGET` and follows it with pub/sub and a poll.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //! - [`ca`]: the internal CA, which issues leaves for `tls.mode = "internal"` apps from a name-constrained
@@ -56,6 +58,7 @@ pub mod nomad;
 pub mod policy;
 pub mod push;
 pub mod quarantine;
+pub mod redis;
 pub mod source;
 pub mod swarm;
 mod tags;

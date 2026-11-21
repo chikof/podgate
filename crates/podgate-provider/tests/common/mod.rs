@@ -25,6 +25,9 @@ pub mod swarm;
 // dev-dependencies and `super::free_ports`. The same file is `tests/common/pebble.rs`.
 #[path = "../../../../tests/common/pebble.rs"]
 pub mod pebble;
+// The same for the Valkey harness (`tests/common/valkey.rs`): a real `valkey-server`.
+#[path = "../../../../tests/common/valkey.rs"]
+pub mod valkey;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
