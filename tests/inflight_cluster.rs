@@ -499,7 +499,9 @@ async fn inflight_store_killed_deny_503() {
     let deadline = Instant::now() + WAIT;
     let reasons = loop {
         let text = std::fs::read_to_string(&access_log).unwrap_or_default();
-        let reasons: Vec<Value> = text
+        // Only finished lines: podgate may be writing the last one.
+        let done = text.rsplit_once('\n').map_or("", |(done, _)| done);
+        let reasons: Vec<Value> = done
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("a JSON line")["reason"].clone())
             .collect();

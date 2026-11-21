@@ -40,10 +40,14 @@ impl Drop for Dir {
     }
 }
 
-/// The lines of `path`, or none when it does not exist yet.
+/// The finished lines of `path`, or none when it does not exist yet. A line podgate is still
+/// writing has no newline yet and is left out.
 fn lines(path: &Path) -> Vec<String> {
     std::fs::read_to_string(path)
-        .map(|text| text.lines().map(str::to_owned).collect())
+        .map(|text| {
+            let done = text.rsplit_once('\n').map_or("", |(done, _)| done);
+            done.lines().map(str::to_owned).collect()
+        })
         .unwrap_or_default()
 }
 
