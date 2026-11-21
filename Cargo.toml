@@ -50,7 +50,7 @@ podgate-model = { version = "0.1.0", path = "crates/podgate-model", features = [
 prost = "0.14"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 regex = "1.13.2"
-rustix = { version = "1.1.6", features = ["fs", "net", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "net"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 ruzstd = "0.9.1"
@@ -88,6 +88,7 @@ wat = "1.263.0"
 # libzstd (C) only as the reference decoder in tests: the shipped encoder is ruzstd.
 zstd = { version = "0.14.4", default-features = false }
 jsonschema = { version = "0.61.2", default-features = false }
+rustix = { version = "1.1.6", features = ["process"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review
