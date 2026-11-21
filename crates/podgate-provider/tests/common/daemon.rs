@@ -124,8 +124,40 @@ async fn http(
 impl Daemon {
     /// Starts the daemon with the plain HTTP listener on `ports.0`, the TLS listener on
     /// `ports.1`, `policy` as its upstream policy file and `env` on top, and waits until its
-    /// admin API serves.
+    /// admin API serves and both listeners are bound. One attempt: the caller chose the ports
+    /// (an ACME test points pebble at them), so the caller owns the race for them; a test that
+    /// does not need fixed ports uses [`Self::start_free`].
     pub async fn start(policy: &Path, ports: (u16, u16), env: &[(&str, &str)]) -> Self {
+        let mut daemon = Self::launch(policy, ports, env);
+        assert!(daemon.wait_ready().await, "the daemon did not become ready");
+        daemon
+    }
+
+    /// [`Self::start`] on ports it picks itself, with fresh ports on each of up to four
+    /// attempts: a port probed free can be taken by a parallel test before podgate binds it.
+    pub async fn start_free(policy: &Path, env: &[(&str, &str)]) -> Self {
+        let mut failures = Vec::new();
+        for attempt in 1..=4 {
+            let ports = super::free_ports(2);
+            let mut daemon = Self::launch(policy, (ports[0], ports[1]), env);
+            if daemon.wait_ready().await {
+                return daemon;
+            }
+            let exit = daemon.child.try_wait().ok().flatten();
+            failures.push(format!(
+                "attempt {attempt} on ports {}/{}: {}",
+                ports[0],
+                ports[1],
+                exit.map_or_else(
+                    || "not ready in time".to_owned(),
+                    |status| format!("exited with {status}")
+                )
+            ));
+        }
+        panic!("the daemon did not become ready:\n{}", failures.join("\n"));
+    }
+
+    fn launch(policy: &Path, ports: (u16, u16), env: &[(&str, &str)]) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "pgp-daemon-{}-{}",
             std::process::id(),
@@ -143,7 +175,7 @@ impl Daemon {
             .collect();
         env.push(("UPSTREAM_POLICY_FILE".into(), policy.display().to_string()));
         let child = spawn(&binary, &admin, ports, &env);
-        let mut daemon = Self {
+        Self {
             child,
             binary,
             env,
@@ -151,9 +183,7 @@ impl Daemon {
             admin,
             proxy: SocketAddr::from(([127, 0, 0, 1], ports.0)),
             tls: SocketAddr::from(([127, 0, 0, 1], ports.1)),
-        };
-        assert!(daemon.wait_ready().await, "the daemon did not become ready");
-        daemon
+        }
     }
 
     /// Kills the process and starts a new one on the same ports and admin socket: a podgate
