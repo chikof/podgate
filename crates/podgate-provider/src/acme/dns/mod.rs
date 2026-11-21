@@ -8,13 +8,13 @@
 //!
 //! One challenge goes through these steps, each of which can refuse or fail:
 //!
-//! 1. [`zones`]: the zone is the configured one with the longest suffix of the name (none:
+//! 1. `zones`: the zone is the configured one with the longest suffix of the name (none:
 //!    `no_solver`), and the app that asked must belong to a tenant that owns the base domain
 //!    (otherwise `foreign_name`). Neither is retried: the answer would be the same.
 //! 2. The target: a `CNAME` at the name (an `_acme-challenge` delegation) is followed when the zone
 //!    allows it, and the update goes to the zone of its target.
-//! 3. The backend publishes the record with a 60 second TTL: [`rfc2136`] or [`webhook`].
-//! 4. [`verify`]: every authoritative server of the zone is asked until all return the value.
+//! 3. The backend publishes the record with a 60 second TTL: `rfc2136` or `webhook`.
+//! 4. `verify`: every authoritative server of the zone is asked until all return the value.
 //!
 //! A transient failure at step 2 to 4 is logged and retried with backoff until the challenge ends
 //! (`cleanup`) or [`Timing::give_up`] passes. [`Solver::cleanup`] removes exactly the value this
