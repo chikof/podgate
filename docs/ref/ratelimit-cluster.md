@@ -24,7 +24,7 @@ A node-scope limit counts per node, and the control plane divides a global limit
 |`local_fallback`|`{average, burst}`, same bounds as `average` and `burst`, over the same `period_secs`. Required with `allow`, refused with `deny`. The limit this node applies alone while the store is unavailable, so the cluster limit degrades to a per-node one instead of disappearing. The control plane sets it to the cluster limit divided by the node count.|
 |`store_timeout_ms`|Optional, 1 to 200. How long one store call may take. Default: the store entry's `timeout_ms`.|
 
-A cluster field on a node-scope limit is `invalid_middleware`, like every other setting a limit would ignore. `in_flight_req` stays per node: a concurrency count needs a release a crashed node never sends.
+A cluster field on a node-scope limit is `invalid_middleware`, like every other setting a limit would ignore. `in_flight_req` has its own cluster scope, which uses leases instead of a release a crashed node never sends: `docs/ref/inflight-cluster.md`.
 
 ## Where the store lives
 
@@ -115,4 +115,4 @@ On top of the kinds in `docs/ref/mw-limits.md`, `POST /v1/snapshot/plan` lists:
 
 ## Not covered
 
-Redis Cluster (`MOVED` and `ASK` redirections), Sentinel and replica reads are not followed: point the store at one primary, or at a proxy such as Envoy or a managed endpoint that does. A redirection is an error reply, so a store error. Cluster-wide `in_flight_req` is change 0102.
+Redis Cluster (`MOVED` and `ASK` redirections), Sentinel and replica reads are not followed: point the store at one primary, or at a proxy such as Envoy or a managed endpoint that does. A redirection is an error reply, so a store error. Cluster-wide `in_flight_req` is in `docs/ref/inflight-cluster.md`.

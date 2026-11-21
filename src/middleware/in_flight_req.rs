@@ -16,7 +16,9 @@
 //! - Per-source state is bounded; see `src/middleware/limits.rs`. Sources that find the table full share
 //!   one overflow counter capped at `amount`, and an entry with a request in flight is never
 //!   reclaimed.
-//! - Limits are per node.
+//! - Limits are per node unless `scope` is `"cluster"`: then a shared store counts one limit for
+//!   every node, with leases that expire when a node dies (`cluster.rs`,
+//!   `docs/ref/inflight-cluster.md`).
 
 use std::sync::Arc;
 
@@ -32,6 +34,11 @@ use crate::error::AppError;
 use crate::table::CompiledApp;
 use podgate_model::Declared;
 
+mod cluster;
+
+use cluster::{Cluster, FallbackConfig, Lease, OnStoreError, Scope};
+pub(crate) use cluster::{check_snapshot, render};
+
 /// Posture change kinds this middleware reports, see [`Kind::posture`].
 pub mod kind {
     /// The middleware is gone: nothing caps the route.
@@ -40,6 +47,11 @@ pub mod kind {
     pub const LOOSENED: &str = "in_flight_req_loosened";
     /// Requests are counted per another source, which can let a client leave its count.
     pub const SOURCE_CHANGED: &str = "in_flight_req_source_changed";
+    /// A cluster-scope limit that admits requests when its store fails: while the store is down
+    /// only each node's local fallback caps them.
+    pub const CLUSTER_FAIL_OPEN: &str = "in_flight_req_cluster_fail_open";
+    /// A cluster-wide limit became a per-node one: a client can use every node's share.
+    pub const SCOPE_NODE: &str = "in_flight_req_scope_node";
 }
 
 /// The configuration of an `in_flight_req` middleware.
@@ -50,6 +62,16 @@ pub(super) struct Config {
     source: SourceConfig,
     #[serde(default)]
     max_sources: Option<u32>,
+    #[serde(default)]
+    scope: Option<Scope>,
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    on_store_error: Option<OnStoreError>,
+    #[serde(default)]
+    local_fallback: Option<FallbackConfig>,
+    #[serde(default)]
+    lease_secs: Option<u32>,
 }
 
 /// A compiled `in_flight_req` middleware.
@@ -61,12 +83,14 @@ pub struct InFlightReq {
     source: Source,
     fingerprint: u64,
     runtime: Arc<Limiter>,
+    cluster: Option<Cluster>,
 }
 
 /// Per-request state: the slot, while the request holds one.
 #[derive(Debug, Default)]
 pub struct State {
     permit: Option<Permit>,
+    lease: Option<Lease>,
 }
 
 fn invalid(message: impl std::fmt::Display) -> Invalid {
@@ -91,7 +115,7 @@ impl InFlightReq {
 impl Kind for InFlightReq {
     type State = State;
 
-    fn compile(declared: &Declared, _cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
+    fn compile(declared: &Declared, cx: &mut CompileCx<'_>) -> Result<Self, Invalid> {
         let config: Config =
             serde_json::from_value(Value::Object(declared.config.clone())).map_err(invalid)?;
         if config.amount == 0 {
@@ -104,13 +128,16 @@ impl Kind for InFlightReq {
             return Err(invalid(format!("`max_sources` must be 1 to {MAX_SOURCES}")));
         }
         let source = Source::compile(&config.source).map_err(invalid)?;
+        let fingerprint = state::fingerprint(declared);
+        let cluster = Cluster::compile(&config, &declared.name, fingerprint, cx.app)?;
         Ok(Self {
             amount: config.amount,
             max_sources,
             source_config: config.source,
             source,
-            fingerprint: state::fingerprint(declared),
+            fingerprint,
             runtime: Arc::new(Limiter::new(max_sources)),
+            cluster,
         })
     }
 
@@ -121,12 +148,20 @@ impl Kind for InFlightReq {
                 let key =
                     self.source
                         .key(self.runtime.hasher(), cx.session.req_header(), cx.forwarded);
-                match self.acquire(table, key) {
-                    Some(permit) => {
+                let taken = match &self.cluster {
+                    Some(cluster) => cluster.admit(self, cx, table, key).await,
+                    None => self
+                        .acquire(table, key)
+                        .map(|permit| (permit, None))
+                        .ok_or(AppError::TooManyInFlight),
+                };
+                match taken {
+                    Ok((permit, lease)) => {
                         state.permit = Some(permit);
+                        state.lease = lease;
                         return Ok(Flow::Continue);
                     }
-                    None => AppError::TooManyInFlight,
+                    Err(refusal) => refusal,
                 }
             }
         };
@@ -137,34 +172,54 @@ impl Kind for InFlightReq {
     }
 
     /// The slot goes back when the request ends, before the guard's own drop would return it
-    /// with the connection's state.
+    /// with the connection's state. A cluster slot is given back to the store, too.
     fn finished(&self, _cx: &FinishCx<'_>, state: &mut State) {
+        state.lease = None;
         state.permit = None;
     }
 
     /// Dropping the middleware stops capping; a higher amount lets more through; another source
-    /// puts requests in other counts.
+    /// puts requests in other counts; a cluster limit that starts failing open, or becomes a
+    /// per-node one, lets a client past the cluster-wide count.
     fn posture(&self, new: Option<&Self>) -> Vec<&'static str> {
         let Some(new) = new else {
             return vec![kind::REMOVED];
         };
         let mut kinds = Vec::new();
-        if new.amount > self.amount {
+        let fallback_loosened = match (&self.cluster, &new.cluster) {
+            (Some(old), Some(new)) => old.fallback_loosened_by(new),
+            _ => false,
+        };
+        if new.amount > self.amount || fallback_loosened {
             kinds.push(kind::LOOSENED);
         }
         if self.source_config != new.source_config {
             kinds.push(kind::SOURCE_CHANGED);
         }
+        if self.cluster.is_some() && new.cluster.is_none() {
+            kinds.push(kind::SCOPE_NODE);
+        }
+        let fails_open = |cap: &Self| cap.cluster.as_ref().is_some_and(Cluster::fails_open);
+        if fails_open(new) && !fails_open(self) {
+            kinds.push(kind::CLUSTER_FAIL_OPEN);
+        }
         kinds
     }
 
     fn describe(&self) -> Value {
-        json!({
+        let mut shown = json!({
+            "scope": "node",
             "amount": self.amount,
             "source": self.source_config.describe(),
             "max_sources": self.max_sources,
             "table_bytes": SourceTable::bytes(self.max_sources),
-        })
+        });
+        if let (Some(cluster), Some(object)) = (&self.cluster, shown.as_object_mut())
+            && let Some(extra) = cluster.describe().as_object()
+        {
+            object.extend(extra.clone());
+        }
+        shown
     }
 }
 

@@ -346,6 +346,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         &stage_lists,
         context.rate_limit_stores(),
     ));
+    rejected.extend(middleware::in_flight_req::check_snapshot(
+        snapshot,
+        &stage_lists,
+        context.rate_limit_stores(),
+    ));
     rejected.extend(middleware::oidc::check_snapshot(
         snapshot,
         &stage_lists,
