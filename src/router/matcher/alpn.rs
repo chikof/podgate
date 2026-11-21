@@ -91,6 +91,7 @@ mod test {
                 hello: Hello {
                     server_name: None,
                     alpn,
+                    version: None,
                 },
             })
         };

@@ -95,6 +95,7 @@ impl Offer {
         Hello {
             server_name: self.hello.server_name.as_deref(),
             alpn: &self.hello.alpn,
+            version: None,
         }
     }
 }

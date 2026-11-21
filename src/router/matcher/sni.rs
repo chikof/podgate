@@ -81,6 +81,7 @@ mod test {
             hello: Hello {
                 server_name: name,
                 alpn: &[],
+                version: None,
             },
         })
     }

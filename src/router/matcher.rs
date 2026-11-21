@@ -9,7 +9,7 @@
 //! `invalid_matcher`.
 //!
 //! There are two dialects. An HTTP router matches a request (`host`, `path*`, `method`,
-//! `header*`, `query*`, `client_ip`); a TCP router matches a connection (`sni`, `sni_regexp`,
+//! `header*`, `query*`, `client_ip`, `cel`); a TCP router matches a connection (`sni`, `sni_regexp`,
 //! `alpn`, `client_ip`). A leaf of the other dialect is `invalid_matcher`, so a router never
 //! carries a leaf that has nothing to read. The combinators and `client_ip` belong to both.
 //!
@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::host::HostPattern;
 
 mod alpn;
+mod cel;
 mod client_ip;
 mod combinator;
 mod header;
@@ -43,6 +44,7 @@ mod sni;
 mod sni_regexp;
 
 use alpn::Alpn;
+use cel::Cel;
 use client_ip::ClientIp;
 use header::Header;
 use header_regexp::HeaderRegexp;
@@ -57,6 +59,7 @@ use query_regexp::QueryRegexp;
 use sni::Sni;
 use sni_regexp::SniRegexp;
 
+pub(crate) use cel::render as cel_metrics;
 pub use schema::schemas;
 
 /// Deepest nesting of combinators a matcher may have.
@@ -68,7 +71,7 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 /// Every key `parse_at` builds. `parse_at` refuses a key that is not listed here before it
 /// looks at its arms, so an arm for a new leaf is dead until its key is listed; the schema
 /// guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
-pub const BUILT: [&str; 17] = [
+pub const BUILT: [&str; 18] = [
     "host",
     "host_regexp",
     "path",
@@ -83,13 +86,14 @@ pub const BUILT: [&str; 17] = [
     "sni",
     "sni_regexp",
     "alpn",
+    "cel",
     "all",
     "any",
     "not",
 ];
 
 /// The leaves only an HTTP router has.
-const HTTP_ONLY: [&str; 10] = [
+const HTTP_ONLY: [&str; 11] = [
     "host",
     "host_regexp",
     "path",
@@ -100,6 +104,7 @@ const HTTP_ONLY: [&str; 10] = [
     "header_regexp",
     "query",
     "query_regexp",
+    "cel",
 ];
 
 /// The leaves only a TCP router has.
@@ -148,18 +153,23 @@ pub struct View<'a> {
     /// The resolved client address (see [`crate::client_ip`]); `None` when it is not known, which
     /// no `client_ip` leaf matches.
     pub client_ip: Option<IpAddr>,
-    /// What the connection's TLS ClientHello offered; [`Hello::NONE`] for an HTTP request, and
-    /// for a TCP connection that is not TLS.
+    /// What the connection's TLS ClientHello offered ([`Hello::NONE`] for a TCP connection that is
+    /// not TLS); for an HTTP request, the server name and version of its TLS connection, or
+    /// [`Hello::NONE`] on plain HTTP and in explain.
     pub hello: Hello<'a>,
 }
 
-/// What a TLS ClientHello offered, as the TCP leaves read it.
+/// What a TLS ClientHello offered, as the TCP leaves read it. An HTTP request over TLS carries
+/// the server name and version of its connection here, for the `cel` leaf.
 #[derive(Debug, Clone, Copy)]
 pub struct Hello<'a> {
     /// The normalized server name; `None` when the client sent none.
     pub server_name: Option<&'a str>,
     /// The ALPN protocols offered, in the client's order; empty when it sent none.
     pub alpn: &'a [Vec<u8>],
+    /// The TLS version the connection negotiated (`TLSv1.3`); `None` without TLS. Only the
+    /// `cel` leaf reads it, on an HTTP request.
+    pub version: Option<&'a str>,
 }
 
 impl Hello<'_> {
@@ -167,6 +177,7 @@ impl Hello<'_> {
     pub const NONE: Hello<'static> = Hello {
         server_name: None,
         alpn: &[],
+        version: None,
     };
 }
 
@@ -264,6 +275,8 @@ pub enum Matcher {
     SniRegexp(SniRegexp),
     /// `alpn`
     Alpn(Alpn),
+    /// `cel`
+    Cel(Cel),
     /// `all`: every child matches.
     All(Vec<Matcher>),
     /// `any`: some child matches.
@@ -348,6 +361,7 @@ pub(super) fn parse_at(dialect: Dialect, value: &Value, depth: usize) -> Result<
         "sni" => Matcher::Sni(Sni::parse(argument)?),
         "sni_regexp" => Matcher::SniRegexp(SniRegexp::parse(argument)?),
         "alpn" => Matcher::Alpn(Alpn::parse(argument)?),
+        "cel" => Matcher::Cel(Cel::parse(argument)?),
         "all" => Matcher::All(combinator::parse_list(dialect, key, argument, depth)?),
         "any" => Matcher::Any(combinator::parse_list(dialect, key, argument, depth)?),
         "not" => Matcher::Not(Box::new(parse_at(dialect, argument, depth + 1)?)),
@@ -382,6 +396,7 @@ impl Matcher {
             Self::Sni(leaf) => leaf.matches(view),
             Self::SniRegexp(leaf) => leaf.matches(view),
             Self::Alpn(leaf) => leaf.matches(view),
+            Self::Cel(leaf) => leaf.matches(view),
             Self::All(children) => children.iter().all(|child| child.matches(view)),
             Self::Any(children) => children.iter().any(|child| child.matches(view)),
             Self::Not(child) => !child.matches(view),
@@ -418,6 +433,7 @@ impl Matcher {
             Self::Sni(_) => Failure::key("sni"),
             Self::SniRegexp(_) => Failure::key("sni_regexp"),
             Self::Alpn(_) => Failure::key("alpn"),
+            Self::Cel(leaf) => said("cel", leaf.describe()),
             Self::Not(_) => Failure::key("not"),
             Self::All(children) | Self::Any(children) => {
                 for child in children {
@@ -449,6 +465,7 @@ impl Matcher {
             | Self::Query(_)
             | Self::QueryRegexp(_)
             | Self::Alpn(_)
+            | Self::Cel(_)
             | Self::Not(_) => None,
             Self::All(children) => {
                 let limited: Vec<Vec<Claim>> = children.iter().filter_map(Self::claims).collect();
@@ -499,6 +516,7 @@ impl Matcher {
             Self::Sni(leaf) => leaf.spec(),
             Self::SniRegexp(leaf) => leaf.spec(),
             Self::Alpn(leaf) => leaf.spec(),
+            Self::Cel(leaf) => leaf.spec(),
             Self::All(children) => {
                 children
                     .iter()
@@ -516,6 +534,21 @@ impl Matcher {
                     others: least.others.min(next.others),
                 })
                 .unwrap_or_default(),
+        }
+    }
+
+    /// Counts the evaluation errors of the `cel` leaves of the tree under `app`
+    /// (`podgate_cel_errors_total{app}`).
+    pub(super) fn bind_app(&mut self, app: &str) {
+        match self {
+            Self::Cel(leaf) => leaf.bind(app),
+            Self::All(children) | Self::Any(children) => {
+                for child in children {
+                    child.bind_app(app);
+                }
+            }
+            Self::Not(child) => child.bind_app(app),
+            _ => {}
         }
     }
 

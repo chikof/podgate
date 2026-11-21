@@ -191,6 +191,28 @@ pub fn schemas() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "cel",
+            keyed(
+                "cel",
+                "A CEL expression over the request matches (HTTP routers only). Claims no host, counts as one constraint, and an evaluation error is a non-match.",
+                &json!({
+                    "description": "The expression (at most 2 KiB), or the expression with a `max_cost` from 1 to 1000 (default 100).",
+                    "oneOf": [
+                        { "type": "string", "minLength": 1, "maxLength": 2048 },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "expression": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                                "max_cost": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                            },
+                            "required": ["expression"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }),
+            ),
+        ),
+        (
             "all",
             keyed(
                 "all",

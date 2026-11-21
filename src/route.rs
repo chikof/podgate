@@ -12,6 +12,7 @@ use pingora::http::RequestHeader;
 use thiserror::Error;
 
 use crate::host;
+use crate::router::matcher::Hello;
 use crate::router::{Matched, View, path};
 use crate::service::graph::Path;
 use crate::service::{Lease, PickCx};
@@ -67,8 +68,9 @@ pub fn request_host(request: &RequestHeader) -> Option<Cow<'_, str>> {
 }
 
 /// The router that answers `request`, which arrived on entry point `entry_point` (over TLS when
-/// `tls`) from `client_ip` (see [`crate::client_ip`]). `None` when the request names no host, its
-/// path cannot be normalized, or no router matches.
+/// `tls`) from `client_ip` (see [`crate::client_ip`]), with the server name and version its TLS
+/// connection negotiated in `hello` ([`Hello::NONE`] without TLS). `None` when the request names
+/// no host, its path cannot be normalized, or no router matches.
 #[must_use]
 pub fn matching(
     table: &RoutingTable,
@@ -76,6 +78,7 @@ pub fn matching(
     entry_point: &str,
     tls: bool,
     client_ip: Option<IpAddr>,
+    hello: Hello<'_>,
 ) -> Option<Matched> {
     let host = request_host(request)?;
     let allow_slash = table.entry_policy(entry_point).allow_encoded_slash();
@@ -87,7 +90,7 @@ pub fn matching(
         tls,
         request,
         client_ip,
-        hello: crate::router::matcher::Hello::NONE,
+        hello,
     };
     table.index().find(table.apps(), &view)
 }
@@ -187,8 +190,8 @@ pub fn resolve(
     tls: bool,
     client_ip: Option<IpAddr>,
 ) -> Result<Selected, RouteError> {
-    let matched =
-        matching(table, request, entry_point, tls, client_ip).ok_or(RouteError::NoRoute)?;
+    let matched = matching(table, request, entry_point, tls, client_ip, Hello::NONE)
+        .ok_or(RouteError::NoRoute)?;
     select(table, matched, request, client_ip).map(|(selected, _lease)| selected)
 }
 

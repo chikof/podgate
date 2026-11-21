@@ -84,7 +84,8 @@ impl CompiledRouter {
         app: &App,
         policies: &[EntryPointPolicy],
     ) -> Result<Self, matcher::Error> {
-        let matcher = matcher::parse(&router.matcher)?;
+        let mut matcher = matcher::parse(&router.matcher)?;
+        matcher.bind_app(&app.id);
         let tenant: &str = &app.tenant;
         let owned_alone = |entry: &str| {
             policies.iter().any(|policy| {

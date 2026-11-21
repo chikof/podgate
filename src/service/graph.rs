@@ -633,6 +633,7 @@ mod test {
     use super::*;
     use crate::compile::Rejected;
     use crate::route::{self, RouteError};
+    use crate::router::matcher::Hello;
     use crate::table::{CompileError, RoutingTable};
     use podgate_model::Snapshot;
 
@@ -1144,7 +1145,8 @@ mod test {
             lb("b", &[9003]),
         ])]);
         let request = request();
-        let matched = route::matching(&table, &request, "web", false, None).expect("matched");
+        let matched =
+            route::matching(&table, &request, "web", false, None, Hello::NONE).expect("matched");
         let (selected, _lease) = route::select(&table, matched, &request, None).expect("selected");
         let mut tried = vec![selected.upstream];
         let mut seen = vec![selected.upstream.port()];
@@ -1164,7 +1166,8 @@ mod test {
             lb("a", &[9001]),
             lb("b", &[9003]),
         ])]);
-        let matched = route::matching(&table, &request, "web", false, None).expect("matched");
+        let matched =
+            route::matching(&table, &request, "web", false, None, Hello::NONE).expect("matched");
         let (selected, _lease) = route::select(&table, matched, &request, None).expect("selected");
         let (next, _lease) =
             route::reselect(&table, &selected, &request, None, &[selected.upstream]).expect("next");
@@ -1180,7 +1183,8 @@ mod test {
             lb("f", &[9003]),
         ])]);
         let request = request();
-        let matched = route::matching(&table, &request, "web", false, None).expect("matched");
+        let matched =
+            route::matching(&table, &request, "web", false, None, Hello::NONE).expect("matched");
         let (selected, _lease) = route::select(&table, matched, &request, None).expect("selected");
         assert!([9001, 9002].contains(&selected.upstream.port()));
         let mut tried = vec![selected.upstream];

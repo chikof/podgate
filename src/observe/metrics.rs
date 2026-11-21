@@ -70,6 +70,7 @@ pub fn render(
     crate::service::mirroring::render(&mut out);
     crate::service::extras::render(&mut out);
     out.push_str(&crate::middleware::jwt_auth::render(&live));
+    out.push_str(&crate::router::matcher::cel_metrics(&live));
     crate::l4::tcp::render(&mut out);
     out.push_str(&crate::l4::health::render(&live));
     crate::l4::udp::render(&mut out);

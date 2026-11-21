@@ -81,6 +81,7 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
+use crate::router::matcher::Hello;
 use crate::service::extras;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{Lease, StaticReads, mirroring, outlier, serve_fastcgi, serve_static, sticky};
@@ -649,6 +650,14 @@ impl ProxyHttp for Gateway {
             &ctx.entry_point,
             tls,
             ctx.forwarded.known_client(),
+            Hello {
+                server_name: sni::server_name(session),
+                alpn: &[],
+                version: session
+                    .digest()
+                    .and_then(|digest| digest.ssl_digest.as_ref())
+                    .map(|tls| &*tls.version),
+            },
         );
         // Right after matching and before anything answers: a misdirected request gets `421`
         // whether or not a router matched, and the matched app decides fronting.
