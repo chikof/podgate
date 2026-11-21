@@ -2,6 +2,10 @@
 //! another server only when that is safe, the next attempt passes backend admission again, every
 //! failed attempt counts against its server, and the number of retries reaches the access log.
 //! The decision table and the backoff arithmetic are unit tests in `src/middleware/retry.rs`.
+//!
+//! No test here depends on which server a balancer picks first. A test that needs a request to
+//! meet a failing server sends requests until one does, and checks what every server saw: which
+//! requests reached it, how often, and with which body.
 
 mod common;
 
@@ -17,6 +21,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::{sleep, timeout};
 
+/// Most requests a test sends while it waits for one to meet a failing server.
+const MAX_TRIES: usize = 40;
+
 /// How a backend treats the requests it reads.
 #[derive(Clone, Copy)]
 enum Mode {
@@ -31,40 +38,41 @@ enum Mode {
     Slow(Duration),
 }
 
+/// What a backend saw.
+#[derive(Default)]
+struct Seen {
+    /// Requests read.
+    hits: AtomicUsize,
+    /// Requests read and not answered.
+    dropped: AtomicUsize,
+    /// The body of every request read, in order.
+    bodies: Mutex<Vec<Vec<u8>>>,
+}
+
 /// A backend that records what it received.
 struct Backend {
     addr: SocketAddr,
-    label: &'static str,
-    hits: Arc<AtomicUsize>,
-    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    seen: Arc<Seen>,
 }
 
 impl Backend {
     async fn start(label: &'static str, mode: Mode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        Self::serving(listener, label, mode)
+    }
+
+    fn serving(listener: TcpListener, label: &'static str, mode: Mode) -> Self {
         let addr = listener.local_addr().expect("addr");
-        let hits = Arc::new(AtomicUsize::new(0));
-        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Seen::default());
         tokio::spawn({
-            let (hits, bodies) = (Arc::clone(&hits), Arc::clone(&bodies));
+            let seen = Arc::clone(&seen);
             async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    tokio::spawn(serve(
-                        stream,
-                        mode,
-                        label,
-                        Arc::clone(&hits),
-                        Arc::clone(&bodies),
-                    ));
+                    tokio::spawn(serve(stream, mode, label, Arc::clone(&seen)));
                 }
             }
         });
-        Self {
-            addr,
-            label,
-            hits,
-            bodies,
-        }
+        Self { addr, seen }
     }
 
     async fn good() -> Self {
@@ -72,11 +80,41 @@ impl Backend {
     }
 
     fn hits(&self) -> usize {
-        self.hits.load(Ordering::SeqCst)
+        self.seen.hits.load(Ordering::SeqCst)
+    }
+
+    fn dropped(&self) -> usize {
+        self.seen.dropped.load(Ordering::SeqCst)
     }
 
     fn bodies(&self) -> Vec<Vec<u8>> {
-        self.bodies.lock().expect("bodies").clone()
+        self.seen.bodies.lock().expect("bodies").clone()
+    }
+
+    /// How many requests with exactly `body` were read.
+    fn count_of(&self, body: &[u8]) -> usize {
+        self.bodies().iter().filter(|seen| *seen == body).count()
+    }
+}
+
+/// An address that refuses connections until [`Self::listen`]: bound, not listening.
+struct Deferred {
+    socket: TcpSocket,
+    addr: SocketAddr,
+}
+
+impl Deferred {
+    fn new() -> Self {
+        let socket = TcpSocket::new_v4().expect("socket");
+        socket
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("bind");
+        let addr = socket.local_addr().expect("addr");
+        Self { socket, addr }
+    }
+
+    fn listen(self, label: &'static str, mode: Mode) -> Backend {
+        Backend::serving(self.socket.listen(16).expect("listen"), label, mode)
     }
 }
 
@@ -138,22 +176,22 @@ async fn read_request(stream: &mut TcpStream, seen: &mut Vec<u8>) -> Option<Vec<
     Some(body)
 }
 
-async fn serve(
-    mut stream: TcpStream,
-    mode: Mode,
-    label: &'static str,
-    hits: Arc<AtomicUsize>,
-    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-) {
-    let mut seen = Vec::new();
+async fn serve(mut stream: TcpStream, mode: Mode, label: &'static str, seen: Arc<Seen>) {
+    let mut buffered = Vec::new();
     let mut on_connection = 0_u32;
-    while let Some(body) = read_request(&mut stream, &mut seen).await {
-        hits.fetch_add(1, Ordering::SeqCst);
-        bodies.lock().expect("bodies").push(body);
+    while let Some(body) = read_request(&mut stream, &mut buffered).await {
+        seen.hits.fetch_add(1, Ordering::SeqCst);
+        seen.bodies.lock().expect("bodies").push(body);
         on_connection += 1;
         match mode {
-            Mode::DropAlways => return,
-            Mode::DropReused if on_connection > 1 => return,
+            Mode::DropAlways => {
+                seen.dropped.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            Mode::DropReused if on_connection > 1 => {
+                seen.dropped.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
             Mode::Slow(delay) => sleep(delay).await,
             Mode::Answer | Mode::DropReused => {}
         }
@@ -167,7 +205,7 @@ async fn serve(
     }
 }
 
-/// App `a.test` whose `web` service balances `servers` round robin (in that order), with
+/// App `a.test` whose `web` service balances `servers` round robin, with
 /// `middlewares` in its chain.
 fn guarded(
     version: u64,
@@ -297,18 +335,77 @@ async fn post(podgate: &Podgate, body: &[u8], chunked: bool) -> (u16, String) {
     (status, body.to_owned())
 }
 
-/// Server 0 of the pair is the one whose pooled connection dies on its second request: the first
-/// request goes to it (and leaves a connection in the pool), the second to the other server, so
-/// the third request reuses the dead one.
-async fn prime(podgate: &Podgate) {
-    for expected in ["stale", "good"] {
-        let response = podgate.get("a.test", "/").await;
-        assert_eq!(
-            (response.status, response.body.as_str()),
-            (200, expected),
-            "{response:?}"
-        );
+/// How many retries the service's series has counted.
+async fn retries(podgate: &Podgate) -> u64 {
+    let metrics = podgate.admin_get("/metrics").await.body;
+    metrics
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("podgate_service_retries_total{app=\"a.test\",service=\"web\"} ")
+        })
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// What one request got.
+struct Answer {
+    status: u16,
+    body: String,
+}
+
+/// `GET /` as `a.test`.
+async fn get(podgate: &Podgate) -> Answer {
+    let response = podgate.get("a.test", "/").await;
+    Answer {
+        status: response.status,
+        body: response.body,
     }
+}
+
+/// `POST` as [`post`], as an [`Answer`].
+async fn posted(podgate: &Podgate, body: &[u8], chunked: bool) -> Answer {
+    let (status, body) = post(podgate, body, chunked).await;
+    Answer { status, body }
+}
+
+/// A body unique to request `index`, `len` bytes long.
+fn body_of(index: usize, len: usize) -> Vec<u8> {
+    let mut body = format!("request {index}|").into_bytes();
+    let mut next = 0_u8;
+    while body.len() < len {
+        body.push(b'a' + next % 26);
+        next = next.wrapping_add(7);
+    }
+    body
+}
+
+fn buffer() -> Value {
+    middleware(
+        "buffer",
+        "buffering",
+        json!({"max_request_body_bytes": 65536, "buffer_request": true}),
+    )
+}
+
+/// POSTs `len` byte bodies (each unique) through `podgate` until `stale` has dropped a request
+/// on a dead pooled connection, then returns every body with its answer. Fails when no request
+/// ever meets the dead connection.
+async fn posts_until_dropped(
+    podgate: &Podgate,
+    stale: &Backend,
+    len: usize,
+    chunked: bool,
+) -> Vec<(Vec<u8>, Answer)> {
+    let mut sent = Vec::new();
+    for index in 0..MAX_TRIES {
+        let body = body_of(index, len);
+        let answer = posted(podgate, &body, chunked).await;
+        sent.push((body, answer));
+        if stale.dropped() > 0 {
+            return sent;
+        }
+    }
+    panic!("no request ever reused the dead connection of the stale server");
 }
 
 #[tokio::test]
@@ -317,27 +414,45 @@ async fn retry_moves_to_another_server_on_connect_error() {
     let (dead, good) = (common::refused(), Backend::good().await);
     let chain = [retry(&json!({"attempts": 3, "initial_interval_ms": 1}))];
     push(&podgate, &guarded(1, &[dead.addr, good.addr], &chain, 100)).await;
-    for _ in 0..4 {
-        let response = podgate.get("a.test", "/").await;
-        assert_eq!((response.status, response.body.as_str()), (200, "good"));
+    for _ in 0..6 {
+        let answer = get(&podgate).await;
+        assert_eq!((answer.status, answer.body.as_str()), (200, "good"));
     }
-    assert_eq!(good.hits(), 4);
-    // Nothing was sent to the dead server, so any method moves on, a body included.
-    let (status, body) = post(&podgate, b"sent once", false).await;
-    assert_eq!((status, body.as_str()), (200, "good"));
     assert_eq!(
-        good.bodies().last().map(Vec::as_slice),
-        Some(&b"sent once"[..])
+        good.hits(),
+        6,
+        "every request was answered by the good server"
     );
-    // Each of the five requests was retried once, which the service's series counts.
-    let metrics = podgate.admin_get("/metrics").await.body;
     assert!(
-        metrics.contains("podgate_service_retries_total{app=\"a.test\",service=\"web\"} 5\n"),
-        "{metrics}"
+        retries(&podgate).await >= 1,
+        "some request met the dead server first"
     );
-    // Without the middleware a connect error is a 502.
+
+    // Nothing was sent to the dead server, so any method moves on, a body included: every POST is
+    // answered once, by the good server, with its whole body.
+    let before = retries(&podgate).await;
+    for index in 0..MAX_TRIES {
+        let body = body_of(index, 64);
+        let answer = posted(&podgate, &body, false).await;
+        assert_eq!((answer.status, answer.body.as_str()), (200, "good"));
+        assert_eq!(good.count_of(&body), 1, "post {index} arrived once");
+        if retries(&podgate).await > before {
+            break;
+        }
+    }
+    assert!(
+        retries(&podgate).await > before,
+        "a POST met the dead server first"
+    );
+
+    // Without the middleware a request that meets the dead server is a 502.
     push(&podgate, &guarded(2, &[dead.addr, good.addr], &[], 100)).await;
-    assert_eq!(podgate.get("a.test", "/").await.status, 502);
+    let mut statuses = Vec::new();
+    for _ in 0..6 {
+        statuses.push(get(&podgate).await.status);
+    }
+    assert!(statuses.contains(&502), "{statuses:?}");
+    assert!(statuses.contains(&200), "{statuses:?}");
 }
 
 #[tokio::test]
@@ -353,10 +468,29 @@ async fn retry_not_on_post_after_send() {
         &guarded(1, &[broken.addr, good.addr], &chain, 100),
     )
     .await;
-    let (status, _) = post(&podgate, b"charge the card", false).await;
-    assert_eq!(status, 502);
-    assert_eq!(broken.hits(), 1, "the body reached the first server");
-    assert_eq!(good.hits(), 0, "and was not sent to another");
+    let mut failed = 0;
+    for index in 0..8 {
+        let body = body_of(index, 64);
+        let answer = posted(&podgate, &body, false).await;
+        match answer.status {
+            200 => {
+                assert_eq!(good.count_of(&body), 1);
+                assert_eq!(broken.count_of(&body), 0);
+            }
+            502 => {
+                failed += 1;
+                assert_eq!(
+                    broken.count_of(&body),
+                    1,
+                    "the body reached the broken server"
+                );
+                assert_eq!(good.count_of(&body), 0, "and was not sent to another");
+            }
+            other => panic!("status {other}"),
+        }
+    }
+    assert!(failed > 0, "some POST met the broken server");
+    assert_eq!(broken.hits(), failed);
 }
 
 #[tokio::test]
@@ -368,18 +502,68 @@ async fn retry_idempotent_on_stale_connection() {
     );
     let chain = [retry(&json!({"attempts": 2, "initial_interval_ms": 1}))];
     push(&podgate, &guarded(1, &[stale.addr, good.addr], &chain, 100)).await;
-    prime(&podgate).await;
-    let response = podgate.get("a.test", "/").await;
-    assert_eq!(
-        (response.status, response.body.as_str()),
-        (200, "good"),
-        "{response:?}"
-    );
-    assert_eq!(stale.hits(), 2, "the dead connection read the request");
-    assert_eq!(good.hits(), 2);
+    // GETs until the stale server has dropped one on a dead pooled connection.
+    let (mut by_stale, mut by_good) = (0, 0);
+    for _ in 0..MAX_TRIES {
+        let answer = get(&podgate).await;
+        assert_eq!(answer.status, 200, "no request is lost: {}", answer.body);
+        match answer.body.as_str() {
+            "stale" => by_stale += 1,
+            "good" => by_good += 1,
+            other => panic!("answered by {other}"),
+        }
+        if stale.dropped() > 0 {
+            break;
+        }
+    }
+    assert!(stale.dropped() > 0, "a request reused the dead connection");
+    // Every request was answered once: by the stale server, or by the good server, which also took
+    // each request the stale server dropped.
+    assert_eq!(by_stale, stale.hits() - stale.dropped());
+    assert_eq!(good.hits(), by_good);
 }
 
-/// Podgate with the stale server first, `chain` in the app, and the pool primed.
+#[tokio::test]
+async fn retry_post_only_when_buffered_and_listed() {
+    let listed = json!({"attempts": 2, "initial_interval_ms": 1, "methods": ["POST"]});
+    let default = json!({"attempts": 2, "initial_interval_ms": 1});
+
+    // Listed and buffered: replayed, so no POST is lost and each is read by one server to the end.
+    let (podgate, stale, good) = stale_pair(&[buffer(), retry(&listed)]).await;
+    let sent = posts_until_dropped(&podgate, &stale, 64, false).await;
+    for (body, answer) in &sent {
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        if answer.body == "good" {
+            assert_eq!(good.count_of(body), 1);
+        }
+    }
+    let replayed = sent
+        .iter()
+        .filter(|(body, answer)| answer.body == "good" && stale.count_of(body) == 1)
+        .count();
+    assert_eq!(
+        replayed,
+        stale.dropped(),
+        "each dropped POST went to the good server"
+    );
+
+    // Listed, but the body streams: never replayed. Buffered, but POST is not in the defaults.
+    for chain in [vec![retry(&listed)], vec![buffer(), retry(&default)]] {
+        let (podgate, stale, good) = stale_pair(&chain).await;
+        let sent = posts_until_dropped(&podgate, &stale, 64, false).await;
+        let mut refused = 0;
+        for (body, answer) in &sent {
+            if stale.count_of(body) == 1 && answer.body != "stale" {
+                refused += 1;
+                assert_eq!(answer.status, 502, "dropped POST: {}", answer.body);
+                assert_eq!(good.count_of(body), 0, "it was not sent to the good server");
+            }
+        }
+        assert_eq!(refused, stale.dropped());
+    }
+}
+
+/// Podgate with the stale server and a good one, `chain` in the app.
 async fn stale_pair(chain: &[Value]) -> (Podgate, Backend, Backend) {
     let podgate = Podgate::start().await;
     let (stale, good) = (
@@ -387,80 +571,32 @@ async fn stale_pair(chain: &[Value]) -> (Podgate, Backend, Backend) {
         Backend::good().await,
     );
     push(&podgate, &guarded(1, &[stale.addr, good.addr], chain, 100)).await;
-    prime(&podgate).await;
     (podgate, stale, good)
-}
-
-fn buffer() -> Value {
-    middleware(
-        "buffer",
-        "buffering",
-        json!({"max_request_body_bytes": 65536, "buffer_request": true}),
-    )
-}
-
-#[tokio::test]
-async fn retry_post_only_when_buffered_and_listed() {
-    let listed = json!({"attempts": 2, "initial_interval_ms": 1, "methods": ["POST"]});
-
-    // Listed and buffered: replayed.
-    let (podgate, _stale, good) = stale_pair(&[buffer(), retry(&listed)]).await;
-    let (status, body) = post(&podgate, b"replay me", false).await;
-    assert_eq!((status, body.as_str()), (200, "good"));
-    assert_eq!(
-        good.bodies().last().map(Vec::as_slice),
-        Some(&b"replay me"[..])
-    );
-
-    // Listed, but the body streams: never replayed.
-    let (podgate, stale, good) = stale_pair(&[retry(&listed)]).await;
-    let (status, _) = post(&podgate, b"streamed", false).await;
-    assert_eq!(status, 502);
-    assert_eq!(
-        (stale.hits(), good.hits()),
-        (2, 1),
-        "only the priming reached them"
-    );
-
-    // Buffered, but POST is not in the default methods.
-    let default = json!({"attempts": 2, "initial_interval_ms": 1});
-    let (podgate, stale, good) = stale_pair(&[buffer(), retry(&default)]).await;
-    let (status, _) = post(&podgate, b"buffered", false).await;
-    assert_eq!(status, 502);
-    assert_eq!((stale.hits(), good.hits()), (2, 1));
 }
 
 #[tokio::test]
 async fn buffered_body_replayed_on_retry() {
     // Bigger than any single read, framed both ways.
-    let body: Vec<u8> = (0..40_000_u32)
-        .map(|n| b'a' + u8::try_from(n % 26).unwrap_or(0))
-        .collect();
     for chunked in [false, true] {
         let chain = [
             buffer(),
             retry(&json!({"attempts": 2, "initial_interval_ms": 1, "methods": ["POST"]})),
         ];
         let (podgate, stale, good) = stale_pair(&chain).await;
-        let (status, answer) = post(&podgate, &body, chunked).await;
-        assert_eq!(
-            (status, answer.as_str()),
-            (200, "good"),
-            "chunked: {chunked}"
-        );
-        let received = stale.bodies();
-        assert_eq!(
-            received.last(),
-            Some(&body),
-            "the first server read all of it"
-        );
-        let replayed = good.bodies();
-        assert_eq!(
-            replayed.last(),
-            Some(&body),
-            "the second server got the whole body, chunked: {chunked}"
-        );
-        assert_eq!(good.label, "good");
+        let sent = posts_until_dropped(&podgate, &stale, 40_000, chunked).await;
+        let mut replayed = 0;
+        for (body, answer) in &sent {
+            assert_eq!(answer.status, 200, "chunked {chunked}: {}", answer.body);
+            if answer.body == "good" && stale.count_of(body) == 1 {
+                replayed += 1;
+                assert_eq!(
+                    good.count_of(body),
+                    1,
+                    "the second server got the whole body, chunked: {chunked}"
+                );
+            }
+        }
+        assert!(replayed >= 1, "chunked: {chunked}");
     }
 }
 
@@ -563,14 +699,14 @@ async fn retry_single_server_connect_only() {
 #[tokio::test]
 async fn retry_reenters_backend_admission() {
     let podgate = Podgate::start().await;
-    let (dead, slow) = (
-        common::refused(),
-        Backend::start("slow", Mode::Slow(Duration::from_millis(1500))).await,
-    );
+    // Both servers refuse until the test lets them listen, so whichever the request meets first
+    // fails, and the other one, which listens by then, is the retry's target.
+    let (first, second) = (Deferred::new(), Deferred::new());
+    let addrs = [first.addr, second.addr];
     // The wait before the retry is 1 to 2 s; the tenant allows one request in flight.
     let chain = [retry(&json!({"attempts": 2, "initial_interval_ms": 2000}))];
-    push(&podgate, &guarded(1, &[dead.addr, slow.addr], &chain, 1)).await;
-    let first = tokio::spawn({
+    push(&podgate, &guarded(1, &addrs, &chain, 1)).await;
+    let request = tokio::spawn({
         let addr = podgate.proxy_addr;
         async move {
             let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -604,37 +740,50 @@ async fn retry_reenters_backend_admission() {
         .unwrap_or(0)
     };
 
-    // During the wait: the request holds its tenant slot, and no backend slot, not even the
-    // dead server's, which went back before the wait.
+    // During the wait the first attempt has failed: the request holds its tenant slot and no
+    // backend slot, the failed attempt's slot having gone back before the wait.
     sleep(Duration::from_millis(500)).await;
     let waiting = podgate.admin_get("/metrics").await.body;
     assert_eq!(tenant_inflight(&waiting), 1);
-    assert_eq!(inflight(&waiting, dead.addr), 0);
-    assert_eq!(inflight(&waiting, slow.addr), 0);
+    for addr in addrs {
+        assert_eq!(inflight(&waiting, addr), 0, "{addr}");
+    }
     // The retry holds the tenant's only slot, so a second request is refused for capacity.
     let refused = podgate.get("a.test", "/").await;
     assert_eq!(refused.status, 503, "{refused:?}");
     assert_eq!(refused.header("retry-after"), Some("1"));
 
-    // After the wait: the retry took a slot of the second server's backend.
+    // The servers start listening; the one that was not tried takes the retry, slowly.
+    let servers = [
+        first.listen("slow", Mode::Slow(Duration::from_millis(1500))),
+        second.listen("slow", Mode::Slow(Duration::from_millis(1500))),
+    ];
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let metrics = podgate.admin_get("/metrics").await.body;
-        if inflight(&metrics, slow.addr) == 1 {
+        let taken: Vec<u64> = addrs.iter().map(|addr| inflight(&metrics, *addr)).collect();
+        if taken.iter().sum::<u64>() == 1 {
             assert_eq!(tenant_inflight(&metrics), 1, "still one");
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the retry never took a backend slot"
+            "the retry never took a backend slot: {taken:?}"
         );
         sleep(Duration::from_millis(50)).await;
     }
-    let raw = first.await.expect("first request");
+    let raw = request.await.expect("the request");
     assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
+    assert_eq!(
+        servers.iter().map(Backend::hits).sum::<usize>(),
+        1,
+        "one server answered, once"
+    );
     let metrics = podgate.admin_get("/metrics").await.body;
     assert_eq!(tenant_inflight(&metrics), 0);
-    assert_eq!(inflight(&metrics, slow.addr), 0);
+    for addr in addrs {
+        assert_eq!(inflight(&metrics, addr), 0, "{addr}");
+    }
 }
 
 #[tokio::test]
@@ -692,10 +841,19 @@ async fn retry_failure_feeds_outlier() {
         .await
         .json();
     assert_eq!(servers(explained)[0]["available"], true);
-    // Each request fails once on the dead server and succeeds on the good one: the client never
-    // sees an error, and the dead server is ejected after its second failed attempt.
-    for _ in 0..2 {
-        assert_eq!(podgate.get("a.test", "/").await.status, 200);
+    // A request that meets the dead server fails there once and succeeds on the good one: the
+    // client never sees an error, and the dead server is ejected after its second failed attempt.
+    let mut sent = 0;
+    for _ in 0..MAX_TRIES {
+        assert_eq!(get(&podgate).await.status, 200);
+        sent += 1;
+        let explained = podgate
+            .admin_get("/v1/explain?url=http://a.test/")
+            .await
+            .json();
+        if servers(explained)[0]["available"] == false {
+            break;
+        }
     }
     let explained = podgate
         .admin_get("/v1/explain?url=http://a.test/")
@@ -704,6 +862,16 @@ async fn retry_failure_feeds_outlier() {
     let servers = servers(explained);
     assert_eq!(servers[0]["available"], false, "{servers}");
     assert_eq!(servers[1]["available"], true, "{servers}");
+    assert_eq!(
+        retries(&podgate).await,
+        2,
+        "exactly the two failed attempts that ejected it"
+    );
+    assert_eq!(
+        good.hits(),
+        sent,
+        "every request was answered by the good server"
+    );
 }
 
 #[tokio::test]
@@ -753,31 +921,38 @@ async fn retry_attempts_in_access_log() {
         pushed
     };
 
-    // Every request is logged with its own count: `a.test` goes to the dead server first.
+    // Every request is logged with its own count: `b.test` has one server and is never retried;
+    // `a.test` is retried when it meets the dead server first.
     let dir = Dir::new();
     let podgate = logged(&dir).await;
     let pushed = with_direct(guarded(1, &[dead.addr, good.addr], &chain, 100));
     push_logged(&podgate, pushed.clone()).await;
-    for host in ["a.test", "b.test", "a.test"] {
+    for host in ["a.test", "b.test", "a.test", "b.test", "a.test", "a.test"] {
         assert_eq!(podgate.get(host, "/").await.status, 200);
     }
-    let lines = log_lines(&dir, 3).await;
-    let counts: Vec<(&Value, &Value)> = lines
-        .iter()
-        .map(|line| (&line["host"], &line["retry_attempts"]))
-        .collect();
+    let lines = log_lines(&dir, 6).await;
+    let mut retried = 0;
+    for line in &lines {
+        let count = line["retry_attempts"].as_u64().expect("a count");
+        if line["host"] == "b.test" {
+            assert_eq!(count, 0, "{line}");
+        } else {
+            assert!(count <= 1, "{line}");
+        }
+        if count == 1 {
+            retried += 1;
+            assert_eq!(
+                line["server"],
+                good.addr.to_string(),
+                "the server that answered"
+            );
+        }
+    }
+    assert!(retried >= 1, "{lines:?}");
     assert_eq!(
-        counts,
-        [
-            (&json!("a.test"), &json!(1)),
-            (&json!("b.test"), &json!(0)),
-            (&json!("a.test"), &json!(1)),
-        ]
-    );
-    assert_eq!(
-        lines[0]["server"],
-        good.addr.to_string(),
-        "the server that answered"
+        retried,
+        retries(&podgate).await,
+        "the metric counts the same retries"
     );
 
     // The `retry_attempts` filter keeps only the requests that were retried.
@@ -786,22 +961,25 @@ async fn retry_attempts_in_access_log() {
     let mut filtered = pushed;
     filtered["observability"] = json!({ "access_log": { "filters": { "retry_attempts": 1 } } });
     push(&podgate, &filtered).await;
-    for host in ["b.test", "a.test", "b.test"] {
+    for host in ["b.test", "a.test", "b.test", "a.test", "a.test", "b.test"] {
         assert_eq!(podgate.get(host, "/").await.status, 200);
     }
-    let lines = log_lines(&dir, 1).await;
+    let wanted = usize::try_from(retries(&podgate).await).expect("a small count");
+    assert!(wanted >= 1);
+    let lines = log_lines(&dir, wanted).await;
     sleep(Duration::from_millis(300)).await;
-    let lines_later = log_lines(&dir, 1).await;
-    assert_eq!(lines.len(), 1, "{lines:?}");
+    let lines_later = log_lines(&dir, wanted).await;
     assert_eq!(
         lines_later.len(),
-        1,
-        "the requests that were not retried are not logged"
+        wanted,
+        "only the retried requests are logged: {lines:?}"
     );
-    assert_eq!(
-        (&lines[0]["host"], &lines[0]["retry_attempts"]),
-        (&json!("a.test"), &json!(1))
-    );
+    for line in &lines_later {
+        assert_eq!(
+            (&line["host"], &line["retry_attempts"]),
+            (&json!("a.test"), &json!(1))
+        );
+    }
 }
 
 /// A listener whose accept queue is full, so a connect to it hangs until the dial timeout. The
@@ -848,19 +1026,23 @@ async fn retry_dial_timeout_retried_read_timeout_not() {
     );
     push(&podgate, &pushed).await;
     let started = Instant::now();
-    let response = podgate.get("a.test", "/").await;
-    assert_eq!(
-        (response.status, response.body.as_str()),
-        (200, "good"),
-        "{response:?}"
-    );
+    for _ in 0..4 {
+        let answer = get(&podgate).await;
+        assert_eq!((answer.status, answer.body.as_str()), (200, "good"));
+    }
     assert!(
         started.elapsed() >= Duration::from_millis(900),
-        "the dial timed out first"
+        "a request met the hung server and waited for its dial to time out"
     );
-    assert_eq!(good.hits(), 1);
+    assert!(retries(&podgate).await >= 1);
+    assert_eq!(
+        good.hits(),
+        4,
+        "each request was answered once by the good server"
+    );
 
-    // A response that never comes may have been caused by the request: a `504`, no retry.
+    // A response that never comes may have been caused by the request: a `504`, no retry. The
+    // good server answers exactly the requests that were not sent to the silent one.
     let silent = Backend::start("silent", Mode::Slow(Duration::from_secs(60))).await;
     let pushed = with_transport(
         guarded(2, &[silent.addr, good.addr], &chain, 100),
@@ -868,12 +1050,20 @@ async fn retry_dial_timeout_retried_read_timeout_not() {
     );
     push(&podgate, &pushed).await;
     let before = good.hits();
-    let response = podgate.get("a.test", "/").await;
-    assert_eq!(response.status, 504, "{response:?}");
-    assert_eq!(silent.hits(), 1);
+    let mut answered = 0;
+    let mut timed_out = 0;
+    for _ in 0..4 {
+        match get(&podgate).await.status {
+            200 => answered += 1,
+            504 => timed_out += 1,
+            other => panic!("status {other}"),
+        }
+    }
+    assert!(timed_out >= 1, "a request met the silent server");
+    assert_eq!(silent.hits(), timed_out);
     assert_eq!(
-        good.hits(),
-        before,
-        "the request was not sent to another server"
+        good.hits() - before,
+        answered,
+        "a timed out request was not sent to the good server"
     );
 }
