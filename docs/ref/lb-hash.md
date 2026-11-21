@@ -30,6 +30,8 @@ Caddy's `query` and `cookie` policies are not provided; sticky cookies are `stic
 
 `ip_hash`, `uri_hash` and `header_hash` use a ketama ring (`pingora-ketama`). A server owns `weight / gcd` times 160 points; a pick hashes the key, finds the first point at or after it and takes that point's server. When that server is not allowed the pick walks on to the next point, so only the keys of the server that is out move, they spread over the others, and they return when it recovers. Health flaps do not reshuffle the ring: the ring is built once per compiled service and never from the current health.
 
+Ketama's point positions come from CRC-32 of each server's address and point index, so they depend on the set of addresses and not on the service's secret. With 160 points per weight unit, a server's share of keys differs from its weight by about two percentage points for a given address set (measured: weights 1 and 3 give the heavier server 0.7625 instead of 0.75, the same under every secret). `hrw` has no such granularity and matches the weights on average; use it when exact shares matter.
+
 `hrw` scores every server with a hash of the client and the server's address, scaled by its weight (`weight / -ln(u)` for a uniform `u`), and takes the best allowed score: a server of weight 3 wins three times as many clients as one of weight 1, and removing a server moves only the clients it won. It costs a hash and a logarithm per server on every pick, against a binary search for the ring, so prefer the ring algorithms for services with many servers.
 
 ## Weights

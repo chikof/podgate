@@ -63,8 +63,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Revision-aware rollout, canary, skew pinning | weighted services by hand | none | built |
 | Scale to zero with wake | none | none | built |
 | Request shadow and replay of failures | none | none | built |
-| DNS names as servers | yes (dialer) | yes, plus dynamic upstreams | built (A and AAAA, TTL, policy on every answer; SRV is 0096), see docs/ref/dns-resolver.md |
-| SRV upstreams | none | `srv` dynamic upstreams | 0096 (with a port deny list, because DNS then chooses the port); `multi` and other sources declined |
+| DNS names as servers | yes (dialer) | yes, plus dynamic upstreams | built (A and AAAA, TTL, policy on every answer; SRV in 0096), see docs/ref/dns-resolver.md |
+| SRV upstreams | none | `srv` dynamic upstreams | built (`resolve: "srv"` with priorities, weights, the TTL, a port deny list because DNS then chooses the port, and the address policy on every target), see docs/ref/dns-srv.md; `multi` and other sources declined |
 | Upstream address policy (SSRF) | none | none | built: operator allow and deny CIDRs per tenant; loopback, link-local, metadata, unspecified and multicast denied by default; checked at compile and before every dial |
 | Response flush interval | `responseForwarding.flushInterval` | `flush_interval` | declined: Pingora streams chunks as they arrive |
 | Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport; default never closes a tunnel) |
