@@ -67,7 +67,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | SRV upstreams | none | `srv` dynamic upstreams | built (`resolve: "srv"` with priorities, weights, the TTL, a port deny list because DNS then chooses the port, and the address policy on every target), see docs/ref/dns-srv.md; `multi` and other sources declined |
 | Upstream address policy (SSRF) | none | none | built: operator allow and deny CIDRs per tenant; loopback, link-local, metadata, unspecified and multicast denied by default; checked at compile and before every dial |
 | Response flush interval | `responseForwarding.flushInterval` | `flush_interval` | declined: Pingora streams chunks as they arrive |
-| Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | 0098 (opt-in per transport); by default no timer ends an active tunnel, and an idle one closes at the shorter of the transport's `read_timeout_secs` (default `REQUEST_TIMEOUT_SECS`) and the entry point's `timeouts.read_secs`, traffic either way keeping it open (`docs/ref/websocket.md`) |
+| Tunnel lifetime and close delay | n/a | `stream_timeout`, `stream_close_delay` | built: `max_stream_lifetime_secs`, `stream_close_delay_secs`, and `tunnel_idle_timeout_secs` (neither Traefik nor Caddy has an idle timer: both kept an idle WebSocket open past 250 s, measured on 3.7.16 and 2.11.9); all off by default, an explicit entry point `timeouts.read_secs` stays a ceiling; `docs/ref/transport-extras.md` |
 | WebSocket proxying | transparent | transparent | built and verified (`docs/ref/websocket.md`; upgrade, frames, TLS, the middleware matrix, drain and shutdown tested end to end) |
 
 ## Transports
@@ -80,7 +80,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | h2c on entry points, gRPC | automatic h2c on plain entry points | `protocols h1 h2c` | built: `entry_points[].http2.h2c`; gRPC verified end to end, `docs/ref/grpc.md` |
 | Dial, response and idle timeouts, pool size | `forwardingTimeouts`, `maxIdleConnsPerHost` | `dial_timeout`, `keepalive_*` | built (dial, read, write and idle timeouts; `max_idle_per_host` is `unsupported_setting`, pool size is `UPSTREAM_POOL_SIZE`) |
 | SPIFFE and `peerCertURI` | `spiffe`, `peerCertURI` | none | 0104 (Workload API client, one SVID per tenant, upstream mTLS and client identity) |
-| PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | 0098 (rejected as `unsupported_setting` if Pingora has no hook) |
+| PROXY protocol to HTTP upstreams | none | `proxy_protocol` in transport | built: `proxy_protocol {version: 1\|2}` on a `servers_transport`, per-client pool key, `LOCAL` for probes and internal callers, refused for mirrors; `docs/ref/transport-extras.md` |
 
 ## Middlewares
 
