@@ -64,6 +64,7 @@ pub use static_files::{
     StaticRoots, StaticSite, TenantRoots,
 };
 pub use sticky::Sticky;
+pub use transport::extras;
 pub use transport::{
     Named as NamedTransport, Summary as TransportSummary, Transport, Upstream, timed_out,
 };

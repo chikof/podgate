@@ -99,7 +99,7 @@ use subrequest::{BodyMode, Ctx as SubrequestCtx};
 
 pub use proxy_cache::range_filter::{range_header_filter, MultiRangeInfo, RangeType};
 pub use proxy_purge::PurgeStatus;
-pub use proxy_trait::{FailToProxy, ProxyHttp, ProxyWarnLogContext};
+pub use proxy_trait::{FailToProxy, ProxyHttp, ProxyWarnLogContext, Tunnel};
 
 pub mod prelude {
     pub use crate::{http_proxy, http_proxy_service, ProxyHttp, ProxyWarnLogContext, Session};

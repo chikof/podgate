@@ -156,6 +156,12 @@ impl Policy {
         self.proxy_protocol.as_ref()
     }
 
+    /// The downstream read timeout the operator set, `None` when the entry point sets none.
+    #[must_use]
+    pub fn read_timeout(&self) -> Option<Duration> {
+        self.timeouts.read
+    }
+
     /// The idle (keep-alive) timeout in whole seconds, for HTTP/1 sessions and HTTP/2
     /// connections.
     #[must_use]

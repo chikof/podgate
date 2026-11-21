@@ -254,7 +254,7 @@ async fn ws_idle_timeout_closes() {
     let podgate = Podgate::start().await;
     let mut a = ws_app(echo.addr);
     a["transports"] = json!([{ "name": "t", "type": "servers_transport",
-                                "read_timeout_secs": 2, "idle_timeout_secs": 1 }]);
+                                "tunnel_idle_timeout_secs": 2, "idle_timeout_secs": 1 }]);
     a["revisions"][0]["services"][0]["transport"] = json!("t");
     let mut pushed = snapshot(1, &[a]);
     // None of these govern a tunnel: `idle_secs` is the keep-alive wait between requests,
@@ -292,7 +292,8 @@ async fn ws_active_tunnel_survives_idle_timeout() {
     let echo = Echo::start().await;
     let podgate = Podgate::start().await;
     let mut a = ws_app(echo.addr);
-    a["transports"] = json!([{ "name": "t", "type": "servers_transport", "read_timeout_secs": 2 }]);
+    a["transports"] =
+        json!([{ "name": "t", "type": "servers_transport", "tunnel_idle_timeout_secs": 2 }]);
     a["revisions"][0]["services"][0]["transport"] = json!("t");
     push(&podgate, &snapshot(1, &[a])).await;
 
@@ -1006,13 +1007,13 @@ async fn ws_entry_read_timeout_closes_idle_tunnel() {
     );
 }
 
-/// A podgate whose only app reaches `echo` through a transport with read timeout `secs`, and
-/// whose entry point `web` has the policy `entry` when given.
-async fn with_read_timeouts(echo: &Echo, secs: u64, entry: Option<Value>) -> Podgate {
+/// A podgate whose only app reaches `echo` through a transport with tunnel idle timeout `secs`,
+/// and whose entry point `web` has the policy `entry` when given.
+async fn with_tunnel_idle(echo: &Echo, secs: u64, entry: Option<Value>) -> Podgate {
     let podgate = Podgate::start().await;
     let mut a = ws_app(echo.addr);
     a["transports"] =
-        json!([{ "name": "t", "type": "servers_transport", "read_timeout_secs": secs }]);
+        json!([{ "name": "t", "type": "servers_transport", "tunnel_idle_timeout_secs": secs }]);
     a["revisions"][0]["services"][0]["transport"] = json!("t");
     let mut pushed = snapshot(1, &[a]);
     if let Some(policy) = entry {
@@ -1025,7 +1026,7 @@ async fn with_read_timeouts(echo: &Echo, secs: u64, entry: Option<Value>) -> Pod
 #[tokio::test]
 async fn ws_one_way_client_traffic_keeps_tunnel_alive() {
     let echo = Echo::start().await;
-    let podgate = with_read_timeouts(&echo, 2, None).await;
+    let podgate = with_tunnel_idle(&echo, 2, None).await;
 
     // Unsolicited pongs are a one-way heartbeat: the upstream never answers them. The idle
     // timers restart on any traffic, so the quiet upstream side does not end the tunnel.
@@ -1058,7 +1059,7 @@ async fn ws_one_way_client_traffic_keeps_tunnel_alive() {
 async fn ws_server_push_keeps_tunnel_alive() {
     let echo = Echo::start().await;
     let entry = json!({ "name": "web", "timeouts": { "read_secs": 2 } });
-    let podgate = with_read_timeouts(&echo, 2, Some(entry)).await;
+    let podgate = with_tunnel_idle(&echo, 2, Some(entry)).await;
 
     // The client says nothing after the first frame while the upstream pushes for 6 s.
     let mut tunnel = tunnel(&podgate).await;

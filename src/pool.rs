@@ -37,9 +37,17 @@
 //! Limit: an HTTP/2 downstream connection has no per-connection state in Pingora's callbacks, so
 //! only the requests that carry the header are pinned. HTTP/2 forbids connection-based
 //! authentication, so this is the protocol's own rule, not a gap.
+//!
+//! # PROXY protocol
+//!
+//! A transport with `proxy_protocol` writes a header naming the client at the start of each
+//! upstream connection, so such a connection belongs to one client address (ip and
+//! port): `isolate` adds it to the group key, and the connection is closed by the same short
+//! idle timeout once its client has gone.
 
 use std::any::Any;
 use std::hash::{BuildHasher, RandomState};
+use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -159,30 +167,42 @@ pub fn restore(state: &mut State, previous: Box<dyn Any + Send + Sync>) {
 }
 
 /// Makes `peer` draw only from, and return only to, the pool partition of `identity` (and of the
-/// downstream connection of `session` when `state` is pinned). Call after every other peer
+/// downstream connection of `session` when `state` is pinned, and of `client` when the transport
+/// writes a PROXY protocol header, which names its client). Call after every other peer
 /// setting, before returning the peer.
-pub fn isolate(peer: &mut HttpPeer, identity: Identity<'_>, state: State, session: &Session) {
-    let pin = if state.pinned {
-        // A transport's shorter idle timeout still wins.
+pub fn isolate(
+    peer: &mut HttpPeer,
+    identity: Identity<'_>,
+    state: State,
+    session: &Session,
+    client: Option<SocketAddr>,
+) {
+    // A connection bound to one downstream connection or one client address has no use once
+    // that one is gone: it is closed by a short idle timeout, and a transport's shorter one
+    // still wins.
+    if state.pinned || client.is_some() {
         peer.options.idle_timeout = Some(
             peer.options
                 .idle_timeout
                 .map_or(PINNED_IDLE_TIMEOUT, |idle| idle.min(PINNED_IDLE_TIMEOUT)),
         );
+    }
+    let pin = if state.pinned {
         pin_for(session)
     } else {
         Pin::Shared
     };
-    peer.group_key = group_key(identity, pin);
+    peer.group_key = group_key(identity, pin, client);
 }
 
-fn group_key(identity: Identity<'_>, pin: Pin) -> u64 {
+fn group_key(identity: Identity<'_>, pin: Pin, client: Option<SocketAddr>) -> u64 {
     KEYS.hash_one((
         identity.tenant,
         identity.app,
         identity.revision,
         identity.transport,
         pin,
+        client,
     ))
 }
 
@@ -214,7 +234,7 @@ mod test {
 
     fn peer(addr: &str, identity: Identity<'_>, pin: Pin) -> HttpPeer {
         let mut peer = HttpPeer::new(addr, false, String::new());
-        peer.group_key = group_key(identity, pin);
+        peer.group_key = group_key(identity, pin, None);
         peer
     }
 
@@ -367,5 +387,23 @@ mod test {
         assert_eq!(hash(1), hash(1));
         assert_ne!(hash(1), hash(2));
         assert_ne!(hash(0), hash(1));
+    }
+
+    #[test]
+    fn reuse_hash_separates_client_addresses() {
+        use pingora::upstreams::peer::Peer;
+        let hash = |client: Option<&str>| {
+            let mut peer = HttpPeer::new("127.0.0.1:9000", false, String::new());
+            peer.group_key = group_key(
+                IDENTITY,
+                Pin::Shared,
+                client.map(|text| text.parse().expect("address")),
+            );
+            peer.reuse_hash()
+        };
+        assert_eq!(hash(Some("192.0.2.1:5000")), hash(Some("192.0.2.1:5000")));
+        assert_ne!(hash(Some("192.0.2.1:5000")), hash(Some("192.0.2.1:5001")));
+        assert_ne!(hash(Some("192.0.2.1:5000")), hash(Some("192.0.2.2:5000")));
+        assert_ne!(hash(Some("192.0.2.1:5000")), hash(None));
     }
 }

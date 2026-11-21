@@ -80,6 +80,7 @@ use crate::pool;
 use crate::respond;
 use crate::route::{self, RouteError, Selected};
 use crate::router::Matched;
+use crate::service::extras;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{Lease, StaticReads, mirroring, outlier, serve_static, sticky};
 use crate::skew;
@@ -161,6 +162,9 @@ pub struct Ctx {
     /// What the `retry` middleware keeps: the servers tried and the attempt to start next
     ///.
     pub retry: retry::Progress,
+    /// The tunnel this request may become or is: its limits from the transport, and the
+    /// timers that end it.
+    pub tunnel: extras::State,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -574,6 +578,7 @@ impl ProxyHttp for Gateway {
             mirror: mirroring::State::default(),
             body_held: false,
             retry: retry::Progress::default(),
+            tunnel: extras::State::default(),
         }
     }
 
@@ -942,7 +947,8 @@ impl ProxyHttp for Gateway {
     }
 
     fn suppress_error_log(&self, _session: &Session, ctx: &Ctx, _error: &Error) -> bool {
-        ctx.error_page == errors::Attempt::Replaced
+        // A tunnel ended by its own limit is not an error worth an `ERROR` line.
+        ctx.error_page == errors::Attempt::Replaced || ctx.tunnel.limit_fired()
     }
 
     async fn fail_to_proxy(&self, session: &mut Session, e: &Error, ctx: &mut Ctx) -> FailToProxy {
@@ -987,6 +993,7 @@ impl ProxyHttp for Gateway {
         // A replaced response ends with the synthetic error `response_filter` returns; the
         // observers judge the response that was written, not that error.
         let error = error.filter(|_| ctx.error_page != errors::Attempt::Replaced);
+        ctx.tunnel.finished(error);
         self.failures.log(session, ctx);
         outlier::observe(session, error, ctx);
         outcomes::record_request(&self.outcomes, session, ctx);
@@ -1023,11 +1030,12 @@ impl ProxyHttp for Gateway {
             .and_then(|app| app.leaf(&selected))
             .ok_or_else(outside)?;
         // The servers of a name follow its DNS answers: the one picked may have just left.
-        let (mut peer, pool_key) = service
+        let (mut peer, pool_key, extras) = service
             .with_upstream(selected.upstream, |upstream| {
                 (
                     upstream.http_peer(self.upstream_timeout),
                     upstream.pool_key(),
+                    upstream.extras(),
                 )
             })
             .ok_or_else(|| {
@@ -1040,8 +1048,27 @@ impl ProxyHttp for Gateway {
         }
         let identity = pool::Identity::of(&ctx.table, &selected, pool_key).ok_or_else(outside)?;
         pool::observe(&mut ctx.pool, session.req_header());
-        pool::isolate(&mut peer, identity, ctx.pool, session);
+        // A PROXY protocol header names the client, so its connection belongs to that client
+        // address alone.
+        let mut client = None;
+        if let Some(version) = extras.proxy_protocol {
+            client = session
+                .client_addr()
+                .and_then(|addr| addr.as_inet().copied());
+            let server = session
+                .server_addr()
+                .and_then(|addr| addr.as_inet().copied());
+            extras::set_client_header(&mut peer, version, client, server);
+        }
+        pool::isolate(&mut peer, identity, ctx.pool, session, client);
+        if session.is_upgrade_req() {
+            ctx.tunnel.plan(extras.tunnel);
+        }
         Ok(Box::new(peer))
+    }
+
+    fn tunnel(&self, _session: &Session, ctx: &mut Ctx) -> Option<pingora::proxy::Tunnel> {
+        ctx.tunnel.hook()
     }
 
     fn fail_to_connect(
@@ -1121,11 +1148,19 @@ impl ProxyHttp for Gateway {
 
     async fn upstream_response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         let status = upstream_response.status.as_u16();
+        if status == 101 && session.is_upgrade_req() {
+            let read = ctx.table.entry_policy(&ctx.entry_point).read_timeout();
+            let key = ctx
+                .route
+                .as_ref()
+                .and_then(|selected| extras::Key::of(&ctx.table, selected));
+            ctx.tunnel.opened(session, read, &self.table, key);
+        }
         ctx.backend.responded(status);
         if let Some(lease) = &mut ctx.lease {
             lease.responded(status);

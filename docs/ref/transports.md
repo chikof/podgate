@@ -44,6 +44,10 @@ never ignored.
 | `read_timeout_secs` | The wait for the response head, then for each read of the body, 1..=3600. Default `REQUEST_TIMEOUT_SECS`. A timeout before a response started answers `504`. |
 | `write_timeout_secs` | Each write of the request to the server, 1..=3600. Default `REQUEST_TIMEOUT_SECS`. |
 | `idle_timeout_secs` | How long an unused pooled connection is kept open, 1..=3600. Default: until the server closes it or the pool evicts it. |
+| `proxy_protocol` | `{"version": 1\|2}`: a PROXY protocol header first on every new connection. See `docs/ref/transport-extras.md`. |
+| `tunnel_idle_timeout_secs` | 1..=86400. Idle time of a tunnel; replaces `read_timeout_secs` after the `101`. Default: unlimited. See `docs/ref/transport-extras.md`. |
+| `max_stream_lifetime_secs` | 1..=86400. Longest life of a tunnel. Default: unlimited. |
+| `stream_close_delay_secs` | 1..=86400. Life of a tunnel after a snapshot removed its server. Default: unlimited. |
 | `max_idle_per_host` | Refused with `unsupported_setting`, whatever the value. See `Connection pool`. |
 
 ## Defaults
@@ -119,11 +123,15 @@ every transport, whether it sets the timeout or takes the default.
 A connection that carried `Authorization: NTLM` or `Negotiate` is pinned to its client and kept
 idle for at most 60 seconds (`pool::PINNED_IDLE_TIMEOUT`); a shorter `idle_timeout_secs` wins.
 
+A transport with `proxy_protocol` partitions its connections by the client's address too (ip and
+port), and keeps them idle for at most the same 60 seconds: the header names one client, so no
+other client's request may draw the connection (`docs/ref/transport-extras.md`).
+
 ## Errors
 
 | Code | When |
 |---|---|
-| `invalid_transport` | Unknown type or field; `ca_pem`, `client_cert` or `server_name` that does not parse; a key that does not match its certificate; `ca_pem` with `insecure_skip_verify`; a timeout outside 1..=3600 or not a whole number; `http2` that is not a boolean; TLS fields or `http2: false` on a transport named by a service with an `h2c://` server. |
+| `invalid_transport` | Unknown type or field; `ca_pem`, `client_cert` or `server_name` that does not parse; a key that does not match its certificate; `ca_pem` with `insecure_skip_verify`; a timeout outside 1..=3600 or not a whole number; a tunnel timer outside 1..=86400; a `proxy_protocol` that is not `{"version": 1\|2}`; `http2` that is not a boolean; TLS fields or `http2: false` on a transport named by a service with an `h2c://` server. |
 | `unsupported_setting` | `min_tls_version: "1.3"`; `max_idle_per_host`. |
 | `unknown_transport` | A service names a transport the app does not declare. |
 | `invalid_service` | TLS options on a transport named by a service with an `http://` server; one address under two schemes. |

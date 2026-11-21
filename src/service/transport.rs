@@ -23,6 +23,10 @@
 //! | `read_timeout_secs` | Wait for the response head, then for each read of the body, 1..=3600. A timeout answers `504` before a response started. Default: `REQUEST_TIMEOUT_SECS`. |
 //! | `write_timeout_secs` | Each write of the request, 1..=3600. Default: `REQUEST_TIMEOUT_SECS`. |
 //! | `idle_timeout_secs` | How long an unused pooled connection is kept, 1..=3600. Default: until the server closes it or the pool evicts it. |
+//! | `proxy_protocol` | `{"version": 1\|2}`: every new connection to the transport's servers starts with a PROXY protocol header, the client's for a proxied request and `LOCAL` for probes and other internal requests. See [`extras`]. |
+//! | `tunnel_idle_timeout_secs` | 1..=86400. How long a tunnel (an upgraded connection) may be idle; replaces the read timeouts after the `101`. Default: unlimited. |
+//! | `max_stream_lifetime_secs` | 1..=86400. The longest a tunnel lives. Default: unlimited. |
+//! | `stream_close_delay_secs` | 1..=86400. How long a tunnel lives on after a snapshot left its server out of the table. Default: unlimited. |
 //! | `max_idle_per_host` | Always `unsupported_setting`: Pingora's pool is one LRU for the whole process, see `UPSTREAM_POOL_SIZE`. |
 //!
 //! A `https://` server with no transport uses [`Transport::default`]: platform roots, URL host as
@@ -60,6 +64,9 @@ use sha2::{Digest, Sha256};
 use super::Server;
 use crate::compile::Invalid;
 use podgate_model::Declared;
+
+pub mod extras;
+use extras::Extras;
 
 /// The `type` of a transport in a snapshot.
 pub(super) const KIND: &str = "servers_transport";
@@ -109,6 +116,22 @@ pub(super) struct Config {
     #[serde(default)]
     #[schemars(range(min = 1, max = 3600))]
     idle_timeout_secs: Option<u64>,
+    /// A PROXY protocol header on every new connection to the servers: `{"version": 1|2}`.
+    #[serde(default)]
+    proxy_protocol: Option<extras::ProxyProtocolConfig>,
+    /// How long a tunnel may be idle, in seconds (1..=86400). Default: unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 86400))]
+    tunnel_idle_timeout_secs: Option<u64>,
+    /// The longest a tunnel lives, in seconds (1..=86400). Default: unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 86400))]
+    max_stream_lifetime_secs: Option<u64>,
+    /// How long a tunnel lives on after its server was removed by a snapshot, in seconds
+    /// (1..=86400). Default: unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 86400))]
+    stream_close_delay_secs: Option<u64>,
     /// Always refused with `unsupported_setting`: Pingora's pool has no per-host cap, see the
     /// `UPSTREAM_POOL_SIZE` setting.
     #[serde(default)]
@@ -154,6 +177,7 @@ pub struct Transport {
     insecure_skip_verify: bool,
     min_tls_version: Option<&'static str>,
     wire: Wire,
+    extras: Extras,
     fingerprint: u64,
 }
 
@@ -197,6 +221,9 @@ pub struct Summary<'a> {
     /// The idle pool timeout, when the transport sets one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
+    /// The PROXY protocol and tunnel settings, when the transport sets any.
+    #[serde(flatten)]
+    pub extras: extras::Summary,
 }
 
 /// One server of a service together with the transport that reaches it.
@@ -282,6 +309,12 @@ impl Transport {
             write: seconds("write_timeout_secs", config.write_timeout_secs)?,
             idle: seconds("idle_timeout_secs", config.idle_timeout_secs)?,
         };
+        let extras = Extras::compile(
+            config.proxy_protocol,
+            config.tunnel_idle_timeout_secs,
+            config.max_stream_lifetime_secs,
+            config.stream_close_delay_secs,
+        )?;
         let ca = config
             .ca_pem
             .as_deref()
@@ -301,6 +334,7 @@ impl Transport {
             config.insecure_skip_verify,
             min_tls_version,
             wire,
+            extras,
         );
         let client_cert = pems
             .map(|(cert, key)| load_client_cert(&cert, &key))
@@ -313,6 +347,7 @@ impl Transport {
             insecure_skip_verify: config.insecure_skip_verify,
             min_tls_version,
             wire,
+            extras,
             fingerprint,
         })
     }
@@ -346,6 +381,13 @@ impl Transport {
         self.wire.http2 == Some(false)
     }
 
+    /// What the transport sets beyond TLS and timeouts: the PROXY protocol header and the
+    /// limits of a tunnel.
+    #[must_use]
+    pub fn extras(&self) -> Extras {
+        self.extras
+    }
+
     /// What explain shows for `server`, which this transport reaches.
     #[must_use]
     pub fn summary(&self, server: &Server) -> Summary<'_> {
@@ -367,6 +409,7 @@ impl Transport {
             read_timeout_secs: secs(self.wire.read),
             write_timeout_secs: secs(self.wire.write),
             idle_timeout_secs: secs(self.wire.idle),
+            extras: self.extras.summary(),
         }
     }
 
@@ -374,7 +417,11 @@ impl Transport {
     #[must_use]
     pub fn sets_timeouts(&self) -> bool {
         let wire = &self.wire;
-        wire.dial.is_some() || wire.read.is_some() || wire.write.is_some() || wire.idle.is_some()
+        wire.dial.is_some()
+            || wire.read.is_some()
+            || wire.write.is_some()
+            || wire.idle.is_some()
+            || self.extras.is_set()
     }
 }
 
@@ -396,7 +443,8 @@ impl Default for Transport {
             insecure_skip_verify: false,
             min_tls_version: None,
             wire,
-            fingerprint: fingerprint(None, None, None, false, None, wire),
+            extras: Extras::default(),
+            fingerprint: fingerprint(None, None, None, false, None, wire, Extras::default()),
         }
     }
 }
@@ -410,19 +458,33 @@ impl fmt::Debug for Transport {
             .field("insecure_skip_verify", &self.insecure_skip_verify)
             .field("min_tls_version", &self.min_tls_version)
             .field("wire", &self.wire)
+            .field("extras", &self.extras)
             .field("fingerprint", &self.fingerprint)
             .finish()
     }
 }
 
 impl Upstream<'_> {
+    /// A peer for a request that is not a client's (health probes, the page fetch of `errors`,
+    /// `forward_auth`, failure replay, mirrors): `Upstream::base_peer`, with a `LOCAL` PROXY
+    /// header when the transport sets `proxy_protocol`, so a server that requires the header
+    /// does not drop it. Proxied requests use [`Upstream::http_peer`].
+    #[must_use]
+    pub fn peer(self) -> HttpPeer {
+        let mut peer = self.base_peer();
+        if let Some(version) = self.transport.extras.proxy_protocol {
+            extras::set_local_header(&mut peer, version, self.transport.wire.dial);
+        }
+        peer
+    }
+
     /// A peer for a client that writes HTTP/1.1 by hand over the stream the connector hands it
     /// (health probes, error page fetches): TLS when the server is `https://`, with the
     /// transport's name, trust anchors and client certificate, and ALPN `http/1.1` so the server
     /// never switches to HTTP/2. No timeouts and no pool partition: the caller sets them. For
     /// proxied requests use [`Upstream::http_peer`].
     #[must_use]
-    pub fn peer(self) -> HttpPeer {
+    fn base_peer(self) -> HttpPeer {
         let server = self.server;
         if !server.tls {
             return HttpPeer::new(server.addr, false, String::new());
@@ -469,7 +531,7 @@ impl Upstream<'_> {
     /// the idle timeout of the pooled connection. The caller sets the pool partition.
     #[must_use]
     pub fn http_peer(self, default_timeout: Duration) -> HttpPeer {
-        let mut peer = self.peer();
+        let mut peer = self.base_peer();
         let wire = self.transport.wire;
         peer.options.alpn = self.alpn();
         if !matches!(peer.options.alpn, ALPN::H1) {
@@ -482,6 +544,12 @@ impl Upstream<'_> {
         peer.options.write_timeout = Some(wire.write.unwrap_or(default_timeout));
         peer.options.idle_timeout = wire.idle;
         peer
+    }
+
+    /// What the transport reaches this server with beyond TLS and timeouts.
+    #[must_use]
+    pub fn extras(self) -> Extras {
+        self.transport.extras
     }
 
     /// What the connection pool keys on besides who asks: the transport, and whether the
@@ -605,6 +673,7 @@ fn fingerprint(
     insecure_skip_verify: bool,
     min_tls_version: Option<&str>,
     wire: Wire,
+    extras: Extras,
 ) -> u64 {
     let mut hash = Sha256::new();
     let mut field = |value: Option<&str>| match value {
@@ -628,6 +697,9 @@ fn fingerprint(
                 .map(|timeout| timeout.as_secs().to_string())
                 .as_deref(),
         );
+    }
+    for value in extras.fingerprint_fields() {
+        field(value.as_deref());
     }
     let digest = hash.finalize();
     let mut head = [0_u8; 8];

@@ -708,6 +708,14 @@ pub trait ProxyHttp {
         Ok(())
     }
 
+    /// podgate patch: the limits of the connection if this HTTP/1 upstream request
+    /// turns into an upgraded tunnel. Called once per upgrade request, after
+    /// `upstream_request_filter` and before the request is written. `None` (the default) keeps
+    /// Pingora's behaviour: the upstream read timeout stays the peer's `read_timeout`.
+    fn tunnel(&self, _session: &Session, _ctx: &mut Self::CTX) -> Option<Tunnel> {
+        None
+    }
+
     /// This callback is invoked every time request related error log needs to be generated
     ///
     /// Users can define what is important to be written about this request via the returned string.
@@ -754,4 +762,15 @@ pub trait ProxyHttp {
 pub struct FailToProxy {
     pub error_code: u16,
     pub can_reuse_downstream: bool,
+}
+
+/// podgate patch: what [`ProxyHttp::tunnel`] returns.
+#[derive(Debug, Clone)]
+pub struct Tunnel {
+    /// The upstream read timeout once the upgrade succeeded (replacing the peer's
+    /// `read_timeout`, which still covers the wait for the response head); `None` is no timeout.
+    pub read_timeout: Option<Duration>,
+    /// `notify_one` ends the upgraded connection: the upstream half stops and the client gets
+    /// a failed upstream. A notification before the upgrade is kept and acts at the upgrade.
+    pub cancel: std::sync::Arc<tokio::sync::Notify>,
 }

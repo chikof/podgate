@@ -114,6 +114,12 @@ where
         }
 
         session.set_upstream_h1_upgrade_request_status(is_h1_upgrade_req(&req));
+        // podgate patch: the limits of an upgraded tunnel, if this request becomes one.
+        let tunnel = if is_h1_upgrade_req(&req) {
+            self.inner.tunnel(session, ctx)
+        } else {
+            None
+        };
 
         session.upstream_compression.request_filter(&req);
 
@@ -159,7 +165,7 @@ where
                 &mut downstream_custom_message_reader,
                 pipe_state.clone(),
             ),
-            self.proxy_handle_upstream(client_session, tx_upstream, rx_downstream, pipe_state),
+            self.proxy_handle_upstream(client_session, tx_upstream, rx_downstream, pipe_state, tunnel),
         );
 
         if let Some(custom_session) = session.downstream_session.as_custom_mut() {
@@ -251,6 +257,7 @@ where
         tx: mpsc::Sender<HttpTask>,
         mut rx: mpsc::Receiver<HttpTask>,
         pipe_state: Arc<AtomicU8>,
+        tunnel: Option<Tunnel>,
     ) -> Result<bool>
     where
         SV: ProxyHttp + Send + Sync,
@@ -272,6 +279,10 @@ where
                             if !upgraded && client_session.was_upgraded() {
                                 // upgrade can only happen once
                                 upgraded = true;
+                                // podgate patch: the tunnel's own read timeout from now on.
+                                if let Some(tunnel) = &tunnel {
+                                    client_session.read_timeout = tunnel.read_timeout;
+                                }
                                 if send_error.is_none() {
                                     // continue receiving from downstream after body mode change
                                     request_done = false;
@@ -355,6 +366,19 @@ where
                            continue
                         }
                     }
+                },
+
+                // podgate patch: the tunnel's lifetime or removal timer fired.
+                _ = async {
+                    match &tunnel {
+                        Some(tunnel) => tunnel.cancel.notified().await,
+                        None => std::future::pending().await,
+                    }
+                }, if upgraded && tunnel.is_some() => {
+                    let _ = tx.send(HttpTask::Failed(
+                        Error::explain(pingora_error::ErrorType::Custom("TunnelLimit"), "tunnel ended by its limit").into_up()
+                    )).await;
+                    return Ok(false);
                 },
 
                 else => {

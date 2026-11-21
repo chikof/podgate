@@ -68,6 +68,7 @@ pub fn render(
     out.push_str(&crate::middleware::limits::render(&live));
     crate::ratelimit_store::render(&mut out);
     crate::service::mirroring::render(&mut out);
+    crate::service::extras::render(&mut out);
     out.push_str(&crate::middleware::jwt_auth::render(&live));
     crate::l4::tcp::render(&mut out);
     out.push_str(&crate::l4::health::render(&live));

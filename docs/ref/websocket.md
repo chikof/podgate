@@ -41,32 +41,39 @@ too; the differences are in `docs/parity.md`.
 
 ## Idle behaviour
 
-A tunnel has no lifetime limit and no timer of its own: an active tunnel is never closed by
-podgate (change 0098 adds an opt-in `max_stream_lifetime_secs`). A tunnel with no traffic in
-either direction is closed by the read timeouts of the two sockets it joins, whichever is
-shorter:
+A tunnel has no lifetime limit and no idle limit by default, as in the two proxies podgate is
+measured against. One WebSocket through each at its default configuration, upstream and client
+both silent after the `101`, was still open after 250 s on Traefik 3.7.16 and on Caddy 2.11.9
+(Traefik's `readTimeout` and `idleTimeout` end at the hijack; Caddy's `stream_timeout` is unset).
+Before change 0098 podgate was the odd one out: an idle tunnel closed at the shorter of the
+transport's `read_timeout_secs` (default `REQUEST_TIMEOUT_SECS`) and the entry point's
+`timeouts.read_secs`. Now, after the `101`, only these end a tunnel that nobody closed, and each
+is opt-in (`docs/ref/transport-extras.md`):
 
-| Setting | Effect on an idle tunnel | Default | Test |
+| Setting | Effect on a tunnel | Default | Test |
 |---|---|---|---|
-| Transport `read_timeout_secs` | The wait for the upstream's next bytes. Closes the tunnel when it passes | `REQUEST_TIMEOUT_SECS` (30) | `ws_idle_timeout_closes` |
-| Entry point `timeouts.read_secs` | The wait for the client's next bytes. Closes the tunnel when it passes | Pingora's 60 s | `ws_entry_read_timeout_closes_idle_tunnel` |
-| Entry point `timeouts.idle_secs` | None: it is the HTTP keep-alive wait between requests | | `ws_idle_timeout_closes` (all three of these set to 1 s next to a 2 s read timeout; the tunnel lives 2 s) |
+| Transport `tunnel_idle_timeout_secs` | No traffic in either direction for this long closes it. It replaces the transport's read timeout after the `101` | unlimited | `tunnel_idle_timeout_applies_after_upgrade`, `ws_idle_timeout_closes` |
+| Transport `max_stream_lifetime_secs` | Closes it this long after the `101`, busy or not | unlimited | `tunnel_closed_at_max_lifetime` |
+| Transport `stream_close_delay_secs` | Closes it this long after a snapshot removed its server | unlimited | `tunnel_closed_after_server_removed_delay` |
+| Entry point `timeouts.read_secs` | A ceiling on the idle time: the wait for the client's next bytes closes the tunnel when it passes. An operator's value, so a transport cannot lengthen it | none for a tunnel (Pingora's 60 s default no longer applies) | `ws_entry_read_timeout_closes_idle_tunnel` |
+| Transport `read_timeout_secs` | The wait for the response head, the `101` included. None after it | `REQUEST_TIMEOUT_SECS` (30) | `tunnel_idle_timeout_applies_after_upgrade` |
+| Entry point `timeouts.idle_secs` | None: it is the HTTP keep-alive wait between requests | | `ws_idle_timeout_closes` |
 | Entry point `timeouts.write_secs` | None unless a write stalls | | `ws_idle_timeout_closes` |
 | Transport `idle_timeout_secs` | None: it is the idle time of pooled connections | | `ws_idle_timeout_closes` |
 
-So by default a WebSocket with no traffic for `REQUEST_TIMEOUT_SECS` (30 s) is closed. Apps that
-stay quiet longer must send pings (a ping from either side counts, and its pong is traffic),
-or the operator raises the transport's `read_timeout_secs` (and `read_secs` above 60 s). Any
-traffic in either direction restarts both clocks: one-way client traffic and one-way server push
-both keep a tunnel alive (`ws_one_way_client_traffic_keeps_tunnel_alive`,
-`ws_server_push_keeps_tunnel_alive`), because Pingora's duplex loop starts the read again after
-every event. An active tunnel outlives the timeout any number of times
-(`ws_active_tunnel_survives_idle_timeout`).
+So by default a WebSocket with no traffic stays open (`tunnels_unbounded_by_default`: with
+`REQUEST_TIMEOUT_SECS=1` an idle tunnel is open after 4 s). An app that wants quiet tunnels
+reaped sets `tunnel_idle_timeout_secs` on its transport, or sends pings. Any traffic in either
+direction restarts both clocks: one-way client traffic and one-way server push both keep a tunnel
+alive (`ws_one_way_client_traffic_keeps_tunnel_alive`, `ws_server_push_keeps_tunnel_alive`),
+because Pingora's duplex loop starts the read again after every event. An active tunnel outlives
+the idle timeout any number of times (`ws_active_tunnel_survives_idle_timeout`).
 
 A tunnel closed by a timeout is closed as a connection, with no close frame, and nothing is
-written into it (`ws_idle_timeout_closes`). Pingora logs the close as `Fail to proxy ...
-ReadTimedout ... status: 504` (upstream timeout) or `status: 400` (client timeout) at `ERROR`;
-the status was never sent, because the `101` is the final response.
+written into it (`ws_idle_timeout_closes`). Pingora logs the close as `Fail to proxy ...` at
+`ERROR`; the status was never sent, because the `101` is the final response. Each close is
+counted in `podgate_tunnel_closed_total{reason}` (`closed`, `idle_timeout`, `max_lifetime`,
+`server_removed`, `error`).
 
 ## Middlewares on an upgrade
 
@@ -98,15 +105,18 @@ The chain sees the upgrade request first and the `101` response last, like any r
   keeps working meanwhile (`ws_delays_revision_drained`). podgate never ends a tunnel to finish
   a drain. A control plane that wants a hard stop sets its own deadline and retires the
   container, which closes the tunnel from the upstream side. Caddy's `stream_close_delay` is
-  the equivalent knob; it is deferred to change 0098 as an opt-in.
+  the equivalent knob: a transport's `stream_close_delay_secs` closes a tunnel that long after
+  its server left the table, and `max_stream_lifetime_secs` bounds any tunnel (both off by
+  default, `docs/ref/transport-extras.md`).
 - **Snapshot swap.** A request keeps the routing table it started with, so a tunnel survives
   any later snapshot: a swap, its revision going `draining`, its revision leaving the snapshot,
-  even its app leaving (`ws_survives_snapshot_swap`). New upgrades use the new table.
+  even its app leaving (`ws_survives_snapshot_swap`). New upgrades use the new table. A
+  transport that sets `stream_close_delay_secs` makes the swap that removes the tunnel's
+  server start that delay.
 - **Shutdown.** On SIGTERM `/readyz` turns `503` and the process keeps serving existing
   connections, tunnels included, until `REQUEST_TIMEOUT_SECS` has passed, then exits and every
   tunnel ends with the process (`ws_graceful_shutdown_grace`). Move new connections to another
-  node before sending SIGTERM; a longer grace needs a larger `REQUEST_TIMEOUT_SECS`, which also
-  lengthens the default idle timeout above.
+  node before sending SIGTERM; a longer grace needs a larger `REQUEST_TIMEOUT_SECS`.
 
 ## Upstreams that answer at once
 
@@ -125,3 +135,9 @@ podgate carries the fix in a vendored `pingora-proxy` (`vendor/pingora-proxy`, w
 the plain end-of-body task queued before the `101` no longer does. The WebSocket tests' echo
 upstream answers the upgrade immediately and is stressed 200 times without a lost tunnel. Spec
 0114 holds the upstream issue text; drop the vendored copy once Pingora releases the fix.
+
+The same vendored copy carries one more change: a `ProxyHttp::tunnel` hook, called
+once for an upgrade request, that returns the upstream read timeout to use after the `101` and a
+`Notify` that ends the tunnel. It is what lets a transport's `tunnel_idle_timeout_secs` replace
+the read timeout after the `101` and lets the lifetime and close-delay timers end a tunnel from
+outside the proxy loop. A `ProxyHttp` that does not implement it behaves as stock Pingora.

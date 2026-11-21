@@ -373,6 +373,21 @@ impl Mirroring {
                     mirror.name
                 )));
             }
+            if scopes.get(revision, service).is_some_and(|named| {
+                named.service.servers().iter().any(|server| {
+                    named
+                        .service
+                        .with_upstream(server.addr, |upstream| {
+                            upstream.extras().proxy_protocol.is_some()
+                        })
+                        .unwrap_or(false)
+                })
+            }) {
+                return Err(invalid(format!(
+                    "service {} has a transport with proxy_protocol: a copy leaves after its request on its own connection, so it has no client address to put in the header",
+                    mirror.name
+                )));
+            }
             targets.push(Target {
                 label: label.into(),
                 revision,
