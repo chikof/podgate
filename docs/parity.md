@@ -154,7 +154,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Gateway API | HTTPRoute, GRPCRoute, TLSRoute, TCPRoute | none first-party | 0073, 0074 (status), 0075 (L4 routes) |
 | Kubernetes custom resources | `IngressRoute` and friends | none | 0076 (`PodgateRoute`, `PodgateMiddleware`) |
 | Nomad | Nomad provider | none | 0077 |
-| File | File provider (watch, templates) | Caddyfile, JSON | 0078; Traefik files via 0079 (also a migration linter) |
+| File | File provider (watch, templates) | Caddyfile, JSON | built (YAML, TOML and JSON, a file or a directory, polling watch, last good content on a broken file, no templating; reference `docs/ref/provider-file.md`); Traefik files via 0079 (also a migration linter) |
 | Consul Catalog | yes | none | 0093 |
 | Amazon ECS | yes | none | 0107 |
 | Docker Swarm | yes | `caddy-docker-proxy` | 0108 |
