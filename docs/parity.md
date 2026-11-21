@@ -58,7 +58,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Sticky sessions | `sticky.cookie` | `lb_policy cookie` | built (HMAC cookie on `loadbalancer`, falls back and re-pins when the server is gone, unhealthy or ejected; see `docs/ref/svc-sticky.md`) |
 | Weighted service of services | `weighted` | none | 0037 |
 | Failover service | `failover` | `lb_try_duration` partly | 0037 |
-| Mirroring | `mirroring` | none in core | 0038 (bounded, shed first) |
+| Mirroring | `mirroring` | none in core | built (copies of a percentage to loadbalancers of the same app, `name@revision` for the successor release, body copy capped at `max_body_size` and charged to the tenant before it exists, shed first and never queued, marker `x-podgate-mirrored`, credentials off by default; see `docs/ref/svc-mirroring.md`) |
 | Pass host header | `passHostHeader` | `header_up Host` | model (`pass_host_header`), 0022 |
 | Revision-aware rollout, canary, skew pinning | weighted services by hand | none | built |
 | Scale to zero with wake | none | none | built |
