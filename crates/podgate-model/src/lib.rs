@@ -189,8 +189,15 @@ pub struct Router {
     #[serde(default)]
     pub entry_points: Option<Vec<Box<str>>>,
     /// The matcher tree, parsed by the daemon's `router::matcher`: an object with exactly one key.
-    #[serde(rename = "match")]
+    /// Exactly one of `match` and `rule` is set.
+    #[serde(default, rename = "match", skip_serializing_if = "Value::is_null")]
     pub matcher: Value,
+    /// A Traefik rule string such as ``Host(`a.test`) && PathPrefix(`/api`)``, at most 2 KiB,
+    /// compiled by the daemon with the parser the providers use into the matcher tree before
+    /// anything else looks at the router. Absent: the router has a `match`. Without a `priority`
+    /// the rule's length in bytes is the priority, as in Traefik.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<Box<str>>,
     /// Higher goes first among the routers of one tenant. Absent: `0`. Never orders routers of
     /// different tenants.
     #[serde(default)]

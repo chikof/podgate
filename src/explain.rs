@@ -180,6 +180,12 @@ struct Matched<'a> {
     pattern: Option<String>,
     /// `exact`, `wildcard`, `regexp` or `none`.
     kind: &'static str,
+    /// The Traefik rule string the router was declared with; absent for a router with a `match`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<&'a str>,
+    /// The matcher tree the rule compiled to, beside the rule; absent for a router with a `match`.
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matcher: Option<&'a serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,6 +400,8 @@ pub fn explain<'a>(table: &'a RoutingTable, target: &'a Target) -> Result<Explan
             priority: router.priority(),
             pattern: best.via.pattern(),
             kind: best.via.kind(),
+            rule: router.rule(),
+            matcher: router.rule().map(|_| router.matcher_json()),
         },
         considered: candidates
             .iter()

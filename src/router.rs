@@ -20,6 +20,7 @@
 pub mod matcher;
 pub mod path;
 mod priority;
+pub(crate) mod rule;
 mod tree;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -69,6 +70,7 @@ pub struct CompiledRouter {
     chain_digest: u64,
     access_log: Option<bool>,
     matcher_json: Value,
+    rule: Option<Box<str>>,
     tracing: Option<bool>,
 }
 
@@ -121,6 +123,7 @@ impl CompiledRouter {
                 .as_ref()
                 .and_then(access_log::router_override),
             matcher_json: router.matcher.clone(),
+            rule: router.rule.clone(),
             tracing: router
                 .observability
                 .as_ref()
@@ -158,10 +161,17 @@ impl CompiledRouter {
         self.priority
     }
 
-    /// The matcher as the snapshot wrote it, for the read-only overview.
+    /// The matcher as the snapshot wrote it, for the read-only overview; for a router with a
+    /// `rule`, the tree the rule compiled to.
     #[must_use]
     pub fn matcher_json(&self) -> &Value {
         &self.matcher_json
+    }
+
+    /// The Traefik rule string the router was declared with, if it has one.
+    #[must_use]
+    pub fn rule(&self) -> Option<&str> {
+        self.rule.as_deref()
     }
 
     /// The matcher.

@@ -397,6 +397,7 @@ fn router(name: &str, entries: Entries<'_>, refs: &Refs) -> Result<Built, Vec<Pr
             name: name.into(),
             entry_points,
             matcher,
+            rule: None,
             priority: Some(priority.unwrap_or_else(|| i32::try_from(len).unwrap_or(i32::MAX))),
             chain: chosen,
             service: service.as_str().into(),

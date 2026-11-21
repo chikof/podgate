@@ -488,6 +488,7 @@ impl Draft {
                 name: name.into(),
                 entry_points: draft.entry_points,
                 matcher,
+                rule: None,
                 priority: draft.priority,
                 chain: draft.chain,
                 service,

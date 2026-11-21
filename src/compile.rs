@@ -29,7 +29,7 @@ use crate::host::HostPattern;
 use crate::l4;
 use crate::middleware::{self, CompileCx, Stage};
 use crate::observe;
-use crate::router::{self, CompiledRouter, Tier};
+use crate::router::{self, CompiledRouter, Tier, rule};
 use crate::service::graph;
 use crate::service::mirroring::{Plan as MirrorPlan, Scope as MirrorScope, Scopes as MirrorScopes};
 use crate::service::resolve::{NameBudget, Resolver};
@@ -389,6 +389,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                 ((((app, routers), (stages, (services, revisions))), client_auth), tls_options),
                 l4,
             )| {
+                let digest = fingerprint(app, &routers, l4.tcp());
                 CompiledApp::assemble(
                     app,
                     Parts {
@@ -396,7 +397,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                         stages,
                         services,
                         revisions,
-                        fingerprint: fingerprint(app),
+                        fingerprint: digest,
                         client_auth,
                         tls_options,
                         l4,
@@ -457,15 +458,35 @@ fn grpc_needs_http2(snapshot: &Snapshot, apps: &[CompiledApp]) -> Vec<Rejected> 
     rejected
 }
 
-/// A digest of everything the app declares except where it was declared.
-fn fingerprint(app: &App) -> u64 {
+/// A digest of everything the app declares except where it was declared. A router declared with a
+/// `rule` counts as the tree and the priority the rule compiled to, so rewriting a rule without
+/// changing its meaning is not a change.
+fn fingerprint(app: &App, routers: &[CompiledRouter], tcp: &l4::tcp::Compiled) -> u64 {
     let mut value = serde_json::to_value(app).unwrap_or(Value::Null);
     if let Some(object) = value.as_object_mut() {
         object.remove("declared_by");
-        if let Some(Value::Array(routers)) = object.get_mut("routers") {
-            for router in routers {
+        if let Some(Value::Array(declared)) = object.get_mut("routers") {
+            for (router, compiled) in declared.iter_mut().zip(routers) {
                 if let Some(router) = router.as_object_mut() {
                     router.remove("declared_by");
+                    if router.remove("rule").is_some() {
+                        router.insert("match".to_owned(), rule::canonical(compiled.matcher_json()));
+                        router.insert("priority".to_owned(), compiled.priority().into());
+                    }
+                }
+            }
+        }
+        if let Some(Value::Array(declared)) = object
+            .get_mut("tcp")
+            .and_then(Value::as_object_mut)
+            .and_then(|tcp| tcp.get_mut("routers"))
+        {
+            for (router, compiled) in declared.iter_mut().zip(tcp.routers()) {
+                if let Some(router) = router.as_object_mut()
+                    && router.remove("rule").is_some()
+                    && let Some(tree) = compiled.match_json()
+                {
+                    router.insert("match".to_owned(), rule::canonical(tree));
                 }
             }
         }
@@ -591,14 +612,22 @@ fn routers_of(
     let mut compiled = Vec::with_capacity(app.routers.len());
     for router in &app.routers {
         let at = format!("router {}", router.name);
-        let mut compile = match CompiledRouter::compile(router, app, &snapshot.entry_points) {
+        let resolved = match rule::resolve(router) {
+            Ok(resolved) => resolved,
+            Err(invalid) => {
+                rejected.push(Rejected::new(app, at, invalid));
+                continue;
+            }
+        };
+        let mut compile = match CompiledRouter::compile(&resolved, app, &snapshot.entry_points) {
             Ok(compiled) => compiled,
             Err(err) => {
-                rejected.push(Rejected::new(
-                    app,
-                    at,
-                    Invalid::new(err.code, format!("match: {err}")),
-                ));
+                let invalid = if router.rule.is_some() {
+                    Invalid::new("invalid_rule", format!("rule: {err}"))
+                } else {
+                    Invalid::new(err.code, format!("match: {err}"))
+                };
+                rejected.push(Rejected::new(app, at, invalid));
                 continue;
             }
         };

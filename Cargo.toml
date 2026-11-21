@@ -77,6 +77,7 @@ h2 = "0.4.20"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 rustls-platform-verifier = "0.7.1"
+podgate-rule = { version = "0.1.0", path = "crates/podgate-rule" }
 
 [lints]
 workspace = true

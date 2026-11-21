@@ -67,6 +67,7 @@ use crate::entry::{CompileContext, Protocol};
 use crate::host::{HostPattern, overlaps};
 use crate::router::Matcher;
 use crate::router::matcher::{self, Claim, Dialect, Spec, View};
+use crate::router::rule;
 use crate::service::extras::ProxyProtocolConfig;
 use crate::service::resolve::{self, NameBudget};
 use crate::service::{self, Lease, NamedTransport, PickCx, Transport};
@@ -114,6 +115,11 @@ pub struct RouterConfig {
     /// entry point carries one.
     #[serde(default, rename = "match")]
     matcher: Option<Value>,
+    /// A Traefik rule over the L4 functions (`HostSNI`, `HostSNIRegexp`, `ALPN`, `ClientIP`)
+    /// instead of `match`; both set is `invalid_router`. Compiled to the tree before anything else
+    /// looks at the router.
+    #[serde(default)]
+    rule: Option<Box<str>>,
     /// `{"passthrough": true}` forwards the TLS stream untouched; `{}` terminates TLS with the
     /// app's certificates. Absent: the router does not look at TLS (and cannot match `sni`,
     /// `sni_regexp` or `alpn`).
@@ -756,7 +762,14 @@ fn compile_router(
             Tls::Terminate
         }
     });
-    let matcher = match config.matcher.as_ref().map(parse_match).transpose() {
+    let source = match rule::resolve_tcp(config.matcher.as_ref(), config.rule.as_deref()) {
+        Ok(source) => source,
+        Err(invalid) => {
+            problems.push(invalid);
+            None
+        }
+    };
+    let matcher = match source.as_ref().map(parse_match).transpose() {
         Ok(matcher) => matcher,
         Err(invalid) => {
             problems.push(invalid);
@@ -845,7 +858,7 @@ fn compile_router(
                 })
                 .unwrap_or_default(),
             matcher,
-            matcher_json: config.matcher.clone(),
+            matcher_json: source,
             service,
             tls,
             claims,
