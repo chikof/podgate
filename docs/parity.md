@@ -141,7 +141,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | TCP routers by SNI, ALPN, client IP | `HostSNI`, `ALPN`, `ClientIP` | `layer4` | `ClientIP` built; SNI and ALPN 0059 |
 | TCP load balancing, proxy protocol out, termination delay | `tcp.services` | `layer4 proxy` | Load balancing with half-close, idle timeout and connect failover built; proxy protocol out and termination delay 0061 |
 | TCP middlewares | `inFlightConn`, `ipAllowList` | none | 0061 |
-| TCP health checks | `healthCheck` (v3) | `layer4` passive | 0095 (connect, send and expect, TLS) |
+| TCP health checks | `healthCheck` (v3) | `layer4` passive | built (connect, `send`/`expect` including a banner, TLS, other port, PROXY v2 header, thresholds, `unhealthy_interval_secs`; `no_healthy_server` refusal) |
 | UDP routers and services | `udp.*` | `layer4` | built (sessions, idle timeout, bounded table, tenant buffer charge, eviction of one-datagram sessions, optional reply byte ratio) |
 
 ## Providers and discovery
