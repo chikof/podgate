@@ -100,9 +100,13 @@ the other plugins are not affected, and the supervisor starts it again.
   seconds, and back to 1 second once it stayed up 30 seconds. Until it answers `Describe` again
   no call is made: requests see the plugin as unavailable (below).
 - At shutdown it gets `SIGTERM`, then `SIGKILL` after 5 seconds, and its cgroup is emptied with
-  `cgroup.kill` and removed. When podgate itself is killed, the plugin keeps running: run podgate
-  under a service manager that stops the whole control group, and note that podgate empties a
-  leftover plugin cgroup (`cgroup.kill`) when it starts again.
+  `cgroup.kill` and removed. When podgate itself is killed (`SIGKILL`, the OOM killer, a crash),
+  the kernel kills the plugin too: it is started with `PR_SET_PDEATHSIG=SIGKILL`, set after
+  `user` and `group` take effect and kept through the `sh` wrapper's `exec`. The signal follows
+  the thread that forked the plugin, so every start and restart forks from one dedicated
+  `plugin-spawner` thread that lives as long as podgate. A parent that died before the signal
+  was set is detected (`getppid`) and the plugin does not start. With `PLUGINS_CGROUP_ROOT`
+  podgate also empties a leftover plugin cgroup (`cgroup.kill`) when it starts.
 
 An unmanaged plugin is never started or stopped. podgate waits for its socket for 5 seconds at
 startup; later it simply fails calls while nothing listens, and the circuit does the rest.

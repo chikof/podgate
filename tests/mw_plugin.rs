@@ -1398,6 +1398,59 @@ async fn plugin_shutdown_stops_process() {
     }
 }
 
+#[tokio::test]
+async fn plugin_dies_with_podgate() {
+    let dir = Dir::new("orphan");
+    let (entry, guard) = managed(&dir, &json!({}));
+    let plugins = file(&dir, &json!({"p": entry}));
+    let podgate = Podgate::start_with_env(&[("PLUGINS_FILE", &plugins)]).await;
+    let pid = wait_pids(&guard.0, 1, Duration::from_secs(1)).await[0];
+    assert!(alive(pid));
+    // Not a stop: podgate gets no chance to clean up.
+    kill_pid(podgate.pid());
+    let until = Instant::now() + Duration::from_secs(5);
+    while alive(pid) {
+        assert!(
+            Instant::now() < until,
+            "the plugin outlived a killed podgate"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Sleeps 12 seconds on purpose: the death signal follows the thread that forked the plugin, and
+/// a fork from the blocking pool (whose threads leave after 10 idle seconds) would kill the
+/// restarted plugin once the thread was gone.
+#[tokio::test]
+async fn plugin_restart_survives_idle_threads() {
+    let dir = Dir::new("idle");
+    let upstream = up().await;
+    let (entry, guard) = managed(&dir, &json!({}));
+    let plugins = file(&dir, &json!({"p": entry}));
+    let podgate = Podgate::start_with_env(&[("PLUGINS_FILE", &plugins)]).await;
+    let first = wait_pids(&guard.0, 1, Duration::from_secs(1)).await[0];
+    push(
+        &podgate,
+        &snap(
+            1,
+            &[("t1", 1, ONE_MIB)],
+            &[site(
+                "a",
+                "a.test",
+                "t1",
+                upstream.addr,
+                &json!({"config": {}, "timeout_ms": 500}),
+            )],
+        ),
+    )
+    .await;
+    kill_pid(first);
+    let second = wait_pids(&guard.0, 2, Duration::from_secs(5)).await[1];
+    sleep(Duration::from_secs(12)).await;
+    assert!(alive(second), "the restarted plugin died with a thread");
+    assert_eq!(podgate.get("a.test", "/").await.status, 200);
+}
+
 /// A cgroup v2 directory this test may create cgroups in, with the three controllers on.
 struct Cgroup(PathBuf);
 

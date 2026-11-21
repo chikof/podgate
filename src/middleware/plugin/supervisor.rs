@@ -34,7 +34,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, mpsc};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -285,12 +285,15 @@ fn spawn(entry: &Entry, cgroup_root: Option<&Path>) -> Result<Running, StartErro
     if let Some(gid) = managed.gid {
         command.gid(gid);
     }
-    let mut child = command.spawn().map_err(|err| {
-        failed(
-            entry,
-            format!("cannot run {}: {err}", managed.command.display()),
-        )
-    })?;
+    die_with_parent(&mut command);
+    let mut child = on_spawner(move || command.spawn())
+        .map_err(|reason| failed(entry, reason))?
+        .map_err(|err| {
+            failed(
+                entry,
+                format!("cannot run {}: {err}", managed.command.display()),
+            )
+        })?;
     if let Some(cgroup) = &cgroup {
         let released = cgroup.add(child.id()).map_err(|err| {
             format!(
@@ -323,6 +326,75 @@ fn spawn(entry: &Entry, cgroup_root: Option<&Path>) -> Result<Running, StartErro
         cgroup,
         started: Instant::now(),
     })
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The queue of the one thread every managed plugin is forked from; `None` when that thread
+/// could not be started. Started by the first use, which is `Plugins::start` on the main thread.
+static SPAWNER: LazyLock<Option<mpsc::Sender<Job>>> = LazyLock::new(|| {
+    let (sender, jobs) = mpsc::channel::<Job>();
+    std::thread::Builder::new()
+        .name("plugin-spawner".to_owned())
+        .spawn(move || {
+            for job in jobs {
+                job();
+            }
+        })
+        .ok()
+        .map(|_| sender)
+});
+
+/// Runs `job` on the spawner thread and returns what it returned.
+///
+/// `PR_SET_PDEATHSIG` fires when the thread that forked the child exits, not the process. A
+/// tokio worker, the blocking pool (its threads leave after 10 idle seconds) or the short-lived
+/// runtime that starts the plugins would kill a plugin for no reason. So every fork, the first
+/// start and each restart, happens on one thread that is started once, never ends, and does
+/// nothing but run these jobs one after the other.
+fn on_spawner<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    let queue = SPAWNER
+        .as_ref()
+        .ok_or_else(|| "cannot start the thread that spawns plugins".to_owned())?;
+    let (reply, answer) = mpsc::channel();
+    queue
+        .send(Box::new(move || drop(reply.send(job()))))
+        .map_err(|_| "the thread that spawns plugins is gone".to_owned())?;
+    answer
+        .recv()
+        .map_err(|_| "the thread that spawns plugins failed".to_owned())
+}
+
+/// Makes the kernel kill the process when the thread that forks it ends, so a podgate that is
+/// killed (`SIGKILL`, the OOM killer, a crash) takes its managed plugins with it: fork only
+/// from [`on_spawner`]. `SIGKILL` rather than `SIGTERM`: nobody is left to wait for a clean
+/// stop, and a plugin must not be able to ignore it. Call it after `uid` and `gid`: std runs
+/// the closures after the credential change, which clears the signal if it was set before. It
+/// survives the `exec` of the `sh -c 'read go && exec "$@"'` wrapper into the plugin.
+#[allow(
+    unsafe_code,
+    reason = "`pre_exec` is unsafe; the closure makes two plain syscalls, see SAFETY"
+)]
+fn die_with_parent(command: &mut Command) {
+    let parent = rustix::process::getpid();
+    // SAFETY: the closure runs between fork and exec and calls only `prctl` and `getppid`, plain
+    // async-signal-safe syscall wrappers: no allocation, no locks, no access to shared state. When
+    // the parent died before the `prctl` took effect the signal would never come, so a changed
+    // `getppid` makes the closure fail, which ends the child before it execs (std reports the
+    // error and `_exit`s; the error value is a plain errno, built without allocating).
+    unsafe {
+        command.pre_exec(move || {
+            rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+                .map_err(std::io::Error::from)?;
+            if rustix::process::getppid() == Some(parent) {
+                Ok(())
+            } else {
+                Err(std::io::Error::from_raw_os_error(
+                    rustix::io::Errno::SRCH.raw_os_error(),
+                ))
+            }
+        });
+    }
 }
 
 fn command_of(managed: &Managed, in_cgroup: bool) -> Command {
