@@ -11,6 +11,7 @@ pub mod broker;
 pub mod daemon;
 pub mod dns_server;
 pub mod docker;
+pub mod k8s;
 // The daemon's harness, one copy for both crates: the provider must not depend on the daemon, so
 // the file is included by path. It may use only what both test targets have: the same
 // dev-dependencies and `super::free_ports`. The same file is `tests/common/pebble.rs`.

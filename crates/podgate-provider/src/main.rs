@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use podgate_provider::docker::DockerSource;
 use podgate_provider::file::FileSource;
+use podgate_provider::kubernetes::KubernetesSource;
 use podgate_provider::quarantine::Verdict;
 use podgate_provider::{Config, Engine, UpstreamPolicy};
 use tracing::error;
@@ -56,6 +57,7 @@ fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> 
         match &*source.kind {
             "docker" => engine.add_source(DockerSource::from_config(source)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
+            "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,
             kind => bail!(
                 "source {:?}: kind {kind:?} is not built into this binary",
                 source.name

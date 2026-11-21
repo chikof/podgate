@@ -16,6 +16,7 @@
 //! - [`mod@file`]: the source that reads YAML, TOML and JSON files and watches them.
 //! - [`docker`]: the source that turns Docker and Podman containers into apps through their
 //!   `podgate.*` labels.
+//! - [`kubernetes`]: the source that turns Ingresses and EndpointSlices into routers and servers.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
 //!
@@ -26,6 +27,7 @@ pub mod config;
 pub mod docker;
 pub mod engine;
 pub mod file;
+pub mod kubernetes;
 pub mod merge;
 pub mod policy;
 pub mod push;
