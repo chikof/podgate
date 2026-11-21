@@ -5,9 +5,10 @@ set -euo pipefail
 cd "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
 
 # Concurrent runs queue here instead of running several full gates at once (RAM thrash).
+# -o: the lock is not inherited, so a test process that outlives the gate cannot hold it.
 if [ -z "${VJ_GATE_LOCKED:-}" ]; then
   mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
-  VJ_GATE_LOCKED=1 exec flock "${XDG_CACHE_HOME:-$HOME/.cache}/vj-gate.lock" "$0" "$@"
+  VJ_GATE_LOCKED=1 exec flock -o "${XDG_CACHE_HOME:-$HOME/.cache}/vj-gate.lock" "$0" "$@"
 fi
 
 cargo fmt --all --check
