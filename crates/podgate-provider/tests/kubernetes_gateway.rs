@@ -1982,3 +1982,48 @@ async fn prefix_replacement_never_leaves_an_empty_path() {
     let _ = stop.send(());
     let _ = tokio::time::timeout(DEADLINE, run).await;
 }
+
+#[tokio::test]
+async fn crds_and_gateway_api_work_together() {
+    // Both opt-in halves of the source on at once: each kind is watched, and one state holds
+    // the app of a PodgateRoute and the app of an HTTPRoute.
+    let api = FakeApi::start().await;
+    let dir = dir("both");
+    gateway_world(&api);
+    api.put(
+        "httproutes",
+        http_route(
+            "team-a",
+            "shop",
+            &["shop.acme.test"],
+            json!([rule(json!([]), json!([backend("web", 80)]))]),
+        ),
+    );
+    api.put(
+        "podgateroutes",
+        common::k8s_crd::route(
+            "team-a",
+            "crd",
+            common::k8s_crd::web("crd.acme.test", json!({})),
+        ),
+    );
+    let config = source_config(&api, &dir, "gateway_api = true\ncrds = true");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(source(&config).run(tx));
+    let (state, _) = next_state(&mut rx, "an app of each kind", |state| {
+        let ids: Vec<&str> = state.apps.iter().map(|app| &*app.app.id).collect();
+        ids.contains(&"httproute_team-a_shop") && ids.contains(&"route_team-a.crd")
+    })
+    .await;
+    assert_eq!(
+        state.apps.len(),
+        2,
+        "{:?}",
+        state
+            .apps
+            .iter()
+            .map(|a| a.app.id.to_string())
+            .collect::<Vec<_>>()
+    );
+    task.abort();
+}

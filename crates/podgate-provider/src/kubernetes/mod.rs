@@ -93,6 +93,7 @@ struct Settings {
     allow_external_name: bool,
     #[serde(default)]
     crds: bool,
+    #[serde(default)]
     gateway_api: bool,
     gateway_class: Option<String>,
     listener_entry_points: Option<BTreeMap<String, String>>,
