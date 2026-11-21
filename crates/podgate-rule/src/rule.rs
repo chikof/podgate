@@ -55,7 +55,7 @@ pub struct Rule {
 ///     rule.matcher.expect("a matcher").to_string(),
 ///     r#"{"all":[{"host":"a.test"},{"not":{"path_prefix":"/admin"}}]}"#
 /// );
-/// assert_eq!(rule.len, 36);
+/// assert_eq!(rule.len, 39);
 /// # Ok::<(), podgate_rule::RuleError>(())
 /// ```
 pub fn parse(rule: &str, dialect: Dialect) -> Result<Rule, RuleError> {
