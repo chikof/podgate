@@ -1,0 +1,32 @@
+# An apps file for the file source of podgate-provider. Reference: docs/ref/provider-file.md.
+#
+# Point a source at this file, or at a directory of *.yaml, *.yml, *.toml and *.json files, in
+# the provider's configuration:
+#
+#   [[source]]
+#   kind = "file"
+#   name = "files"
+#   path = "/etc/podgate/apps.d"
+#   poll_ms = 1000        # how often the files are looked at (default 1000, at least 10)
+#   tenant = "acme"       # the tenant of every app below (default "default")
+#
+# The tenant is the operator's mapping in the provider's configuration, not this file's. A
+# `tenants:` key here is ignored with a warning. An app may name a tenant of its own (`tenant:`),
+# which only counts for tenants that list this source in `label_sources`.
+#
+# Servers are explicit URLs. The upstream policy still applies to them.
+apps:
+  - id: shop
+    tls: {mode: acme}
+    routers:
+      - name: main
+        match: {host: [shop.acme.example]}
+        service: web
+    services:
+      - name: web
+        type: loadbalancer
+        servers:
+          - url: http://10.4.0.10:8080
+          - url: http://10.4.0.11:8080
+    revisions:
+      - {id: r1, state: serving, weight: 1}

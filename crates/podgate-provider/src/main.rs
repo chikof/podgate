@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use podgate_provider::file::FileSource;
 use podgate_provider::quarantine::Verdict;
 use podgate_provider::{Config, Engine, UpstreamPolicy};
 use tracing::error;
@@ -49,13 +50,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> anyhow::Result<(Command, Pa
 ///
 /// Every source module adds one arm here. A kind that is not built into this binary is an
 /// error, never skipped: a missing source would silently delete its routes.
-fn register_sources(_engine: &mut Engine, config: &Config) -> anyhow::Result<()> {
-    if let Some(source) = config.sources.first() {
-        bail!(
-            "source {:?}: kind {:?} is not built into this binary",
-            source.name,
-            source.kind
-        );
+fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> {
+    for source in &config.sources {
+        match &*source.kind {
+            "file" => engine.add_source(FileSource::from_config(source)?)?,
+            kind => bail!(
+                "source {:?}: kind {kind:?} is not built into this binary",
+                source.name
+            ),
+        }
     }
     Ok(())
 }
