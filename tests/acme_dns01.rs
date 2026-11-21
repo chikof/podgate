@@ -886,12 +886,24 @@ async fn dns01_wildcard_renews_by_ari() {
         renewed["cert_pem"], first["cert_pem"],
         "a new certificate, not the old one again"
     );
+    // One published challenge per authorization pebble created for the two orders. A reused one
+    // needs none and the issuer skips it, see `common::pebble_authorizations_created`.
     let challenges = plane
         .log
         .iter()
         .filter(|event| event["kind"] == "acme_challenge")
         .count();
-    assert_eq!(challenges, 4, "two per order: {:?}", plane.log);
+    let created = common::pebble_authorizations_created(&setup.pebble.pki.read("pebble.log"));
+    assert_eq!(
+        challenges, created,
+        "one per new authorization: {:?}",
+        plane.log
+    );
+    assert!(
+        created > 2,
+        "the renewal order needs a new authorization to prove the round trip: {:?}",
+        plane.log
+    );
 }
 
 /// Revokes `cert_pem` with the ACME account whose key is `account_key_pem`.

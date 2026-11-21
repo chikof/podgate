@@ -106,6 +106,19 @@ fn get_request(host: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
 }
 
+/// How many authorizations pebble created, from its log: one "There are now N authorizations in
+/// the db" line each.
+///
+/// A second order on the same ACME account can reuse a still-valid authorization, and then it
+/// has no challenge to publish. `PEBBLE_AUTHZREUSE=0` does not prevent that: pebble v2.10.1
+/// reads the variable only when it is in `0..=100`, otherwise it keeps its default of 50
+/// (`wfe/wfe.go:214-216`), and `makeAuthorizations` reuses when `rand.Intn(100) > percent` is
+/// false, which is 1% per identifier at 0 (`wfe/wfe.go:1562-1565`). A test that counts the
+/// challenges of such an order compares them with this, not with a fixed number.
+pub fn pebble_authorizations_created(pebble_log: &str) -> usize {
+    pebble_log.matches("authorizations in the db").count()
+}
+
 /// `count` distinct free loopback ports.
 ///
 /// All probes stay bound until every port is chosen: probing one at a time released each port
