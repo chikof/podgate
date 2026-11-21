@@ -8,6 +8,8 @@
 
 use thiserror::Error;
 
+use crate::tags::{self, Unpaired};
+
 const PODGATE: &str = "podgate.";
 const ENABLE: &str = "podgate.enable";
 const TRAEFIK_ENABLE: &str = "traefik.enable";
@@ -34,24 +36,10 @@ fn split(tag: &str) -> Option<(&str, &str)> {
 ///
 /// [`TagError`] for a `podgate.*` tag without `=` and for a `podgate.*` key given twice.
 pub(super) fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, TagError> {
-    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(tags.len());
-    for tag in tags {
-        match split(tag) {
-            Some((key, value)) => {
-                if key.starts_with(PODGATE) && pairs.iter().any(|(seen, _)| *seen == key) {
-                    return Err(TagError::Duplicate { key: key.into() });
-                }
-                pairs.push((key, value));
-            }
-            None if tag.starts_with(PODGATE) => {
-                return Err(TagError::NoValue {
-                    tag: tag.as_str().into(),
-                });
-            }
-            None => {}
-        }
-    }
-    Ok(pairs)
+    tags::pairs(tags, |tag| tag.starts_with(PODGATE)).map_err(|unpaired| match unpaired {
+        Unpaired::NoValue(tag) => TagError::NoValue { tag: tag.into() },
+        Unpaired::Duplicate(key) => TagError::Duplicate { key: key.into() },
+    })
 }
 
 /// What the tags say about `key` (matched without regard to case when `fold`): `Some(false)`

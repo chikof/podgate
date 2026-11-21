@@ -28,6 +28,7 @@
 //!
 //! The references are `docs/ref/provider.md` and, for the ACME broker, `docs/ref/provider-acme.md`.
 
+mod abort;
 pub mod acme;
 pub mod config;
 pub mod consul;
@@ -41,6 +42,7 @@ pub mod policy;
 pub mod push;
 pub mod quarantine;
 pub mod source;
+mod tags;
 pub mod traefik;
 pub mod traefik_file;
 pub mod trust;

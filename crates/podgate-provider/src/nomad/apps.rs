@@ -4,11 +4,12 @@
 //! to: the decisions that are Nomad's. The tags themselves are read by
 //! [`crate::docker::labels`], the same parser the Docker source uses.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::docker::labels::{self, Labels, Member};
 use crate::source::{Origin, SourceApp, TenantClaim};
+use crate::tags::{self, Unpaired};
 
 use super::Settings;
 use super::model::Instance;
@@ -62,26 +63,12 @@ fn governed(tag: &str) -> bool {
 /// hold more. Every `podgate.*` and `traefik.*` tag must be a pair, and none may repeat: with a
 /// repeated key one value would silently win.
 fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, String> {
-    let mut seen = BTreeSet::new();
-    let mut pairs = Vec::with_capacity(tags.len());
-    for tag in tags {
-        let governed = governed(tag);
-        match tag.split_once('=') {
-            Some((key, value)) => {
-                if governed && !seen.insert(key) {
-                    return Err(format!("{key}: the tag is given more than once"));
-                }
-                pairs.push((key, value));
-            }
-            None if governed => {
-                return Err(format!(
-                    "{tag}: a podgate or traefik tag must be written key=value"
-                ));
-            }
-            None => {}
+    tags::pairs(tags, governed).map_err(|unpaired| match unpaired {
+        Unpaired::NoValue(tag) => {
+            format!("{tag}: a podgate or traefik tag must be written key=value")
         }
-    }
-    Ok(pairs)
+        Unpaired::Duplicate(key) => format!("{key}: the tag is given more than once"),
+    })
 }
 
 /// Whether the registration is exposed: `false` in either enable tag hides it, any other value

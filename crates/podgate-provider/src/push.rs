@@ -9,6 +9,7 @@
 //! are tested with a fake clock. The provider reads no clock to number snapshots: the version of
 //! a push is the live version plus one.
 
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -435,7 +436,9 @@ impl Debounce {
     }
 }
 
-/// The retry delays: `min`, then doubling up to `max`, until [`Self::reset`].
+/// The retry delays: `min`, then doubling up to `max`, until [`Self::reset`]. A
+/// [`jittered`](Self::jittered) backoff adds up to a quarter to each delay, so many watchers that
+/// failed together do not retry together.
 ///
 /// ```
 /// use std::time::Duration;
@@ -452,6 +455,7 @@ pub struct Backoff {
     min: Duration,
     max: Duration,
     next: Duration,
+    jitter: bool,
 }
 
 impl Backoff {
@@ -462,14 +466,28 @@ impl Backoff {
             min,
             max: max.max(min),
             next: min,
+            jitter: false,
         }
+    }
+
+    /// Adds up to a quarter to every delay; the delays are exact otherwise.
+    #[must_use]
+    pub fn jittered(mut self) -> Self {
+        self.jitter = true;
+        self
     }
 
     /// The delay to wait now; the one after it is twice as long, up to the maximum.
     pub fn next_delay(&mut self) -> Duration {
         let delay = self.next;
-        self.next = (self.next * 2).min(self.max);
-        delay
+        self.next = self.next.saturating_mul(2).min(self.max);
+        if !self.jitter {
+            return delay;
+        }
+        // `RandomState` is randomly keyed per instance: enough jitter without a new dependency.
+        let random = RandomState::new().hash_one(delay);
+        let spread = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX).max(4) / 4;
+        delay + Duration::from_millis(random % spread)
     }
 
     /// Starts over from the minimum, after a success.

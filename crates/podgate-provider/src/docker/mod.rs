@@ -41,10 +41,11 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::abort::Abort;
 use crate::config::SourceConfig;
+use crate::push::Backoff;
 use crate::source::{Source, State, Update, UpdateBody};
 
 use client::{Client, ClientError};
@@ -219,39 +220,11 @@ impl DockerSource {
     }
 }
 
-/// Doubles from [`MIN_RETRY`] up to [`MAX_RETRY`].
-struct Backoff(Duration);
-
-impl Backoff {
-    fn new() -> Self {
-        Self(MIN_RETRY)
-    }
-
-    fn reset(&mut self) {
-        self.0 = MIN_RETRY;
-    }
-
-    fn next(&mut self) -> Duration {
-        let now = self.0;
-        self.0 = (self.0 * 2).min(MAX_RETRY);
-        now
-    }
-}
-
-/// Stops its task when dropped, so a source that returns leaves no watcher behind.
-struct Abort(JoinHandle<()>);
-
-impl Drop for Abort {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Holds the event stream open and wakes the main loop on every container change, and once
 /// per (re)connect: a change between the last list and the connect would otherwise be seen only
 /// at the next resync.
 async fn watch(client: Client, wake: Arc<Notify>) {
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::new(MIN_RETRY, MAX_RETRY);
     let mut failing = false;
     loop {
         match client.events().await {
@@ -288,7 +261,7 @@ async fn watch(client: Client, wake: Arc<Notify>) {
                 failing = true;
             }
         }
-        tokio::time::sleep(backoff.next()).await;
+        tokio::time::sleep(backoff.next_delay()).await;
     }
 }
 
@@ -352,7 +325,7 @@ impl Source for DockerSource {
         let _watcher = Abort(tokio::spawn(watch(client.clone(), Arc::clone(&wake))));
         let mut first_seen = BTreeMap::new();
         let mut sent: Option<Sent> = None;
-        let mut retry = Backoff::new();
+        let mut retry = Backoff::new(MIN_RETRY, MAX_RETRY);
         let mut wait = Duration::ZERO;
         loop {
             tokio::select! {
@@ -366,7 +339,7 @@ impl Source for DockerSource {
                     Sent::Available { state, report }
                 }
                 Err(err) => {
-                    wait = retry.next();
+                    wait = retry.next_delay();
                     Sent::Unavailable(format!("{err}").into())
                 }
             };

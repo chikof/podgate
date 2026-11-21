@@ -36,18 +36,19 @@ mod tags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use http::Uri;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::abort::Abort;
 use crate::acme::store::read_secret_file;
 use crate::config::SourceConfig;
+use crate::push::Backoff;
 use crate::source::{Source, State, Update, UpdateBody};
 
 use apps::Service;
@@ -376,39 +377,6 @@ fn tenant_source(
     }
 }
 
-/// Doubles from [`MIN_RETRY`] up to [`MAX_RETRY`].
-struct Backoff(Duration);
-
-impl Backoff {
-    fn new() -> Self {
-        Self(MIN_RETRY)
-    }
-
-    fn reset(&mut self) {
-        self.0 = MIN_RETRY;
-    }
-
-    /// The next delay, up to a quarter longer so that many watchers that failed together do
-    /// not return together.
-    fn next(&mut self) -> Duration {
-        let now = self.0;
-        self.0 = (self.0 * 2).min(MAX_RETRY);
-        let spread = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.subsec_nanos() % 250);
-        now + now * spread / 1000
-    }
-}
-
-/// Stops its task when dropped, so a source that returns leaves no watcher behind.
-struct Abort(JoinHandle<()>);
-
-impl Drop for Abort {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 type Key = (Scope, Box<str>);
 
 #[derive(Default)]
@@ -520,7 +488,7 @@ async fn watch<T, Fut>(
 ) where
     Fut: Future<Output = Result<Reply<T>, ClientError>>,
 {
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::new(MIN_RETRY, MAX_RETRY).jittered();
     let mut index = 0;
     let mut full_at = Instant::now();
     loop {
@@ -549,7 +517,7 @@ async fn watch<T, Fut>(
             Err(err) => {
                 deliver(Err(err));
                 index = 0;
-                tokio::time::sleep(backoff.next()).await;
+                tokio::time::sleep(backoff.next_delay()).await;
             }
         }
     }
