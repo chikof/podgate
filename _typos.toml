@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["Cargo.lock", "deny.toml", "vendor"]
+extend-exclude = ["Cargo.lock", "deny.toml", "vendor", "crates/podgate-provider/src/ca/public_suffixes.txt"]
 
 [default.extend-words]
 # "`Box::pin`ned" in docs/rust-style.md splits into the token "ned".

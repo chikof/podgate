@@ -17,10 +17,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use podgate_model::{App, Certificate, EntryPointPolicy, Snapshot, Tenant};
+use podgate_model::{App, Certificate, EntryPointPolicy, Snapshot, Tenant, TlsMode};
 use serde_json::{Map, Value};
 
 use crate::acme::{BrokerView, Claims};
+use crate::ca::names::Policy as CaPolicy;
+use crate::ca::{CaView, Wants};
 use crate::config::{Config, Operator, TenantConfig};
 use crate::policy::UpstreamPolicy;
 use crate::source::{ObjectKind, ObjectRef, SourceApp, SourceCertificate, State, TenantClaim};
@@ -188,6 +190,7 @@ pub struct Merger {
     tenants: Vec<Tenant>,
     entry_points: Vec<EntryPointPolicy>,
     operator: Operator,
+    ca: Option<CaPolicy>,
 }
 
 /// An object waiting to be looked at, in age order.
@@ -285,6 +288,10 @@ impl Merger {
             tenants,
             entry_points,
             operator: config.operator.clone(),
+            ca: config
+                .ca
+                .as_ref()
+                .map(crate::ca::settings::CaSettings::policy),
         }
     }
 
@@ -307,6 +314,19 @@ impl Merger {
         states: &BTreeMap<Box<str>, State>,
         excluded: &BTreeSet<ObjectRef>,
         broker: &BrokerView,
+    ) -> Merged {
+        self.merge_all(states, excluded, broker, &CaView::off())
+    }
+
+    /// Like [`Self::merge_with`], and adds the internal CA's leaves that an `internal` app
+    /// wants exactly the hosts of.
+    #[must_use]
+    pub fn merge_all(
+        &self,
+        states: &BTreeMap<Box<str>, State>,
+        excluded: &BTreeSet<ObjectRef>,
+        broker: &BrokerView,
+        ca: &CaView,
     ) -> Merged {
         let mut candidates: Vec<Candidate<'_>> = Vec::new();
         for (source, state) in states {
@@ -337,7 +357,7 @@ impl Merger {
         for candidate in &candidates {
             self.consider(candidate, excluded, &mut run);
         }
-        run.finish(self, broker)
+        run.finish(self, broker, ca)
     }
 
     fn consider(&self, candidate: &Candidate<'_>, excluded: &BTreeSet<ObjectRef>, run: &mut Run) {
@@ -448,6 +468,9 @@ impl Merger {
             for host in &hosts.hosts {
                 if hosts_seen.insert(host.clone()) {
                     notes.check(self.trust.check_host(tenant, host));
+                    if app.tls.mode == TlsMode::Internal {
+                        notes.check(self.internal_host(host));
+                    }
                 }
             }
             notes.check(Trust::check_catch_all(tenant, router, &hosts));
@@ -472,6 +495,20 @@ impl Merger {
         app.tenant = tenant.tenant.id.clone();
         app.declared_by = declared_by.into();
         run.apps.push(app);
+    }
+
+    /// Whether the internal CA may certify `host`: the app is refused with a report when it may
+    /// not, since an `internal` app without a certificate cannot serve TLS.
+    fn internal_host(&self, host: &HostPattern) -> Result<(), Problem> {
+        let Some(policy) = &self.ca else {
+            return Err(Problem::new(
+                "internal_ca_not_configured",
+                format!(
+                    "tls.mode is internal but the configuration has no enabled [ca] section; {host} gets no certificate"
+                ),
+            ));
+        };
+        policy.problem(host).map_or(Ok(()), Err)
     }
 
     fn certificate(&self, source_cert: &SourceCertificate, run: &mut Run, notes: &mut Notes) {
@@ -573,10 +610,11 @@ impl Run {
         });
     }
 
-    fn finish(mut self, merger: &Merger, broker: &BrokerView) -> Merged {
+    fn finish(mut self, merger: &Merger, broker: &BrokerView, ca: &CaView) -> Merged {
         self.apps.sort_by(|a, b| a.id.cmp(&b.id));
         let claims = Claims::of(&self.apps);
         self.add_broker_certificates(broker, &claims);
+        self.add_ca_certificates(ca);
         self.certificates
             .sort_by(|a, b| (&a.hosts, &a.cert_pem).cmp(&(&b.hosts, &b.cert_pem)));
         let snapshot = Snapshot {
@@ -596,6 +634,23 @@ impl Run {
             findings: self.findings,
             included: self.included,
             claims: Arc::new(claims),
+        }
+    }
+
+    /// Adds the internal CA's leaves whose hosts an `internal` app of this merge wants exactly.
+    /// A certificate a source supplies for the same hosts wins, as with the broker's.
+    fn add_ca_certificates(&mut self, ca: &CaView) {
+        let wants = Wants::of(&self.apps);
+        for cert in ca.certificates() {
+            let supplied = self.certificates.iter().any(|have| {
+                let (mut a, mut b) = (have.hosts.clone(), cert.hosts.clone());
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            });
+            if wants.holds(&cert.hosts) && !supplied {
+                self.certificates.push(cert.clone());
+            }
         }
     }
 

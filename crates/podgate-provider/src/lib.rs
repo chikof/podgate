@@ -32,11 +32,14 @@
 //! - [`etcd`]: the source that reads a key prefix per tenant from etcd and follows it with a watch.
 //! - [`engine`]: the loop that joins them. [`config`] is the TOML file that configures it.
 //! - [`acme`]: the ACME broker, which answers podgate's ACME events from a state directory.
+//! - [`ca`]: the internal CA, which issues leaves for `tls.mode = "internal"` apps from a name-constrained
+//!   intermediate (`docs/ref/internal-ca.md`).
 //!
 //! The references are `docs/ref/provider.md` and, for the ACME broker, `docs/ref/provider-acme.md`.
 
 mod abort;
 pub mod acme;
+pub mod ca;
 pub mod config;
 pub mod consul;
 pub mod docker;

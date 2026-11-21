@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 
 use crate::acme::events::{NoSolver, Solver};
 use crate::acme::{self, BrokerError, BrokerView, Claims};
+use crate::ca::{self, CaError, CaView, Wants};
 use crate::config::Config;
 use crate::merge::{Finding, Merged, Merger};
 use crate::policy::UpstreamPolicy;
@@ -69,6 +70,9 @@ pub enum RunError {
     /// The ACME broker cannot start: its state directory is not usable.
     #[error("the ACME broker cannot start: {0}")]
     Acme(Box<str>),
+    /// The internal CA cannot start: its directory is not initialized or not usable.
+    #[error("the internal CA cannot start: {0}")]
+    Ca(Box<str>),
 }
 
 fn owner(writer: Option<&str>) -> String {
@@ -96,6 +100,9 @@ pub enum CollectError {
     /// The ACME state directory cannot be read, so the merge would lack its certificates.
     #[error("cannot read the ACME state directory: {0}")]
     Acme(Box<str>),
+    /// The internal CA directory cannot be read, so the merge would lack its leaves.
+    #[error("cannot read the internal CA directory: {0}")]
+    Ca(Box<str>),
 }
 
 /// A source's name that is not in the configuration.
@@ -162,6 +169,9 @@ pub struct Status {
     /// Why the ACME broker stopped, when it did: no certificate or challenge is added until the
     /// provider restarts.
     pub acme_error: Option<Box<str>>,
+    /// Why the internal CA stopped, when it did: no leaf is issued or renewed until the provider
+    /// restarts.
+    pub ca_error: Option<Box<str>>,
 }
 
 #[derive(Debug)]
@@ -213,6 +223,9 @@ pub struct Engine {
     acme_epoch: u64,
     acme_claims: Option<watch::Sender<Option<Arc<Claims>>>>,
     acme_error: Option<Box<str>>,
+    ca_view: Arc<CaView>,
+    ca_wants: Option<watch::Sender<Option<Arc<Wants>>>>,
+    ca_error: Option<Box<str>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -255,6 +268,9 @@ impl Engine {
             acme_epoch: 0,
             acme_claims: None,
             acme_error: None,
+            ca_view: Arc::new(CaView::off()),
+            ca_wants: None,
+            ca_error: None,
         }
     }
 
@@ -311,8 +327,12 @@ impl Engine {
     }
 
     fn merge(&self) -> Merged {
-        self.merger
-            .merge_with(&self.states, &self.quarantine.excluded(), &self.acme_view)
+        self.merger.merge_all(
+            &self.states,
+            &self.quarantine.excluded(),
+            &self.acme_view,
+            &self.ca_view,
+        )
     }
 
     /// Takes an update of a source. Returns whether the desired state may have changed.
@@ -377,6 +397,7 @@ impl Engine {
             error: self.error.clone(),
             accepted: self.accepted.clone(),
             acme_error: self.acme_error.clone(),
+            ca_error: self.ca_error.clone(),
         };
         self.status.send_replace(status);
     }
@@ -386,6 +407,16 @@ impl Engine {
     /// whose apps have not arrived yet.
     fn share_claims(&self, merged: &Merged) {
         let ready = self.sources_ready() || self.started.elapsed() >= CLAIMS_PATIENCE;
+        if let Some(wants) = self.ca_wants.as_ref().filter(|_| ready) {
+            let next = Wants::of(&merged.snapshot().apps);
+            wants.send_if_modified(|current| {
+                let changed = current.as_deref() != Some(&next);
+                if changed {
+                    *current = Some(Arc::new(next));
+                }
+                changed
+            });
+        }
         let Some(claims) = self.acme_claims.as_ref().filter(|_| ready) else {
             return;
         };
@@ -407,6 +438,18 @@ impl Engine {
         };
         error!(error = %why, "the ACME broker stopped; the last pushed state stays and no certificate is added until the provider is restarted");
         self.acme_error = Some(why);
+        self.publish(None);
+    }
+
+    /// The internal CA ended. Its last leaves stay pushed; the sources keep working.
+    fn ca_stopped(&mut self, ended: Result<Result<(), CaError>, tokio::task::JoinError>) {
+        let why: Box<str> = match ended {
+            Ok(Ok(())) => return,
+            Ok(Err(err)) => format!("{err}: {}", source_chain(&err)).into(),
+            Err(err) => format!("the CA task failed: {err}").into(),
+        };
+        error!(error = %why, "the internal CA stopped; the last pushed leaves stay and none is issued or renewed until the provider is restarted");
+        self.ca_error = Some(why);
         self.publish(None);
     }
 
@@ -448,6 +491,17 @@ impl Engine {
             self.acme_claims = Some(handle.claims);
             debounce.note(self.now_ms());
         }
+        let mut ca_view: Option<watch::Receiver<Arc<CaView>>> = None;
+        let mut ca_task: Option<JoinHandle<Result<(), CaError>>> = None;
+        if let Some(settings) = self.config.ca.clone() {
+            let handle = ca::start(&settings, &self.config)
+                .map_err(|err| RunError::Ca(format!("{err}: {}", source_chain(&err)).into()))?;
+            self.ca_view = Arc::clone(&handle.view.borrow());
+            ca_view = Some(handle.view);
+            ca_task = Some(handle.task);
+            self.ca_wants = Some(handle.wants);
+            debounce.note(self.now_ms());
+        }
         let resync = self.config.resync;
         let mut resync_tick = tokio::time::interval_at(Instant::now() + resync, resync);
         resync_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -484,6 +538,20 @@ impl Engine {
                 ended = broker_ended(&mut acme_task) => {
                     acme_task = None;
                     self.acme_stopped(ended);
+                    continue;
+                }
+                changed = view_changed(&mut ca_view) => {
+                    let Some(view) = ca_view.as_mut().filter(|_| changed) else {
+                        ca_view = None;
+                        continue;
+                    };
+                    self.ca_view = Arc::clone(&view.borrow_and_update());
+                    debounce.note(self.now_ms());
+                    continue;
+                }
+                ended = broker_ended(&mut ca_task) => {
+                    ca_task = None;
+                    self.ca_stopped(ended);
                     continue;
                 }
                 () = sleep_until(wake) => Mode::Changed,
@@ -526,6 +594,9 @@ impl Engine {
             }
         };
         if let Some(task) = &acme_task {
+            task.abort();
+        }
+        if let Some(task) = &ca_task {
             task.abort();
         }
         result
@@ -760,6 +831,11 @@ impl Engine {
             })?;
             self.acme_view = Arc::new(view);
         }
+        if let Some(settings) = &self.config.ca {
+            let view = ca::offline_view(settings)
+                .map_err(|err| CollectError::Ca(format!("{err}: {}", source_chain(&err)).into()))?;
+            self.ca_view = Arc::new(view);
+        }
         let mut sources = JoinSet::new();
         for task in std::mem::take(&mut self.tasks) {
             sources.spawn(task(None));
@@ -915,7 +991,7 @@ async fn sleep_until(at: Option<Instant>) {
 
 /// Waits for the ACME broker to publish a new view. `false`: the broker is gone. Never ready
 /// when there is no broker.
-async fn view_changed(view: &mut Option<watch::Receiver<Arc<BrokerView>>>) -> bool {
+async fn view_changed<T>(view: &mut Option<watch::Receiver<Arc<T>>>) -> bool {
     match view {
         Some(view) => view.changed().await.is_ok(),
         None => std::future::pending().await,
@@ -923,9 +999,9 @@ async fn view_changed(view: &mut Option<watch::Receiver<Arc<BrokerView>>>) -> bo
 }
 
 /// Waits for the ACME broker's task to end. Never ready when there is none.
-async fn broker_ended(
-    task: &mut Option<JoinHandle<Result<(), BrokerError>>>,
-) -> Result<Result<(), BrokerError>, tokio::task::JoinError> {
+async fn broker_ended<E>(
+    task: &mut Option<JoinHandle<Result<(), E>>>,
+) -> Result<Result<(), E>, tokio::task::JoinError> {
     match task {
         Some(task) => task.await,
         None => std::future::pending().await,

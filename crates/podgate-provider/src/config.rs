@@ -135,6 +135,8 @@ pub struct Config {
     pub operator: Operator,
     /// The ACME broker or follower, when `[acme]` is enabled.
     pub acme: Option<AcmeSettings>,
+    /// The internal CA, when `[ca]` is enabled.
+    pub ca: Option<crate::ca::settings::CaSettings>,
 }
 /// The snapshot fields no source declares: the operator's `[snapshot]` section. A provider-only
 /// node has no other writer for them, so the provider copies them into every snapshot verbatim.
@@ -214,6 +216,7 @@ struct RawConfig {
     source: Vec<RawSource>,
     snapshot: Option<RawSnapshot>,
     acme: Option<RawAcme>,
+    ca: Option<crate::ca::settings::RawCa>,
 }
 
 /// A tenant or source name: lowercase letters, digits, `.`, `_` and `-`, starting with a letter
@@ -324,6 +327,7 @@ impl Config {
         let tenants = tenants(raw.tenant, &sources, &default_tenant)?;
         let operator = operator(raw.snapshot)?;
         let acme = crate::acme::settings::parse(raw.acme)?;
+        let ca = crate::ca::settings::parse(raw.ca)?;
         Ok(Self {
             admin_socket: raw.admin_socket,
             upstream_policy_file: raw.upstream_policy_file,
@@ -335,6 +339,7 @@ impl Config {
             sources,
             operator,
             acme,
+            ca,
         })
     }
 

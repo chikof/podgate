@@ -461,6 +461,31 @@ impl Store {
     pub fn save_account_key(&self, key: &Secret) -> Result<(), StoreError> {
         write_atomic(&self.dir.join(ACCOUNT_KEY), key.expose().as_bytes())
     }
+
+    /// Reads a private text file of the directory (the internal CA's keys and certificates).
+    /// `None` when it does not exist; a file group or others can read is refused.
+    pub(crate) fn read_text(&self, name: &str) -> Result<Option<String>, StoreError> {
+        let path = self.dir.join(name);
+        match fs::metadata(&path) {
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_err("stat", &path)(err)),
+        }
+        check_private(&path)?;
+        fs::read_to_string(&path)
+            .map(Some)
+            .map_err(io_err("read", &path))
+    }
+
+    /// Replaces a private text file of the directory atomically.
+    pub(crate) fn write_text(&self, name: &str, text: &str) -> Result<(), StoreError> {
+        write_atomic(&self.dir.join(name), text.as_bytes())
+    }
+
+    /// The directory.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
 }
 
 fn read_index(dir: &Path) -> Result<Index, StoreError> {
