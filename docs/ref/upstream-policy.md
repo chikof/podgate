@@ -18,6 +18,8 @@ podgate connects to addresses a tenant's snapshot names. Without a rule, a tenan
 | `deny_extra` | Ranges added to the built-in list. Cannot be combined with `deny`. |
 | `default.allow` | Ranges every tenant without its own entry may dial. |
 | `tenants.<id>.allow` | Ranges that tenant may dial. Replaces `default` for it. |
+| `srv_deny_ports` | Ports no SRV target may use (`docs/ref/dns-srv.md`). Replaces the default list `22, 23, 25, 110, 143, 465, 587, 993, 995, 2375, 2376, 3306, 5432, 5984, 6379, 9200, 9300, 11211, 27017`; `[]` denies none. |
+| `tenants.<id>.srv_allow_ports`, `default.srv_allow_ports` | The only ports a tenant's SRV targets may use, on top of `srv_deny_ports` (deny beats allow). A tenant entry without it uses the default entry's. |
 
 An address is permitted when it is in no `deny` range and, if the tenant (else `default`) has an `allow` list, inside it. A deny range always beats an allow range. With no `allow` list anything not denied is permitted: private ranges are the normal upstreams, so they are not denied by default. An `allow` key is required inside an entry, and an empty list allows nothing. Unknown keys, a repeated tenant, a CIDR with host bits set (`10.0.0.1/8`) and a bad prefix all stop startup.
 
@@ -27,9 +29,9 @@ A CIDR is `address/prefix`, or a bare address for one host. `::ffff:a.b.c.d/N` w
 
 Setting `deny` drops the built-in list. An operator who writes `"deny": ["10.9.0.0/16"]` has allowed loopback again; use `deny_extra` to add to the list. Add the podkit agent's address, the admin plane and any control-plane address through one of the two.
 
-IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`) IPv6 addresses are checked as the IPv4 address they carry. For deny the address is also checked as written, so a custom `deny` of `::1/128` still matches `::1`. Ports are not restricted. NAT64 (`64:ff9b::/96`) and other embeddings are not unwrapped.
+IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`) IPv6 addresses are checked as the IPv4 address they carry. For deny the address is also checked as written, so a custom `deny` of `::1/128` still matches `::1`. Ports of servers the snapshot names are not restricted; the port of an SRV target, which DNS chooses, is (`srv_deny_ports`, `srv_allow_ports`, `evaluate_port` and `check_port` below). NAT64 (`64:ff9b::/96`) and other embeddings are not unwrapped.
 
-No hot reload: restart to change the policy. A bad file stops startup with `invalid UPSTREAM_POLICY_FILE: <path>: <entry>: <reason>`, for example `... : deny[1]: "nope" is not an IP address`. The entry is `deny[i]`, `deny_extra[i]`, `default.allow[i]`, `tenants.<id>.allow[i]`, or `file` for a syntax or structure error.
+No hot reload: restart to change the policy. A bad file stops startup with `invalid UPSTREAM_POLICY_FILE: <path>: <entry>: <reason>`, for example `... : deny[1]: "nope" is not an IP address`. The entry is `deny[i]`, `deny_extra[i]`, `default.allow[i]`, `tenants.<id>.allow[i]`, `srv_deny_ports[i]`, `default.srv_allow_ports[i]`, `tenants.<id>.srv_allow_ports[i]`, or `file` for a syntax or structure error (a port above 65535 is one).
 
 ## Enforcement
 
@@ -41,7 +43,7 @@ No hot reload: restart to change the policy. A bad file stops startup with `inva
 Anything that opens a connection a tenant can influence calls the policy first: health probes, mirrors, forward auth, error pages, the DNS resolver, L4 services.
 
 ```rust
-use podgate::service::upstream_policy::{Refused, UpstreamPolicy};
+use podgate::service::upstream_policy::{PortRefused, Refused, UpstreamPolicy};
 
 impl UpstreamPolicy {
     /// The operator's rule: file named by UPSTREAM_POLICY_FILE, else the built-in deny list.
@@ -53,8 +55,14 @@ impl UpstreamPolicy {
     pub fn check(&self, tenant: &str, ip: IpAddr) -> Result<(), Refused>;
     /// The same verdict with no side effect, for compile-time and dry-run checks.
     pub fn evaluate(&self, tenant: &str, ip: IpAddr) -> Result<(), Refused>;
-    /// Prometheus text of the refusal counter; already part of GET /metrics.
+    /// Prometheus text of the refusal counters; already part of GET /metrics.
     pub fn render(&self) -> String;
+
+    /// The port rules for the targets of an SRV name: srv_deny_ports, then the
+    /// tenant's srv_allow_ports. `check_port` counts a refusal in
+    /// podgate_upstream_refused_total{tenant,reason="port"} and logs it.
+    pub fn evaluate_port(&self, tenant: &str, port: u16) -> Result<(), PortRefused>;
+    pub fn check_port(&self, tenant: &str, port: u16) -> Result<(), PortRefused>;
 }
 ```
 

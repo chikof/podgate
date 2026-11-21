@@ -15,7 +15,7 @@ use crate::service::{Server, ServiceState};
 
 /// The longest cycle a service may have: weights that add up to more, after dividing by their
 /// common divisor, are refused rather than expanded.
-const MAX_CYCLE: u64 = 4096;
+pub(super) const MAX_CYCLE: u64 = 4096;
 
 /// The cycle of server indices.
 #[derive(Debug)]

@@ -247,12 +247,14 @@ impl PolicyError {
     }
 }
 
-/// `{"allow": [cidr...]}`. `allow` is required: an entry that restricts nothing would be a typo
-/// that silently loosens the policy.
+/// `{"allow": [cidr...], "srv_allow_ports": [port...]}`. `allow` is required: an entry that
+/// restricts nothing would be a typo that silently loosens the policy.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EntryFile {
     allow: Vec<String>,
+    #[serde(default)]
+    srv_allow_ports: Option<Vec<u16>>,
 }
 
 /// A JSON object read as a list of pairs, so a repeated key is an error instead of the last
@@ -297,9 +299,60 @@ struct PolicyFile {
     #[serde(default)]
     deny_extra: Option<Vec<String>>,
     #[serde(default)]
+    srv_deny_ports: Option<Vec<u16>>,
+    #[serde(default)]
     default: Option<EntryFile>,
     #[serde(default)]
     tenants: Option<Pairs<EntryFile>>,
+}
+
+/// Ports no SRV record may point a tenant's server at unless the operator's `srv_deny_ports`
+/// replaces the list: remote shells and mail (22, 23, 25, 110, 143, 465, 587, 993, 995), the
+/// Docker daemon (2375, 2376) and the usual databases and caches (3306, 5432, 5984, 6379,
+/// 9200, 9300, 11211, 27017).
+const DEFAULT_SRV_DENY_PORTS: [u16; 19] = [
+    22, 23, 25, 110, 143, 465, 587, 993, 995, 2375, 2376, 3306, 5432, 5984, 6379, 9200, 9300,
+    11211, 27017,
+];
+
+/// Why the policy refuses the port of an SRV target.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum PortRefused {
+    /// The port is in the operator's deny list.
+    #[error("port {port} is in {list}")]
+    Denied {
+        /// The port that was checked.
+        port: u16,
+        /// The list that denied it: `srv_deny_ports`.
+        list: &'static str,
+    },
+    /// The tenant (or the default) has `srv_allow_ports` and the port is not in it.
+    #[error("port {port} is outside the srv_allow_ports of {scope}")]
+    NotAllowed {
+        /// The port that was checked.
+        port: u16,
+        /// `tenant <id>` or `the default entry`.
+        scope: Box<str>,
+    },
+}
+
+fn ports(entry: &str, list: &[u16]) -> Result<Box<[u16]>, PolicyError> {
+    match list.iter().position(|port| *port == 0) {
+        Some(at) => Err(PolicyError::new(
+            format!("{entry}[{at}]"),
+            "0 is not a port",
+        )),
+        None => Ok(list.into()),
+    }
+}
+
+/// The rules on the port of an SRV target, which DNS (and not the snapshot) chooses.
+#[derive(Debug, Default)]
+struct PortRules {
+    deny: Box<[u16]>,
+    default_allow: Option<Box<[u16]>>,
+    tenants: HashMap<Box<str>, Box<[u16]>>,
 }
 
 fn ranges(entry: &str, list: &[String]) -> Result<Vec<Cidr>, PolicyError> {
@@ -318,7 +371,9 @@ struct Inner {
     deny: Box<[Cidr]>,
     default_allow: Option<Box<[Cidr]>>,
     tenants: HashMap<Box<str>, Box<[Cidr]>>,
+    ports: PortRules,
     refused: Mutex<BTreeMap<Box<str>, u64>>,
+    refused_ports: Mutex<BTreeMap<Box<str>, u64>>,
 }
 
 /// The operator's rule for which addresses podgate may connect to, per tenant. Cheap to clone;
@@ -344,30 +399,41 @@ impl UpstreamPolicy {
         deny: Vec<Cidr>,
         default_allow: Option<Vec<Cidr>>,
         tenants: HashMap<Box<str>, Box<[Cidr]>>,
+        ports: PortRules,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 deny: deny.into(),
                 default_allow: default_allow.map(Vec::into),
                 tenants,
+                ports,
                 refused: Mutex::new(BTreeMap::new()),
+                refused_ports: Mutex::new(BTreeMap::new()),
             }),
         }
     }
 
     /// The policy with no file: the built-in deny list (loopback, unspecified, link-local,
-    /// metadata and multicast) and no allow lists. What a process without
-    /// `UPSTREAM_POLICY_FILE` runs.
+    /// metadata and multicast), the default `srv_deny_ports` and no allow lists. What a process
+    /// without `UPSTREAM_POLICY_FILE` runs.
     #[must_use]
     pub fn builtin() -> Self {
-        Self::from_parts(BUILTIN_DENY.to_vec(), None, HashMap::new())
+        Self::from_parts(
+            BUILTIN_DENY.to_vec(),
+            None,
+            HashMap::new(),
+            PortRules {
+                deny: DEFAULT_SRV_DENY_PORTS.into(),
+                ..PortRules::default()
+            },
+        )
     }
 
     /// A policy that refuses nothing. Only for tests and tools that build a routing table
     /// without a running process; `run` always installs the operator's policy.
     #[must_use]
     pub fn allow_all() -> Self {
-        Self::from_parts(Vec::new(), None, HashMap::new())
+        Self::from_parts(Vec::new(), None, HashMap::new(), PortRules::default())
     }
 
     /// Parses the JSON of a policy file.
@@ -401,16 +467,42 @@ impl UpstreamPolicy {
                 list
             }
         };
+        let default_ports = match file
+            .default
+            .as_ref()
+            .and_then(|entry| entry.srv_allow_ports.as_deref())
+        {
+            Some(list) => Some(ports("default.srv_allow_ports", list)?),
+            None => None,
+        };
         let default_allow = file
             .default
             .map(|entry| ranges("default.allow", &entry.allow))
             .transpose()?;
         let mut tenants = HashMap::new();
+        let mut port_tenants = HashMap::new();
         for (id, entry) in file.tenants.map_or_else(Vec::new, |pairs| pairs.0) {
             let allow = ranges(&format!("tenants.{id}.allow"), &entry.allow)?;
+            if let Some(list) = &entry.srv_allow_ports {
+                let list = ports(&format!("tenants.{id}.srv_allow_ports"), list)?;
+                port_tenants.insert(Box::from(id.as_str()), list);
+            }
             tenants.insert(Box::from(id), allow.into());
         }
-        Ok(Self::from_parts(deny, default_allow, tenants))
+        let deny_ports = match &file.srv_deny_ports {
+            Some(list) => ports("srv_deny_ports", list)?,
+            None => DEFAULT_SRV_DENY_PORTS.into(),
+        };
+        Ok(Self::from_parts(
+            deny,
+            default_allow,
+            tenants,
+            PortRules {
+                deny: deny_ports,
+                default_allow: default_ports,
+                tenants: port_tenants,
+            },
+        ))
     }
 
     /// Reads and parses the policy file at `path`.
@@ -459,6 +551,61 @@ impl UpstreamPolicy {
             }
             _ => Ok(()),
         }
+    }
+
+    fn allow_ports(&self, tenant: &str) -> Option<(&[u16], Box<str>)> {
+        match self.inner.ports.tenants.get(tenant) {
+            Some(list) => Some((list, format!("tenant {tenant}").into())),
+            None => self
+                .inner
+                .ports
+                .default_allow
+                .as_deref()
+                .map(|list| (list, "the default entry".into())),
+        }
+    }
+
+    /// The verdict for `tenant` using `port` of an SRV target, with no side effect: the port is
+    /// refused when it is in `srv_deny_ports` or, when the tenant (else `default`) has
+    /// `srv_allow_ports`, outside it. A deny entry always beats an allow entry. DNS chooses the
+    /// port of an SRV target, so this is checked besides [`Self::evaluate`] on the address.
+    ///
+    /// # Errors
+    ///
+    /// [`PortRefused`] naming the list that refused.
+    pub fn evaluate_port(&self, tenant: &str, port: u16) -> Result<(), PortRefused> {
+        if self.inner.ports.deny.contains(&port) {
+            return Err(PortRefused::Denied {
+                port,
+                list: "srv_deny_ports",
+            });
+        }
+        match self.allow_ports(tenant) {
+            Some((allow, scope)) if !allow.contains(&port) => {
+                Err(PortRefused::NotAllowed { port, scope })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// [`Self::evaluate_port`] for a target that is about to be used: a refusal is also counted
+    /// in `podgate_upstream_refused_total{tenant,reason="port"}` and logged.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::evaluate_port`]; the caller must not use the target.
+    pub fn check_port(&self, tenant: &str, port: u16) -> Result<(), PortRefused> {
+        let verdict = self.evaluate_port(tenant, port);
+        if let Err(refused) = &verdict {
+            let mut counts = self
+                .inner
+                .refused_ports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *counts.entry(tenant.into()).or_insert(0) += 1;
+            tracing::warn!(tenant, port, why = %refused, "upstream port refused");
+        }
+        verdict
     }
 
     /// [`Self::evaluate`] for a connection that is about to be made: a refusal is also counted
@@ -534,6 +681,19 @@ impl UpstreamPolicy {
         for (tenant, count) in counts.iter() {
             // Writing to a `String` cannot fail.
             let _ = writeln!(out, "{name}{{tenant=\"{}\"}} {count}", Escaped(tenant));
+        }
+        drop(counts);
+        let counts = self
+            .inner
+            .refused_ports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (tenant, count) in counts.iter() {
+            let _ = writeln!(
+                out,
+                "{name}{{tenant=\"{}\",reason=\"port\"}} {count}",
+                Escaped(tenant)
+            );
         }
         out
     }
@@ -802,5 +962,109 @@ mod test {
         assert!(text.contains("# TYPE podgate_upstream_refused_total counter\n"));
         assert!(text.contains("podgate_upstream_refused_total{tenant=\"a\"} 2\n"));
         assert!(text.contains("podgate_upstream_refused_total{tenant=\"b\\\"x\"} 1\n"));
+    }
+
+    #[test]
+    fn srv_ports_denied_by_default_and_the_list_replaces_it() {
+        let builtin = UpstreamPolicy::builtin();
+        for port in DEFAULT_SRV_DENY_PORTS {
+            assert!(
+                matches!(
+                    builtin.evaluate_port("t", port),
+                    Err(PortRefused::Denied { port: denied, .. }) if denied == port
+                ),
+                "{port}"
+            );
+        }
+        for port in [80, 443, 8080, 3000, 8500, 32768, 65535] {
+            assert_eq!(builtin.evaluate_port("t", port), Ok(()), "{port}");
+        }
+        let file = policy(r#"{"srv_deny_ports": [8080]}"#);
+        assert!(file.evaluate_port("t", 8080).is_err());
+        assert!(
+            file.evaluate_port("t", 5432).is_ok(),
+            "srv_deny_ports replaces the default list"
+        );
+        assert!(
+            policy(r#"{"srv_deny_ports": []}"#)
+                .evaluate_port("t", 22)
+                .is_ok()
+        );
+        assert!(policy("{}").evaluate_port("t", 22).is_err());
+        assert!(UpstreamPolicy::allow_all().evaluate_port("t", 22).is_ok());
+    }
+
+    #[test]
+    fn srv_allow_ports_narrow_a_tenant_and_deny_beats_them() {
+        let file = policy(
+            r#"{"srv_deny_ports": [22],
+                "default": {"allow": ["10.0.0.0/8"], "srv_allow_ports": [8000, 22]},
+                "tenants": {"acme": {"allow": ["10.0.0.0/8"], "srv_allow_ports": [9000]},
+                            "plain": {"allow": ["10.0.0.0/8"]}}}"#,
+        );
+        assert!(file.evaluate_port("acme", 9000).is_ok());
+        assert_eq!(
+            file.evaluate_port("acme", 8000),
+            Err(PortRefused::NotAllowed {
+                port: 8000,
+                scope: "tenant acme".into()
+            })
+        );
+        assert!(file.evaluate_port("other", 8000).is_ok());
+        assert_eq!(
+            file.evaluate_port("other", 9000),
+            Err(PortRefused::NotAllowed {
+                port: 9000,
+                scope: "the default entry".into()
+            })
+        );
+        assert!(
+            matches!(
+                file.evaluate_port("other", 22),
+                Err(PortRefused::Denied { port: 22, .. })
+            ),
+            "a deny entry beats an allow entry"
+        );
+        assert!(
+            file.evaluate_port("plain", 8000).is_ok(),
+            "an entry without srv_allow_ports uses the default's"
+        );
+    }
+
+    #[test]
+    fn bad_srv_port_entries_name_the_entry() {
+        for (json, entry) in [
+            (r#"{"srv_deny_ports": [22, 0]}"#, "srv_deny_ports[1]"),
+            (
+                r#"{"tenants": {"a": {"allow": [], "srv_allow_ports": [0]}}}"#,
+                "tenants.a.srv_allow_ports[0]",
+            ),
+            (
+                r#"{"default": {"allow": [], "srv_allow_ports": [1, 2, 0]}}"#,
+                "default.srv_allow_ports[2]",
+            ),
+            (r#"{"srv_deny_ports": [70000]}"#, "file"),
+            (r#"{"srv_deny_ports": "22"}"#, "file"),
+            (r#"{"srv_allow_ports": [1]}"#, "file"),
+        ] {
+            let err = UpstreamPolicy::parse(json).expect_err(json);
+            assert_eq!(&*err.entry, entry, "{json}: {err}");
+        }
+    }
+
+    #[test]
+    fn port_refusals_are_counted_with_a_reason_only_by_check_port() {
+        let builtin = UpstreamPolicy::builtin();
+        assert!(builtin.evaluate_port("a", 22).is_err());
+        assert!(!builtin.render().contains("reason="));
+        assert!(builtin.check_port("a", 22).is_err());
+        assert!(builtin.check_port("a", 5432).is_err());
+        assert!(builtin.check_port("a", 8080).is_ok());
+        let text = builtin.render();
+        assert!(text.contains("podgate_upstream_refused_total{tenant=\"a\",reason=\"port\"} 2\n"));
+        assert!(
+            !text.contains("podgate_upstream_refused_total{tenant=\"a\"}"),
+            "a port refusal is not an address refusal"
+        );
     }
 }

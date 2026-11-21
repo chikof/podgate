@@ -24,7 +24,7 @@ use crate::service::{Server, ServiceState};
 /// The most weight a ring may hold, after dividing the weights by their greatest common divisor:
 /// 256 servers of weight 1 (the most a service declares) fill it. A ring of 256 weight units has
 /// 40 960 points, 320 KiB, and building it costs about twice that for a moment.
-const MAX_WEIGHT: u64 = 256;
+pub(super) const MAX_WEIGHT: u64 = 256;
 
 /// The points of the largest ring a service can hold, `MAX_WEIGHT` weight units: what a service
 /// whose servers are named by DNS is charged, since how many addresses a name has is not known

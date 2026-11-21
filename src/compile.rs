@@ -838,6 +838,7 @@ fn services_of(
                 service.bind_sticky(skew_secret, &app.id, &declared.name)?;
                 rings.charge(&app.tenant, service.ring_points())?;
                 names.charge(&app.tenant, &app.id, service.dns_names())?;
+                names.charge_srv(&app.tenant, &app.id, service.srv_names())?;
                 Ok(service)
             },
         ) {

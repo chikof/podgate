@@ -306,6 +306,22 @@ impl Balancer {
         }
     }
 
+    /// How the algorithm takes the weights DNS brings (`resolve: "srv"` servers), which the
+    /// compiler never sees.
+    #[must_use]
+    pub(crate) fn weight_use(&self) -> WeightUse {
+        match self {
+            Self::WeightedRoundRobin(_) => WeightUse::Total(weighted_round_robin::MAX_CYCLE),
+            Self::IpHash(_) | Self::UriHash(_) | Self::HeaderHash(_) => {
+                WeightUse::Total(ring::MAX_WEIGHT)
+            }
+            Self::Hrw(_) => WeightUse::Exact,
+            Self::RoundRobin(_) | Self::LeastConn(_) | Self::P2cEwma(_) | Self::Random(_) => {
+                WeightUse::Ignored
+            }
+        }
+    }
+
     /// What the algorithm does with the latency of a finished response, for the
     /// [`super::Lease`] of the request; `None` for an algorithm that ignores latency.
     pub(super) fn observe(&self) -> Option<Observe> {
@@ -321,6 +337,18 @@ impl Balancer {
             | Self::Hrw(_) => None,
         }
     }
+}
+
+/// How a balancing algorithm takes the weight of a server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WeightUse {
+    /// The algorithm has no weights and refuses any other than `1`.
+    Ignored,
+    /// Any weight is taken exactly (`hrw`).
+    Exact,
+    /// The weights, divided by their greatest common divisor, may add up to at most this much:
+    /// the cycle of `weighted_round_robin`, the ring of the hash algorithms.
+    Total(u64),
 }
 
 /// Helpers for the unit tests of the algorithms: servers that are up, a request, an injected

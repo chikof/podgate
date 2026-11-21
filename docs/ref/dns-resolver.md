@@ -54,4 +54,4 @@ A `mirroring` target that is a load balancer with named servers copies requests 
 
 ## What is not here
 
-`SRV` records (Caddy's `srv` dynamic upstream) are not resolved; they are listed in `docs/parity.md`. The DNS resolution of a name never happens at request time. Traefik resolves on each new connection through the Go dialer without caching; podgate resolves on the TTL and holds the answer.
+`SRV` records (Caddy's `srv` dynamic upstream) are a separate server mode, `"resolve": "srv"`, described in `docs/ref/dns-srv.md`. The DNS resolution of a name never happens at request time. Traefik resolves on each new connection through the Go dialer without caching; podgate resolves on the TTL and holds the answer.

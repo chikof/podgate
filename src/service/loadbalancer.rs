@@ -50,9 +50,9 @@ use serde_json::Value;
 
 use super::graph::Readiness;
 use super::health::{self, Check};
-use super::lb::{Balancer, MAX_SERVICE_POINTS, PickCx};
+use super::lb::{Balancer, MAX_SERVICE_POINTS, PickCx, WeightUse};
 use super::outlier::Passive;
-use super::resolve::{self, Resolver};
+use super::resolve::{self, Resolver, srv};
 use super::state::{self, Lease, ServerState, ServiceState};
 use super::sticky::Sticky;
 use super::transport::{self, Transport, Upstream};
@@ -82,16 +82,30 @@ pub(super) struct Config {
     transport: Option<Box<str>>,
 }
 
+/// How the host of a server's URL is resolved.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ResolveKind {
+    /// `A` and `AAAA` records: the host is a server name and the URL carries the port.
+    A,
+    /// An `SRV` record: the host is the full owner name (`_web._tcp.shop.service.consul`), the
+    /// URL has no port, and the targets, ports, priorities and weights come from DNS.
+    Srv,
+}
+
 /// One server as declared.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     /// `http://host:port` or `https://host:port`. `host` is an IP address or a DNS name, which
     /// podgate resolves again on the record's TTL and checks against the upstream address
-    /// policy on every answer.
+    /// policy on every answer. With `resolve: "srv"` it is `http://owner.name` without a port.
     url: String,
     #[serde(default)]
     weight: Option<u32>,
+    /// `a` (the default) or `srv`.
+    #[serde(default)]
+    resolve: Option<ResolveKind>,
 }
 
 /// One upstream server of a load balancer.
@@ -191,7 +205,14 @@ struct Live {
 #[derive(Debug, Clone)]
 enum Target {
     Addr(SocketAddr),
-    Name { host: Box<str>, port: u16 },
+    Name {
+        host: Box<str>,
+        port: u16,
+    },
+    /// The owner name of an `SRV` record, whose targets are the servers.
+    Srv {
+        owner: Box<str>,
+    },
 }
 
 /// One server as declared and parsed.
@@ -221,6 +242,8 @@ pub struct LoadBalancer {
     /// Whether the algorithm builds a ring, which a service with names is charged for at its
     /// largest.
     ring: bool,
+    /// How the algorithm takes the weights of SRV records.
+    weight_use: WeightUse,
     shared: Arc<ServiceState>,
     fingerprint: u64,
     transport: Arc<Transport>,
@@ -239,7 +262,8 @@ fn not_built(what: &str) -> Invalid {
 const EXPECTED: &str = "expected http://host:port, https://host:port or h2c://host:port";
 
 /// Parses `http://host:port`, `https://host:port` and `h2c://host:port`, `host` an IP address or
-/// a DNS name.
+/// a DNS name; with `resolve: "srv"`, `http://owner.name`, `https://owner.name` or
+/// `h2c://owner.name` without a port.
 fn parse_server(config: &ServerConfig) -> Result<Entry, Invalid> {
     let url = config.url.as_str();
     let invalid = |why: &str| Invalid::new("invalid_service", format!("server {url}: {why}"));
@@ -250,21 +274,41 @@ fn parse_server(config: &ServerConfig) -> Result<Entry, Invalid> {
         _ => return Err(invalid(EXPECTED)),
     };
     let rest = rest.strip_suffix('/').unwrap_or(rest);
-    let target = match rest.parse::<SocketAddr>() {
-        Ok(addr) => Target::Addr(addr),
-        Err(_) => {
-            let (host, port) = rest
-                .rsplit_once(':')
-                .and_then(|(host, port)| Some((host, port.parse::<u16>().ok()?)))
-                .filter(|(host, _)| !host.is_empty() && !host.starts_with('['))
-                .ok_or_else(|| invalid(EXPECTED))?;
-            if !resolve::is_host_name(host) {
-                return Err(invalid(&format!("{host:?} is not a valid host name")));
-            }
-            let host = host.strip_suffix('.').unwrap_or(host);
-            Target::Name {
-                host: host.to_ascii_lowercase().into(),
-                port,
+    let target = if config.resolve == Some(ResolveKind::Srv) {
+        if config.weight.is_some() {
+            return Err(invalid(
+                "a weight is set by the SRV records, not by the snapshot",
+            ));
+        }
+        if rest.contains(':') {
+            return Err(invalid(
+                "an SRV server has no port in its URL, the records choose it: write scheme://owner.name",
+            ));
+        }
+        if !resolve::is_host_name(rest) {
+            return Err(invalid(&format!("{rest:?} is not a valid SRV owner name")));
+        }
+        let owner = rest.strip_suffix('.').unwrap_or(rest);
+        Target::Srv {
+            owner: owner.to_ascii_lowercase().into(),
+        }
+    } else {
+        match rest.parse::<SocketAddr>() {
+            Ok(addr) => Target::Addr(addr),
+            Err(_) => {
+                let (host, port) = rest
+                    .rsplit_once(':')
+                    .and_then(|(host, port)| Some((host, port.parse::<u16>().ok()?)))
+                    .filter(|(host, _)| !host.is_empty() && !host.starts_with('['))
+                    .ok_or_else(|| invalid(EXPECTED))?;
+                if !resolve::is_host_name(host) {
+                    return Err(invalid(&format!("{host:?} is not a valid host name")));
+                }
+                let host = host.strip_suffix('.').unwrap_or(host);
+                Target::Name {
+                    host: host.to_ascii_lowercase().into(),
+                    port,
+                }
             }
         }
     };
@@ -375,24 +419,29 @@ impl LoadBalancer {
         let probe: Vec<Server> = entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| match &entry.target {
-                Target::Addr(addr) => entry.literal(*addr, Arc::default()),
-                Target::Name { port, .. } => entry.literal(
+            .map(|(index, entry)| {
+                let port = match &entry.target {
+                    Target::Addr(addr) => return entry.literal(*addr, Arc::default()),
+                    Target::Name { port, .. } => *port,
+                    Target::Srv { .. } => 1,
+                };
+                entry.literal(
                     SocketAddr::new(
                         // 192.0.2.0/24 is TEST-NET-1; it is never dialled, only weighed.
                         IpAddr::V4(Ipv4Addr::new(192, 0, 2, u8::try_from(index).unwrap_or(0))),
-                        *port,
+                        port,
                     ),
                     Arc::default(),
-                ),
+                )
             })
             .collect();
         let probed = Balancer::compile(config.algorithm.as_ref(), &probe)?;
         let named = entries
             .iter()
-            .any(|entry| matches!(entry.target, Target::Name { .. }));
+            .any(|entry| matches!(entry.target, Target::Name { .. } | Target::Srv { .. }));
         let mut balancer = Self {
             ring: named && probed.ring_points() > 0,
+            weight_use: probed.weight_use(),
             live: ArcSwap::from_pointee(Live {
                 servers: Box::default(),
                 balancer: Arc::new(probed),
@@ -462,6 +511,29 @@ impl LoadBalancer {
                         servers.push(entry.literal(addr, state));
                     }
                 }
+                Target::Srv { owner } => {
+                    let Some(dns) = self.dns.as_ref().filter(|_| names) else {
+                        continue;
+                    };
+                    let resolved = dns.resolver.peek_srv(&dns.tenant, owner);
+                    let mut weights: Vec<u32> = resolved.iter().map(|found| found.weight).collect();
+                    match self.weight_use {
+                        WeightUse::Ignored => weights.fill(1),
+                        WeightUse::Exact => {}
+                        WeightUse::Total(cap) => srv::fit(&mut weights, cap),
+                    }
+                    for (found, weight) in resolved.iter().zip(weights) {
+                        if servers.len() >= health::MAX_SERVERS
+                            || servers.iter().any(|server| server.addr == found.addr)
+                        {
+                            continue;
+                        }
+                        let state = self.shared.named_state(&entry.url, found.addr);
+                        let mut server = entry.literal(found.addr, state);
+                        server.weight = weight;
+                        servers.push(server);
+                    }
+                }
             }
         }
         servers
@@ -476,10 +548,9 @@ impl LoadBalancer {
         let current = self.live.load_full();
         let servers = self.expand(&current.servers, true);
         let same_addrs = servers.len() == current.servers.len()
-            && servers
-                .iter()
-                .zip(&current.servers)
-                .all(|(new, old)| new.addr == old.addr && new.url == old.url);
+            && servers.iter().zip(&current.servers).all(|(new, old)| {
+                new.addr == old.addr && new.url == old.url && new.weight == old.weight
+            });
         let same_states = same_addrs
             && servers
                 .iter()
@@ -540,7 +611,15 @@ impl LoadBalancer {
     pub fn dns_names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().filter_map(|entry| match &entry.target {
             Target::Name { host, .. } => Some(&**host),
-            Target::Addr(_) => None,
+            Target::Addr(_) | Target::Srv { .. } => None,
+        })
+    }
+
+    /// The distinct SRV owner names the servers use, as written in lower case.
+    pub fn srv_names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().filter_map(|entry| match &entry.target {
+            Target::Srv { owner } => Some(&**owner),
+            Target::Addr(_) | Target::Name { .. } => None,
         })
     }
 
@@ -969,5 +1048,152 @@ mod test {
         let mut literal = lb(&json!([{ "url": "http://10.0.0.1:80" }]));
         literal["algorithm"] = json!("ip_hash");
         assert_eq!(compile(literal).expect("compiles").ring_points(), 160);
+    }
+
+    const OWNER: &str = "_web._tcp.shop.test";
+
+    fn srv_lb(algorithm: &str) -> Value {
+        let mut value = lb(&json!([{ "url": format!("http://{OWNER}"), "resolve": "srv" }]));
+        value["algorithm"] = json!(algorithm);
+        value
+    }
+
+    fn weights(balancer: &LoadBalancer) -> Vec<u32> {
+        balancer
+            .servers()
+            .iter()
+            .map(|server| server.weight)
+            .collect()
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("ip")
+    }
+
+    #[test]
+    fn an_srv_name_is_backed_charged_and_counted_as_an_srv_name_only() {
+        let balancer = compile(srv_lb("round_robin")).expect("compiles");
+        assert!(balancer.servers().is_empty());
+        assert!(balancer.is_backed());
+        assert_eq!(balancer.srv_names().collect::<Vec<_>>(), [OWNER]);
+        assert_eq!(balancer.dns_names().count(), 0);
+        assert_eq!(
+            compile(srv_lb("ip_hash")).expect("compiles").ring_points(),
+            crate::service::lb::MAX_SERVICE_POINTS
+        );
+        let mixed = compile(lb(&json!([
+            { "url": "http://Api.Shop.Test:80" },
+            { "url": "http://_Web._tcp.Shop.test.", "resolve": "srv" },
+        ])))
+        .expect("compiles");
+        assert_eq!(mixed.dns_names().collect::<Vec<_>>(), ["api.shop.test"]);
+        assert_eq!(mixed.srv_names().collect::<Vec<_>>(), [OWNER]);
+    }
+
+    #[test]
+    fn bad_srv_entries_are_invalid_service() {
+        for server in [
+            json!({ "url": format!("http://{OWNER}:8080"), "resolve": "srv" }),
+            json!({ "url": "http://bad owner.test", "resolve": "srv" }),
+            json!({ "url": "http://10.0.0.1", "resolve": "srv" }),
+            json!({ "url": "http://[::1]", "resolve": "srv" }),
+            json!({ "url": format!("http://{OWNER}/path"), "resolve": "srv" }),
+            json!({ "url": format!("http://{OWNER}"), "resolve": "srv", "weight": 2 }),
+            json!({ "url": format!("ftp://{OWNER}"), "resolve": "srv" }),
+        ] {
+            assert_eq!(
+                code(lb(&json!([server.clone()]))),
+                "invalid_service",
+                "{server}"
+            );
+        }
+        let unknown = json!({ "url": format!("http://{OWNER}"), "resolve": "mx" });
+        assert_eq!(code(lb(&json!([unknown]))), "invalid_service");
+        compile(lb(&json!([
+            { "url": "http://api.shop.test:80", "resolve": "a" },
+            { "url": "http://10.0.0.1:80", "resolve": "a" },
+        ])))
+        .expect("resolve a is the default");
+    }
+
+    #[test]
+    fn srv_servers_take_the_lowest_priority_and_the_weights_the_algorithm_can_use() {
+        let resolver = Resolver::default();
+        let wrr = compile_with(srv_lb("weighted_round_robin"), &resolver).expect("compiles");
+        let robin = compile_with(srv_lb("round_robin"), &resolver).expect("compiles");
+        let hashed = compile_with(srv_lb("ip_hash"), &resolver).expect("compiles");
+        let hrw = compile_with(srv_lb("hrw"), &resolver).expect("compiles");
+        resolver.seed_srv(
+            OWNER,
+            &[
+                (10, 30_000, 8080, ip("10.0.0.1")),
+                (10, 10_000, 8081, ip("10.0.0.2")),
+                (20, 5, 9000, ip("10.0.0.3")),
+            ],
+        );
+        for balancer in [&wrr, &robin, &hashed, &hrw] {
+            assert!(balancer.refresh());
+            assert_eq!(addrs(balancer), ["10.0.0.1:8080", "10.0.0.2:8081"]);
+            assert!(!balancer.refresh(), "nothing changed");
+        }
+        assert_eq!(
+            weights(&wrr),
+            [3, 1],
+            "exact: divided by the common divisor"
+        );
+        assert_eq!(weights(&hrw), [30_000, 10_000], "hrw takes any weight");
+        assert_eq!(weights(&robin), [1, 1], "round_robin has no weights");
+        assert_eq!(weights(&hashed), [3, 1]);
+
+        // A change of weight alone rebuilds the algorithm.
+        resolver.seed_srv(
+            OWNER,
+            &[
+                (10, 100, 8080, ip("10.0.0.1")),
+                (10, 100, 8081, ip("10.0.0.2")),
+            ],
+        );
+        assert!(wrr.refresh());
+        assert_eq!(weights(&wrr), [1, 1]);
+
+        // Weights too big for a ring are scaled into it, and a weight of 0 is the lowest.
+        resolver.seed_srv(
+            OWNER,
+            &[
+                (10, 65_535, 8080, ip("10.0.0.1")),
+                (10, 0, 8081, ip("10.0.0.2")),
+            ],
+        );
+        assert!(hashed.refresh());
+        let fitted = weights(&hashed);
+        assert!(fitted.iter().sum::<u32>() <= 256 && fitted[1] >= 1 && fitted[0] > fitted[1]);
+        assert!(wrr.refresh());
+        let cycle = weights(&wrr);
+        assert!(cycle.iter().sum::<u32>() <= 4096 && cycle[1] == 1 && cycle[0] > 4000);
+    }
+
+    #[test]
+    fn srv_servers_drop_what_the_policy_refuses_and_fall_to_the_next_priority() {
+        let policy = crate::service::upstream_policy::UpstreamPolicy::parse(
+            r#"{"srv_deny_ports": [5432], "tenants": {"t": {"allow": ["10.0.0.0/8"], "srv_allow_ports": [8080, 5432, 9000]}}}"#,
+        )
+        .expect("policy");
+        let resolver = Resolver::new(resolve::Settings::default(), policy);
+        let balancer = compile_with(srv_lb("round_robin"), &resolver).expect("compiles");
+        resolver.seed_srv(
+            OWNER,
+            &[
+                (10, 1, 5432, ip("10.0.0.1")),
+                (10, 1, 8080, ip("127.0.0.1")),
+                (10, 1, 7000, ip("10.0.0.2")),
+                (20, 1, 9000, ip("10.0.0.3")),
+            ],
+        );
+        assert!(balancer.refresh());
+        assert_eq!(
+            addrs(&balancer),
+            ["10.0.0.3:9000"],
+            "denied port, denied address and port outside the tenant's list leave the next priority"
+        );
     }
 }

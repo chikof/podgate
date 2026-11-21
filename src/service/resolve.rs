@@ -19,8 +19,10 @@
 //! - [`ResolveService`]: the background service. After every swap and every change of an answer
 //!   it reconciles the tasks with the names the live table uses, and tells each service to take
 //!   the new addresses ([`super::Service::refresh`]).
-//! - `NameBudget`: how many distinct names an app (64) and a tenant (256) may use, checked by
-//!   the compiler.
+//! - `NameBudget`: how many distinct names an app (64) and a tenant (256) may use, and how many
+//!   distinct SRV names (32 and 128), checked by the compiler.
+//! - [`srv`]: servers named by an SRV record (`"resolve": "srv"`), whose targets, ports,
+//!   priorities and weights come from DNS; every target and port passes the same policy.
 //!
 //! # The upstream address policy
 //!
@@ -40,6 +42,8 @@
 //! lookup never takes longer than `DNS_TIMEOUT_MS`. A name that has never resolved is a server
 //! without addresses: requests to it get `503`, which does not wake a `scale_to_zero` app.
 
+pub mod srv;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -52,7 +56,7 @@ use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::op::ResponseCode;
-use hickory_resolver::proto::rr::RData;
+use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::{Resolver as Client, TokioResolver};
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
@@ -281,6 +285,7 @@ impl NameEntry {
 struct State {
     names: HashMap<Box<str>, NameEntry>,
     tasks: HashMap<Key, AbortHandle>,
+    srv: srv::Srv,
 }
 
 /// A token bucket: `rate` tokens a second, holding at most a tenth of a second's worth (at
@@ -447,7 +452,9 @@ impl Resolver {
         let wanted = names_of(table);
         let now = Instant::now();
         let mut guard = self.inner.lock();
-        let State { names, tasks } = &mut *guard;
+        let State { names, tasks, srv } = &mut *guard;
+        srv.reconcile(&self.inner, &wanted.srv);
+        let wanted = wanted.names;
         names.retain(|name, _| wanted.contains_key(name));
         tasks.retain(|key, task| {
             let keep = wanted.contains_key(&key.name);
@@ -484,6 +491,7 @@ impl Resolver {
         for task in state.tasks.values() {
             task.abort();
         }
+        state.srv.abort_all();
         *state = State::default();
     }
 }
@@ -504,9 +512,19 @@ impl Resolver {
     }
 }
 
-/// The tenants that use each name of `table`'s services.
-fn names_of(table: &RoutingTable) -> HashMap<Box<str>, HashSet<Box<str>>> {
-    let mut wanted: HashMap<Box<str>, HashSet<Box<str>>> = HashMap::new();
+/// The tenants that use each name of `table`'s services, by kind of name.
+struct Wanted {
+    /// Names resolved to `A` and `AAAA` addresses.
+    names: HashMap<Box<str>, HashSet<Box<str>>>,
+    /// Owner names resolved as `SRV` records.
+    srv: HashMap<Box<str>, HashSet<Box<str>>>,
+}
+
+fn names_of(table: &RoutingTable) -> Wanted {
+    let mut wanted = Wanted {
+        names: HashMap::new(),
+        srv: HashMap::new(),
+    };
     for app in table.apps() {
         let own = app
             .revisions()
@@ -515,6 +533,14 @@ fn names_of(table: &RoutingTable) -> HashMap<Box<str>, HashSet<Box<str>>> {
         for named in app.services().iter().chain(own) {
             for name in named.service.dns_names() {
                 wanted
+                    .names
+                    .entry(name.into())
+                    .or_default()
+                    .insert(app.tenant().into());
+            }
+            for name in named.service.srv_names() {
+                wanted
+                    .srv
                     .entry(name.into())
                     .or_default()
                     .insert(app.tenant().into());
@@ -590,29 +616,36 @@ impl Inner {
         Ok(client)
     }
 
-    /// One lookup of `key`: the addresses and the smallest TTL of the answer.
-    async fn lookup(&self, key: &Key) -> Result<(Vec<IpAddr>, u32), Failure> {
+    /// One lookup of `name` for `record_type`, with the module's timeout. A clean "no such
+    /// record" is [`Failure::NoData`] (the name exists) or [`Failure::Empty`] (`NXDOMAIN`).
+    async fn query(
+        &self,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<hickory_resolver::lookup::Lookup, Failure> {
         let client = self.client().map_err(Failure::Error)?;
-        let name = &*key.name;
-        let asked = timeout(self.settings.timeout, async {
-            match key.family {
-                Family::V4 => client.ipv4_lookup(name).await,
-                Family::V6 => client.ipv6_lookup(name).await,
-            }
-        })
-        .await;
-        let lookup = match asked {
-            Err(_) => return Err(Failure::Error("timed out".to_owned())),
+        let asked = timeout(self.settings.timeout, client.lookup(name, record_type)).await;
+        match asked {
+            Err(_) => Err(Failure::Error("timed out".to_owned())),
             Ok(Err(NetError::Dns(DnsError::NoRecordsFound(none)))) => {
-                return Err(if none.response_code == ResponseCode::NoError {
+                Err(if none.response_code == ResponseCode::NoError {
                     Failure::NoData(none.negative_ttl)
                 } else {
                     Failure::Empty
-                });
+                })
             }
-            Ok(Err(err)) => return Err(Failure::Error(err.to_string())),
-            Ok(Ok(lookup)) => lookup,
+            Ok(Err(err)) => Err(Failure::Error(err.to_string())),
+            Ok(Ok(lookup)) => Ok(lookup),
+        }
+    }
+
+    /// One lookup of `key`: the addresses and the smallest TTL of the answer.
+    async fn lookup(&self, key: &Key) -> Result<(Vec<IpAddr>, u32), Failure> {
+        let record_type = match key.family {
+            Family::V4 => RecordType::A,
+            Family::V6 => RecordType::AAAA,
         };
+        let lookup = self.query(&key.name, record_type).await?;
         let mut addrs = Vec::new();
         let mut ttl = u32::MAX;
         for record in lookup.answers() {
@@ -860,12 +893,58 @@ pub fn is_host_name(host: &str) -> bool {
     !last.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The distinct host names the services of one snapshot use, per app and per tenant, so the
-/// compiler can refuse a snapshot that asks for too many.
+/// The distinct names of one kind the services of one snapshot use, per app and per tenant.
 #[derive(Debug, Default)]
-pub(crate) struct NameBudget {
+struct Names {
     apps: HashMap<Box<str>, HashSet<Box<str>>>,
     tenants: HashMap<Box<str>, HashSet<Box<str>>>,
+}
+
+impl Names {
+    fn charge<'a>(
+        &mut self,
+        tenant: &str,
+        app: &str,
+        names: impl IntoIterator<Item = &'a str>,
+        kind: &str,
+        (max_app, max_tenant): (usize, usize),
+    ) -> Result<(), Invalid> {
+        for name in names {
+            let of_app = self.apps.entry(app.into()).or_default();
+            of_app.insert(name.into());
+            if of_app.len() > max_app {
+                return Err(Invalid::new(
+                    "invalid_service",
+                    format!(
+                        "app {app} uses {} distinct {kind} names in its servers, at most \
+                         {max_app} are allowed",
+                        of_app.len()
+                    ),
+                ));
+            }
+            let of_tenant = self.tenants.entry(tenant.into()).or_default();
+            of_tenant.insert(name.into());
+            if of_tenant.len() > max_tenant {
+                return Err(Invalid::new(
+                    "invalid_service",
+                    format!(
+                        "tenant {tenant} uses {} distinct {kind} names in its servers, at most \
+                         {max_tenant} are allowed",
+                        of_tenant.len()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The distinct host names and SRV owner names the services of one snapshot use, per app and per
+/// tenant, so the compiler can refuse a snapshot that asks for too many.
+#[derive(Debug, Default)]
+pub(crate) struct NameBudget {
+    hosts: Names,
+    srv: Names,
 }
 
 impl NameBudget {
@@ -881,33 +960,34 @@ impl NameBudget {
         app: &str,
         names: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), Invalid> {
-        for name in names {
-            let of_app = self.apps.entry(app.into()).or_default();
-            of_app.insert(name.into());
-            if of_app.len() > MAX_NAMES_PER_APP {
-                return Err(Invalid::new(
-                    "invalid_service",
-                    format!(
-                        "app {app} uses {} distinct DNS names in its servers, at most \
-                         {MAX_NAMES_PER_APP} are allowed",
-                        of_app.len()
-                    ),
-                ));
-            }
-            let of_tenant = self.tenants.entry(tenant.into()).or_default();
-            of_tenant.insert(name.into());
-            if of_tenant.len() > MAX_NAMES_PER_TENANT {
-                return Err(Invalid::new(
-                    "invalid_service",
-                    format!(
-                        "tenant {tenant} uses {} distinct DNS names in its servers, at most \
-                         {MAX_NAMES_PER_TENANT} are allowed",
-                        of_tenant.len()
-                    ),
-                ));
-            }
-        }
-        Ok(())
+        self.hosts.charge(
+            tenant,
+            app,
+            names,
+            "DNS",
+            (MAX_NAMES_PER_APP, MAX_NAMES_PER_TENANT),
+        )
+    }
+
+    /// Counts the SRV owner `names` of a service of `app` of `tenant`.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_service` when the app would use more than [`srv::MAX_NAMES_PER_APP`] distinct
+    /// SRV names or the tenant more than [`srv::MAX_NAMES_PER_TENANT`].
+    pub(crate) fn charge_srv<'a>(
+        &mut self,
+        tenant: &str,
+        app: &str,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Invalid> {
+        self.srv.charge(
+            tenant,
+            app,
+            names,
+            "SRV",
+            (srv::MAX_NAMES_PER_APP, srv::MAX_NAMES_PER_TENANT),
+        )
     }
 }
 

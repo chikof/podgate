@@ -305,6 +305,16 @@ impl Service {
         .flatten()
     }
 
+    /// The distinct SRV owner names the service's servers use, in lower case.
+    pub fn srv_names(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::LoadBalancer(balancer) => Some(balancer.srv_names()),
+            Self::Static(_) | Self::Mirroring(_) | Self::Weighted(_) | Self::Failover(_) => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
     /// Takes the addresses the DNS resolver holds now for the names of the service's servers.
     /// Returns whether its servers changed.
     #[must_use]
