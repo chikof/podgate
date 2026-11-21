@@ -1004,3 +1004,83 @@ async fn dns_same_ip_different_names_never_share_connection() {
             .all(|(_, _, sni)| sni == "one.internal" || sni == "two.internal")
     );
 }
+
+#[tokio::test]
+async fn dns_retry_moves_to_another_address() {
+    // The name answers two addresses; nothing listens on the first one's port, so an attempt
+    // there is refused. The retry reselects among the resolved, checked addresses, excluding
+    // the one tried, and the request is answered by the other.
+    let dns = Dns::start().await;
+    dns.set("flaky.internal", &["127.0.0.2", "127.0.0.1"], 30);
+    let backends = Backends::start(&[("127.0.0.1", "good")]).await;
+    let podgate = start(&resolver_env(&dns), &[]).await;
+    let web = common::with_middleware(
+        named_app("a", "a.test", &[backends.url("flaky.internal")]),
+        "r",
+        "retry",
+        json!({ "attempts": 3, "initial_interval_ms": 1 }),
+    );
+    push(&podgate, &snapshot(1, &[web])).await;
+    eventually("both addresses resolved", 10, async || {
+        bodies(&podgate, "a.test", 1).await == ["good"]
+    })
+    .await;
+
+    // Round robin alternates between the two addresses, so half of these first meet the dead
+    // one; every one is answered.
+    assert_eq!(bodies(&podgate, "a.test", 10).await, vec!["good"; 10]);
+    assert!(backends.hits(0) >= 11);
+}
+#[tokio::test]
+async fn dns_named_mirror_dials_checked_ip() {
+    // The main service is a literal on 127.0.0.3. The mirror target is named by DNS and answers
+    // 127.0.0.2 (allowed) and 127.0.0.1 (denied by the policy): the copy goes to the first, and
+    // the denied address is never dialled, so a mirror cannot reach what a request cannot.
+    let policy = PolicyFile::write(r#"{"deny": ["127.0.0.1/32", "::1/128"]}"#);
+    let main = Backends::start(&[("127.0.0.3", "main")]).await;
+    let shadow = Backends::start(&[("127.0.0.2", "shadow"), ("127.0.0.1", "denied")]).await;
+    let dns = Dns::start().await;
+    dns.set("shadow.internal", &["127.0.0.2", "127.0.0.1"], 30);
+    let podgate = start(
+        &resolver_env(&dns),
+        &[("UPSTREAM_POLICY_FILE", policy.path())],
+    )
+    .await;
+    let mut mirrored = app(
+        "a",
+        &["a.test"],
+        &[json!({
+            "id": "r1", "state": "serving", "weight": 100,
+            "services": [
+                { "name": "web", "type": "loadbalancer",
+                  "servers": [{ "url": format!("http://127.0.0.3:{}", main.port) }] },
+                { "name": "shadow", "type": "loadbalancer",
+                  "servers": [{ "url": shadow.url("shadow.internal") }] },
+                { "name": "m", "type": "mirroring", "service": "web",
+                  "mirrors": [{ "service": "shadow", "percent": 100 }] },
+            ],
+        })],
+    );
+    mirrored["routers"] = json!([common::router(
+        "default",
+        json!({ "host": ["a.test"] }),
+        "m"
+    )]);
+    push(&podgate, &snapshot(1, &[mirrored])).await;
+
+    eventually(
+        "a copy reaches the resolved, allowed address",
+        10,
+        async || {
+            assert_eq!(bodies(&podgate, "a.test", 1).await, ["main"]);
+            shadow.hits(0) >= 1
+        },
+    )
+    .await;
+    for _ in 0..10 {
+        assert_eq!(bodies(&podgate, "a.test", 1).await, ["main"]);
+    }
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(shadow.hits(1), 0, "the denied address was never dialled");
+    assert!(refused_total(&podgate, "t1").await >= 1);
+}

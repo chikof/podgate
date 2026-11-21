@@ -48,6 +48,10 @@ Pooled connections follow the name too: Pingora's reuse hash of a peer covers it
 
 A service whose servers are named and whose algorithm builds a hash ring (`ip_hash`, `uri_hash`, `header_hash`, `hrw`) is charged for the largest ring a service can hold (`MAX_SERVICE_POINTS`, 40 960 points) against the tenant and snapshot ring budgets at compile time, because how many addresses a name has is not known until it resolves. A re-resolution that would build a ring heavier than the service cap is refused: the previous servers stay and a warning is logged. The budgets therefore hold whatever the names resolve to.
 
+## Mirrors and retries
+
+A `mirroring` target that is a load balancer with named servers copies requests to the resolved, policy-checked addresses, as a proxied request goes. A `retry` reselects among the same addresses, excluding the ones already tried.
+
 ## What is not here
 
 `SRV` records (Caddy's `srv` dynamic upstream) are not resolved; they are listed in `docs/parity.md`. The DNS resolution of a name never happens at request time. Traefik resolves on each new connection through the Go dialer without caching; podgate resolves on the TTL and holds the answer.
