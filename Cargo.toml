@@ -89,6 +89,8 @@ wat = "1.263.0"
 zstd = { version = "0.14.4", default-features = false }
 jsonschema = { version = "0.61.2", default-features = false }
 rustix = { version = "1.1.6", features = ["process"] }
+# Certificate validity in the SPIFFE tests (rcgen takes `time` types); already in the lock through rcgen.
+time = "0.3.55"
 
 [workspace.lints.rust]
 unsafe_code = "deny"            # allow per module only with a SAFETY comment and review
@@ -165,3 +167,7 @@ opt-level = 3
 # Drop it once Pingora ships all three.
 [patch.crates-io]
 pingora-proxy = { path = "vendor/pingora-proxy" }
+# `pingora-core` differs from the registry crate by `PeerOptions::server_cert_verifier`, a rustls
+# server certificate verifier a peer brings (SPIFFE upstreams are judged by their URI
+# SAN, which no stock verifier checks). Drop it once Pingora has a verifier hook of its own.
+pingora-core = { path = "vendor/pingora-core" }

@@ -487,7 +487,7 @@ pub(super) fn compile(
             );
         }
     }
-    let transports = transports_of(app);
+    let transports = transports_of(app, context.spiffe());
     let mut services = Vec::with_capacity(tcp.services.len());
     let mut broken: HashSet<&str> = HashSet::new();
     for declared in &tcp.services {
@@ -553,14 +553,14 @@ fn router_config(value: &Value) -> Result<RouterConfig, Invalid> {
 /// The transports of `app`, compiled when a TCP service names one. A transport that does not
 /// compile is replaced by the default one here and refused once, by the compile step of the HTTP
 /// side, which compiles every transport of the app whether or not a service names it.
-fn transports_of(app: &App) -> Vec<NamedTransport> {
+fn transports_of(app: &App, spiffe: &crate::spiffe::Spiffe) -> Vec<NamedTransport> {
     let named = app.tcp.as_ref().is_some_and(|tcp| {
         tcp.services
             .iter()
             .any(|service| service.config.contains_key("transport"))
     });
     if named {
-        crate::compile::transports_of(app, &mut Vec::new())
+        crate::compile::transports_of(app, spiffe, &mut Vec::new())
     } else {
         Vec::new()
     }

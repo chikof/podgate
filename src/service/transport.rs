@@ -27,6 +27,7 @@
 //! | `tunnel_idle_timeout_secs` | 1..=86400. How long a tunnel (an upgraded connection) may be idle; replaces the read timeouts after the `101`. Default: unlimited. |
 //! | `max_stream_lifetime_secs` | 1..=86400. The longest a tunnel lives. Default: unlimited. |
 //! | `stream_close_delay_secs` | 1..=86400. How long a tunnel lives on after a snapshot left its server out of the table. Default: unlimited. |
+//! | `spiffe` | `{"ids": [...], "trust_domain": "..."}`: mutual TLS by SPIFFE identity. The tenant's own SVID is the client certificate; the server must chain to the trust domain's bundle and carry one of `ids` (patterns allowed) in its URI SAN; the DNS name is not checked. The operator's SPIFFE policy must allow the tenant. Replaces `ca_pem`, `client_cert` and `insecure_skip_verify`, and cannot be combined with `proxy_protocol`. HTTP/2 is offered as for any `https://` server. See `docs/ref/spiffe.md`. |
 //! | `max_idle_per_host` | Always `unsupported_setting`: Pingora's pool is one LRU for the whole process, see `UPSTREAM_POOL_SIZE`. |
 //!
 //! A `https://` server with no transport uses [`Transport::default`]: platform roots, URL host as
@@ -63,6 +64,7 @@ use sha2::{Digest, Sha256};
 
 use super::Server;
 use crate::compile::Invalid;
+use crate::spiffe::{Binding, Spiffe};
 use podgate_model::Declared;
 
 pub mod extras;
@@ -136,6 +138,10 @@ pub(super) struct Config {
     /// `UPSTREAM_POOL_SIZE` setting.
     #[serde(default)]
     max_idle_per_host: Option<Value>,
+    /// Mutual TLS by SPIFFE identity: `{"ids": [...], "trust_domain": "..."}`. Needs the
+    /// operator's SPIFFE policy to allow the tenant.
+    #[serde(default)]
+    spiffe: Option<crate::spiffe::UpstreamConfig>,
 }
 
 /// What a transport sets about the connection rather than its TLS: the HTTP version and the
@@ -174,6 +180,7 @@ pub struct Transport {
     server_name: Option<Box<str>>,
     ca: Option<Arc<[WrappedX509]>>,
     client_cert: Option<Arc<CertKey>>,
+    spiffe: Option<Binding>,
     insecure_skip_verify: bool,
     min_tls_version: Option<&'static str>,
     wire: Wire,
@@ -224,6 +231,9 @@ pub struct Summary<'a> {
     /// The PROXY protocol and tunnel settings, when the transport sets any.
     #[serde(flatten)]
     pub extras: extras::Summary,
+    /// The SPIFFE trust domain and IDs the server is verified by, when the transport has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spiffe: Option<crate::spiffe::Summary>,
 }
 
 /// One server of a service together with the transport that reaches it.
@@ -245,6 +255,23 @@ impl Transport {
     /// with `insecure_skip_verify`, or a timeout outside 1..=3600 seconds;
     /// `unsupported_setting` for `min_tls_version: "1.3"` and for `max_idle_per_host`.
     pub fn compile(declared: &Declared) -> Result<Self, Invalid> {
+        Self::compile_for(declared, None)
+    }
+
+    /// [`Self::compile`] for a transport of an app of tenant `spiffe.1`, which may use the
+    /// `spiffe` object under the process's SPIFFE policy `spiffe.0`. Without it a transport with
+    /// `spiffe` is refused with `unsupported_setting`: only the transports of services can bind
+    /// to a tenant's identity.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::compile`]; `spiffe_not_allowed` and `spiffe_server_id_not_allowed` from
+    /// the policy; `invalid_transport` when `spiffe` is combined with `ca_pem`, `client_cert`,
+    /// `insecure_skip_verify` or `proxy_protocol`.
+    pub fn compile_for(
+        declared: &Declared,
+        spiffe: Option<(&Spiffe, &str)>,
+    ) -> Result<Self, Invalid> {
         let invalid = |message: String| Invalid::new("invalid_transport", message);
         if &*declared.kind != KIND {
             return Err(invalid(format!(
@@ -302,6 +329,28 @@ impl Transport {
                 "ca_pem has no effect with insecure_skip_verify, drop one of them".to_owned(),
             ));
         }
+        let spiffe = match (&config.spiffe, spiffe) {
+            (None, _) => None,
+            (Some(_), None) => {
+                return Err(Invalid::new(
+                    "unsupported_setting",
+                    "spiffe is only available on the transport of a service",
+                ));
+            }
+            (Some(object), Some((process, tenant))) => {
+                if config.ca_pem.is_some()
+                    || config.insecure_skip_verify
+                    || client.is_some()
+                    || config.proxy_protocol.is_some()
+                {
+                    return Err(invalid(
+                        "spiffe replaces ca_pem, client_cert and insecure_skip_verify and cannot be combined with proxy_protocol"
+                            .to_owned(),
+                    ));
+                }
+                Some(process.bind_upstream(tenant, object)?)
+            }
+        };
         let wire = Wire {
             http2: config.http2,
             dial: seconds("dial_timeout_secs", config.dial_timeout_secs)?,
@@ -336,6 +385,10 @@ impl Transport {
             wire,
             extras,
         );
+        let fingerprint = match &spiffe {
+            Some(binding) => mix_spiffe(fingerprint, &binding.summary()),
+            None => fingerprint,
+        };
         let client_cert = pems
             .map(|(cert, key)| load_client_cert(&cert, &key))
             .transpose()
@@ -348,6 +401,7 @@ impl Transport {
             min_tls_version,
             wire,
             extras,
+            spiffe,
             fingerprint,
         })
     }
@@ -367,6 +421,15 @@ impl Transport {
             || self.client_cert.is_some()
             || self.insecure_skip_verify
             || self.min_tls_version.is_some()
+            || self.spiffe.is_some()
+    }
+
+    /// The SPIFFE ID patterns the transport verifies servers by; empty without `spiffe`.
+    #[must_use]
+    pub fn spiffe_trust(&self) -> Vec<String> {
+        self.spiffe
+            .as_ref()
+            .map_or_else(Vec::new, |binding| binding.summary().ids)
     }
 
     /// Whether the transport connects without verifying the server's certificate.
@@ -410,6 +473,7 @@ impl Transport {
             write_timeout_secs: secs(self.wire.write),
             idle_timeout_secs: secs(self.wire.idle),
             extras: self.extras.summary(),
+            spiffe: self.spiffe.as_ref().map(Binding::summary),
         }
     }
 
@@ -432,7 +496,9 @@ impl Transport {
     #[must_use]
     pub fn tcp_refusal(&self) -> Option<&'static str> {
         let wire = &self.wire;
-        if self.extras.is_set() {
+        if self.spiffe.is_some() {
+            Some("spiffe")
+        } else if self.extras.is_set() {
             Some("proxy_protocol and the tunnel limits")
         } else if wire.http2.is_some() {
             Some("http2")
@@ -465,6 +531,7 @@ impl Default for Transport {
             server_name: None,
             ca: None,
             client_cert: None,
+            spiffe: None,
             insecure_skip_verify: false,
             min_tls_version: None,
             wire,
@@ -484,6 +551,7 @@ impl fmt::Debug for Transport {
             .field("min_tls_version", &self.min_tls_version)
             .field("wire", &self.wire)
             .field("extras", &self.extras)
+            .field("spiffe", &self.spiffe)
             .field("fingerprint", &self.fingerprint)
             .finish()
     }
@@ -532,6 +600,9 @@ impl Upstream<'_> {
         }
         peer.options.ca.clone_from(&self.transport.ca);
         peer.client_cert_key.clone_from(&self.transport.client_cert);
+        if let Some(spiffe) = &self.transport.spiffe {
+            spiffe.apply(&mut peer);
+        }
         peer
     }
 
@@ -577,12 +648,25 @@ impl Upstream<'_> {
         self.transport.extras
     }
 
-    /// What the connection pool keys on besides who asks: the transport, and whether the
-    /// connection is TLS or `h2c`, so plain, TLS and HTTP/2 prior-knowledge connections never
-    /// mix.
+    /// The pool key of the connection `peer` makes, which [`Upstream::http_peer`] built: the
+    /// transport, whether the connection is TLS or `h2c`, so plain, TLS and HTTP/2
+    /// prior-knowledge connections never mix, and, for a SPIFFE transport, the identity and
+    /// bundle the peer carries, so a connection made with a rotated SVID is a new one. It is
+    /// read from the peer, not from the store again, so the key and the connection cannot
+    /// disagree.
     #[must_use]
-    pub fn pool_key(self) -> u64 {
-        crate::compile::hash_of(&(self.transport.fingerprint, self.server.tls, self.server.h2c))
+    pub fn pool_key(self, peer: &HttpPeer) -> u64 {
+        let identity = self
+            .transport
+            .spiffe
+            .as_ref()
+            .map(|_| crate::spiffe::peer_identity(peer));
+        crate::compile::hash_of(&(
+            self.transport.fingerprint,
+            self.server.tls,
+            self.server.h2c,
+            identity,
+        ))
     }
 }
 
@@ -687,6 +771,21 @@ fn seconds(name: &str, value: Option<u64>) -> Result<Option<Duration>, Invalid> 
             format!("{name} must be between 1 and {MAX_TIMEOUT_SECS} seconds"),
         )),
     }
+}
+
+/// Mixes the SPIFFE trust domain and IDs of a transport into its `fingerprint`: they are part of
+/// what a connection is allowed to be, so two transports that differ in them never share one.
+fn mix_spiffe(fingerprint: u64, spiffe: &crate::spiffe::Summary) -> u64 {
+    let mut hash = Sha256::new();
+    hash.update(fingerprint.to_le_bytes());
+    for text in std::iter::once(&*spiffe.trust_domain).chain(spiffe.ids.iter().map(String::as_str))
+    {
+        hash.update((text.len() as u64).to_le_bytes());
+        hash.update(text.as_bytes());
+    }
+    let mut head = [0_u8; 8];
+    head.copy_from_slice(&hash.finalize()[..8]);
+    u64::from_le_bytes(head)
 }
 
 /// Hashes every field, each with a presence flag and a length, so no two configurations collide
@@ -951,8 +1050,10 @@ mod test {
         let (ta, tb) = (with_cert(&a), with_cert(&b));
         let plain = server("http://127.0.0.1:9000", false);
         let tls = server("https://127.0.0.1:9000", true);
-        let key =
-            |server: &Server, transport: &Transport| Upstream { server, transport }.pool_key();
+        let key = |server: &Server, transport: &Transport| {
+            let upstream = Upstream { server, transport };
+            upstream.pool_key(&upstream.http_peer(Duration::from_secs(30)))
+        };
         assert_eq!(key(&tls, &ta), key(&tls, &ta));
         assert_ne!(key(&tls, &ta), key(&plain, &ta), "TLS and plain never mix");
         assert_ne!(key(&tls, &ta), key(&tls, &tb), "other client certificate");
@@ -1085,8 +1186,10 @@ mod test {
 
     #[test]
     fn pool_key_separates_h2c_from_plain_and_every_wire_setting() {
-        let key =
-            |server: &Server, transport: &Transport| Upstream { server, transport }.pool_key();
+        let key = |server: &Server, transport: &Transport| {
+            let upstream = Upstream { server, transport };
+            upstream.pool_key(&upstream.http_peer(Duration::from_secs(30)))
+        };
         let plain = server("http://127.0.0.1:9000", false);
         let default = Transport::default();
         assert_ne!(key(&plain, &default), key(&h2c_server(), &default));

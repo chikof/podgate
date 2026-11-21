@@ -615,6 +615,17 @@ impl CompiledApp {
             .collect()
     }
 
+    /// The SPIFFE ID patterns, with their trust domains, that the app's services verify their
+    /// servers by: what a plan compares to list added trust.
+    #[must_use]
+    pub fn spiffe_trust(&self) -> BTreeSet<String> {
+        self.services
+            .iter()
+            .chain(self.revisions.iter().flat_map(|rev| rev.services.iter()))
+            .flat_map(|named| named.service.spiffe_trust())
+            .collect()
+    }
+
     /// The names of the TCP services that connect to a `tls: true` server without
     /// verifying its certificate: [`Self::unverified_services`] for layer 4.
     #[must_use]

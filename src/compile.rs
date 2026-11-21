@@ -220,7 +220,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     let mut client_auth = Vec::with_capacity(snapshot.apps.len());
     let mut bad_cas = Vec::new();
     for app in &snapshot.apps {
-        match ClientAuth::compile(app) {
+        match ClientAuth::compile(app, context.spiffe()) {
             Ok(compiled) => client_auth.push(compiled),
             Err(rejection) => bad_cas.push(rejection),
         }
@@ -299,7 +299,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                 ));
             }
         }
-        let transports = transports_of(app, &mut rejected);
+        let transports = transports_of(app, context.spiffe(), &mut rejected);
         let services = services_of(
             app,
             app_routers,
@@ -862,18 +862,23 @@ fn expand_name<'a>(
 /// is refused whether or not it is used. A bad one keeps its name with a placeholder, so the
 /// services naming it do not add an `unknown_transport` to the one real problem; the snapshot is
 /// refused, so the placeholder is never used.
-pub(crate) fn transports_of(app: &App, rejected: &mut Vec<Rejected>) -> Vec<NamedTransport> {
+pub(crate) fn transports_of(
+    app: &App,
+    spiffe: &crate::spiffe::Spiffe,
+    rejected: &mut Vec<Rejected>,
+) -> Vec<NamedTransport> {
     app.transports
         .iter()
         .map(|declared| {
-            let transport = Transport::compile(declared).unwrap_or_else(|invalid| {
-                rejected.push(Rejected::new(
-                    app,
-                    format!("transport {}", declared.name),
-                    invalid,
-                ));
-                Transport::default()
-            });
+            let transport = Transport::compile_for(declared, Some((spiffe, &app.tenant)))
+                .unwrap_or_else(|invalid| {
+                    rejected.push(Rejected::new(
+                        app,
+                        format!("transport {}", declared.name),
+                        invalid,
+                    ));
+                    Transport::default()
+                });
             NamedTransport {
                 name: declared.name.clone(),
                 transport: Arc::new(transport),

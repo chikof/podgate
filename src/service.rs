@@ -461,6 +461,20 @@ impl Service {
         }
     }
 
+    /// The SPIFFE ID patterns the service verifies its servers by; empty without a SPIFFE
+    /// transport.
+    #[must_use]
+    pub fn spiffe_trust(&self) -> Vec<String> {
+        match self {
+            Self::LoadBalancer(balancer) => balancer.spiffe_trust(),
+            Self::Static(_)
+            | Self::Fastcgi(_)
+            | Self::Mirroring(_)
+            | Self::Weighted(_)
+            | Self::Failover(_) => Vec::new(),
+        }
+    }
+
     /// Why this service cannot carry gRPC, which needs HTTP/2 to the upstream; `None` when it
     /// can. A `weighted` or `failover` service has no server of its own and answers `None` here:
     /// `graph::http2_refusal` asks every service reachable below it, and names the one that

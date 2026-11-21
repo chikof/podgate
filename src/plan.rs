@@ -136,6 +136,7 @@ fn relaxations(live: &CompiledApp, candidate: &CompiledApp) -> Vec<&'static str>
         kinds.push(kind::UPSTREAM_TLS_VERIFICATION_DISABLED);
     }
     kinds.extend(crate::service::mirroring::relaxations(live, candidate));
+    kinds.extend(crate::spiffe::relaxations(live, candidate));
     let used_now = used_stages(candidate);
     for index in used_stages(live) {
         let Some(old) = live.stages().get(index) else {

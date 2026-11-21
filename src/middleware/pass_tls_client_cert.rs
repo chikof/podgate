@@ -287,9 +287,9 @@ impl Kind for PassTlsClientCert {
                 "selects nothing: set pem or at least one field of info",
             ));
         }
-        if cx.app.tls.client_ca_pem.is_none() {
+        if cx.app.tls.client_ca_pem.is_none() && cx.app.tls.spiffe_client.is_none() {
             return Err(invalid(
-                "the app verifies no client certificate: set tls.client_ca_pem and a tls.client_auth that verifies (verify_if_given or require_and_verify)",
+                "the app verifies no client certificate: set tls.client_ca_pem (or tls.spiffe_client) and a tls.client_auth that verifies (verify_if_given or require_and_verify)",
             ));
         }
         Ok(Self { config })

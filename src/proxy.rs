@@ -635,6 +635,7 @@ impl ProxyHttp for Gateway {
         }
         // Whatever the route: no client-supplied certificate header ever reaches an upstream.
         middleware::pass_tls_client_cert::strip(session.req_header_mut());
+        crate::spiffe::strip(session.req_header_mut());
         ctx.forwarded = match &inherited {
             Some(inherited) => inherited.forwarded.clone(),
             None => ForwardedView::of(session, tls, ctx.table.forwarded_trust(&ctx.entry_point)),
@@ -680,6 +681,9 @@ impl ProxyHttp for Gateway {
         {
             respond::write_error(session, &err).await?;
             return Ok(true);
+        }
+        if inherited.is_none() {
+            clientauth::forward_spiffe_id(session, &ctx.table, found)?;
         }
         let Some(mut matched) = found else {
             respond::write_error(session, &AppError::from(RouteError::NoRoute)).await?;
@@ -1104,11 +1108,9 @@ impl ProxyHttp for Gateway {
         // The servers of a name follow its DNS answers: the one picked may have just left.
         let (mut peer, pool_key, extras) = service
             .with_upstream(selected.upstream, |upstream| {
-                (
-                    upstream.http_peer(self.upstream_timeout),
-                    upstream.pool_key(),
-                    upstream.extras(),
-                )
+                let peer = upstream.http_peer(self.upstream_timeout);
+                let key = upstream.pool_key(&peer);
+                (peer, key, upstream.extras())
             })
             .ok_or_else(|| {
                 Error::explain(HTTPStatus(503), "the upstream server left its service")

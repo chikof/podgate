@@ -666,6 +666,12 @@ impl LoadBalancer {
         self.transport.insecure_skip_verify() && self.entries.iter().any(|entry| entry.tls)
     }
 
+    /// The SPIFFE ID patterns the service's transport verifies its servers by, one string each.
+    #[must_use]
+    pub fn spiffe_trust(&self) -> Vec<String> {
+        self.transport.spiffe_trust()
+    }
+
     /// How the service can take `cx`: `Ready` when some server that has a weight is allowed,
     /// `Asleep` when it declares no server at all, `Down` when it declares servers and none may
     /// take the request. A server named by DNS whose name has no address yet is declared: the

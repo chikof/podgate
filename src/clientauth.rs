@@ -53,6 +53,7 @@ use thiserror::Error;
 use crate::error::AppError;
 use crate::router::Matched;
 use crate::sni;
+use crate::spiffe::{ClientRule, Spiffe, SpiffeId, Store};
 use crate::table::{CompiledApp, RoutingTable};
 use podgate_model::{App, ClientAuthMode};
 
@@ -115,12 +116,14 @@ pub(crate) fn join(rejections: &[Rejection]) -> String {
 }
 
 /// The compiled client authentication of one app: whether clients are asked for a certificate,
-/// and the CA that judges the chains they send.
+/// and what judges the chains they send: a CA, or the live bundle of a SPIFFE trust domain.
 #[derive(Debug)]
 pub struct ClientAuth {
     mode: ClientAuthMode,
-    /// Present for the modes that judge the chain.
+    /// Present for the modes that judge the chain against a CA.
     verifier: Option<Arc<dyn ClientCertVerifier>>,
+    /// Present when the clients are SPIFFE SVIDs (`tls.spiffe_client`).
+    spiffe: Option<(ClientRule, Arc<Store>)>,
 }
 
 impl ClientAuth {
@@ -132,8 +135,11 @@ impl ClientAuth {
     /// [`Rejection`] when the PEM holds no certificate, a block that is not one, or a
     /// certificate that cannot be a trust anchor; when a mode that judges the chain has no CA
     /// or a mode that does not has one.
-    pub fn compile(app: &App) -> Result<Option<Arc<Self>>, Rejection> {
+    pub fn compile(app: &App, spiffe: &Spiffe) -> Result<Option<Arc<Self>>, Rejection> {
         let tls = &app.tls;
+        if let Some(config) = &tls.spiffe_client {
+            return Self::compile_spiffe(app, config, spiffe);
+        }
         let mode = match (tls.client_auth, &tls.client_ca_pem) {
             (None, None) => return Ok(None),
             (None, Some(_)) => ClientAuthMode::RequireAndVerify,
@@ -172,7 +178,11 @@ impl ClientAuth {
                     .map_err(|reason| reject("invalid_client_ca", "tls.client_ca_pem", reason))?,
             ),
         };
-        Ok(Some(Arc::new(Self { mode, verifier })))
+        Ok(Some(Arc::new(Self {
+            mode,
+            verifier,
+            spiffe: None,
+        })))
     }
 
     /// How clients are asked for a certificate.
@@ -184,11 +194,21 @@ impl ClientAuth {
     /// Whether this mode judges the chain a client sends (`verify_if_given`,
     /// `require_and_verify`): only then is a certificate that got through verified.
     fn judges(&self) -> bool {
-        self.verifier.is_some()
+        self.verifier.is_some() || self.spiffe.is_some()
     }
 
-    /// Whether `chain` (leaf first) is valid now and signed by this CA.
+    /// The `tls.spiffe_client` rule, when this app verifies clients as SPIFFE SVIDs.
+    #[must_use]
+    pub fn spiffe_rule(&self) -> Option<&ClientRule> {
+        self.spiffe.as_ref().map(|(rule, _)| rule)
+    }
+
+    /// Whether `chain` (leaf first) is valid now and signed by this CA, or, for a SPIFFE app,
+    /// chains to the live bundle and carries an allowed SPIFFE ID.
     fn accepts(&self, chain: &[CertificateDer<'_>]) -> bool {
+        if let Some((rule, store)) = &self.spiffe {
+            return rule.verify(store, chain, UnixTime::now()).is_some();
+        }
         let (Some((leaf, intermediates)), Some(verifier)) = (chain.split_first(), &self.verifier)
         else {
             return false;
@@ -196,6 +216,51 @@ impl ClientAuth {
         verifier
             .verify_client_cert(leaf, intermediates, UnixTime::now())
             .is_ok()
+    }
+
+    /// Compiles `tls.spiffe_client`: the clients are SPIFFE SVIDs of a trust domain whose bundle
+    /// is read live from the agent. Only `verify_if_given` and `require_and_verify` judge, and
+    /// there is no CA to combine it with.
+    fn compile_spiffe(
+        app: &App,
+        config: &podgate_model::SpiffeClient,
+        spiffe: &Spiffe,
+    ) -> Result<Option<Arc<Self>>, Rejection> {
+        let reject = |code, reason: String| Rejection {
+            app: app.id.clone(),
+            declared_by: app.declared_by.clone(),
+            code,
+            field: "tls.spiffe_client",
+            reason: reason.into(),
+        };
+        if app.tls.client_ca_pem.is_some() {
+            return Err(reject(
+                "invalid_client_auth",
+                "tls.spiffe_client and tls.client_ca_pem exclude each other".into(),
+            ));
+        }
+        let mode = app
+            .tls
+            .client_auth
+            .unwrap_or(ClientAuthMode::RequireAndVerify);
+        if !matches!(
+            mode,
+            ClientAuthMode::VerifyIfGiven | ClientAuthMode::RequireAndVerify
+        ) {
+            return Err(reject(
+                "invalid_client_auth",
+                "tls.spiffe_client judges the chain: use verify_if_given or require_and_verify"
+                    .into(),
+            ));
+        }
+        let bound = spiffe
+            .bind_client(&app.tenant, config)
+            .map_err(|invalid| reject(invalid.code, invalid.message))?;
+        Ok(Some(Arc::new(Self {
+            mode,
+            verifier: None,
+            spiffe: Some(bound),
+        })))
     }
 }
 
@@ -332,6 +397,40 @@ pub(crate) fn verified_chain<'a>(
     (auth.judges() && chain.satisfies(auth)).then_some(chain.certs.as_slice())
 }
 
+/// The SPIFFE ID of the client of `session`, when `app` verifies clients with
+/// `tls.spiffe_client` and its live bundle accepts the certificate the connection presented.
+pub(crate) fn spiffe_id(session: &Session, app: &CompiledApp) -> Option<SpiffeId> {
+    let auth = app.client_auth()?;
+    auth.spiffe_rule()?;
+    let chain = sni::client_chain(session)?;
+    if !chain.satisfies(auth) {
+        return None;
+    }
+    crate::spiffe::svid::id_of_der(chain.certs.first()?.as_ref())
+}
+
+/// Writes `x-forwarded-tls-client-spiffe-id` for the verified client of the matched app. The
+/// header was stripped from the request earlier, so this is the only way it gets there.
+///
+/// # Errors
+///
+/// Fails only when the ID cannot be a header value, which a parsed SPIFFE ID never is.
+pub(crate) fn forward_spiffe_id(
+    session: &mut Session,
+    table: &RoutingTable,
+    matched: Option<Matched>,
+) -> pingora::Result<()> {
+    let Some(app) = matched.and_then(|matched| table.app(matched.app)) else {
+        return Ok(());
+    };
+    if let Some(id) = spiffe_id(session, app) {
+        session
+            .req_header_mut()
+            .insert_header(crate::spiffe::CLIENT_ID_HEADER, id.to_string())?;
+    }
+    Ok(())
+}
+
 /// The listener's client certificate verifier: requests a certificate only when the resolver
 /// said the SNI needs one (see the module docs) and proves possession of the key, not the chain.
 #[derive(Debug)]
@@ -449,7 +548,7 @@ mod test {
     #[test]
     fn no_ca_means_no_client_auth() {
         assert!(
-            ClientAuth::compile(&app_with(None))
+            ClientAuth::compile(&app_with(None), &Spiffe::default())
                 .expect("compiles")
                 .is_none()
         );
@@ -459,7 +558,7 @@ mod test {
     fn accepts_only_chains_signed_by_its_ca() {
         let (pem, chain) = test_ca("mine");
         let (_, stranger) = test_ca("other");
-        let auth = ClientAuth::compile(&app_with(Some(&pem)))
+        let auth = ClientAuth::compile(&app_with(Some(&pem)), &Spiffe::default())
             .expect("compiles")
             .expect("has a CA");
         assert!(auth.accepts(&chain));
@@ -474,7 +573,7 @@ mod test {
             "not a pem",
             "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
         ] {
-            let err = ClientAuth::compile(&app_with(Some(bad))).expect_err(bad);
+            let err = ClientAuth::compile(&app_with(Some(bad)), &Spiffe::default()).expect_err(bad);
             assert_eq!(&*err.app, "a");
         }
     }

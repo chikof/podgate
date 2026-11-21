@@ -14,6 +14,7 @@
 //! - [`client_ip`]: who the client is behind trusted proxies, the forged forwarding headers dropped, and the `client_ip` matcher's address.
 //! - [`clientauth`]: client certificates per app (`tls.client_ca_pem`), asked for by SNI and checked per request.
 //! - [`pool`]: upstream connection pool isolation per tenant, app and revision, and NTLM pinning.
+//! - [`spiffe`]: SPIFFE workload identity: SVIDs from a Workload API agent, one per tenant, for upstream mutual TLS and client identity.
 //! - [`skew`]: the signed cookie that keeps a browser session on the revision that first served it.
 //! - [`Gateway`]: the Pingora `ProxyHttp` implementation.
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
@@ -82,6 +83,7 @@ pub mod router;
 pub mod service;
 pub mod skew;
 pub mod sni;
+pub mod spiffe;
 pub mod table;
 pub mod tls;
 pub mod wake;
@@ -136,6 +138,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let static_roots = config.static_roots()?;
     let fastcgi = config.fastcgi()?;
     let rate_limit_stores = config.rate_limit_stores()?;
+    let spiffe = config.spiffe()?;
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -147,7 +150,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_static_roots(static_roots)
             .with_fastcgi(fastcgi)
             .with_rate_limit_stores(rate_limit_stores.clone())
-            .with_resolver(resolver.clone()),
+            .with_resolver(resolver.clone())
+            .with_spiffe(spiffe.clone()),
     )
     .with_metrics(observe::metrics::Registry::new(
         config.metrics_series_per_tenant,
@@ -343,6 +347,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         ));
     }
     server.add_service(background_service("acme issuer", acme));
+    if let Some(service) = spiffe.service() {
+        server.add_service(background_service("spiffe workload api", service));
+    }
     server.add_service(background_service(
         "access log",
         access_log.service(access_sink),

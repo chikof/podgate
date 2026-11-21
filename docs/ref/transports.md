@@ -48,6 +48,7 @@ never ignored.
 | `tunnel_idle_timeout_secs` | 1..=86400. Idle time of a tunnel; replaces `read_timeout_secs` after the `101`. Default: unlimited. See `docs/ref/transport-extras.md`. |
 | `max_stream_lifetime_secs` | 1..=86400. Longest life of a tunnel. Default: unlimited. |
 | `stream_close_delay_secs` | 1..=86400. Life of a tunnel after a snapshot removed its server. Default: unlimited. |
+| `spiffe` | `{"ids": [...], "trust_domain": "..."}`: mutual TLS by SPIFFE identity; the tenant's own SVID is the client certificate and the server is verified by bundle and URI SAN. See `docs/ref/spiffe.md`. |
 | `max_idle_per_host` | Refused with `unsupported_setting`, whatever the value. See `Connection pool`. |
 
 ## Defaults

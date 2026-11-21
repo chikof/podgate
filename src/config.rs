@@ -18,6 +18,7 @@ use crate::service::health;
 use crate::service::resolve;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{FastcgiRoots, StaticRoots};
+use crate::spiffe::{Policy as SpiffePolicy, Spiffe};
 use podgate_model::TlsVersion;
 
 /// Most WASM filter runs that may execute at once: half of tokio's 512-thread blocking pool, so
@@ -84,6 +85,8 @@ const _: () =
 /// | `HEALTH_MAX_CONCURRENT` | `64` | Active health probes in flight at once across all tenants, 1..=4096. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
+/// | `SPIFFE_ENDPOINT_SOCKET` | unset | The SPIFFE Workload API agent's unix socket (`/run/spire/sockets/agent.sock` or `unix:///...`). Needs `SPIFFE_POLICY_FILE`. Unset: no SPIFFE. |
+/// | `SPIFFE_POLICY_FILE` | unset | JSON file with the SPIFFE policy: per tenant its SVID hint, the server IDs it may talk to, the client trust domains it may verify. Needs `SPIFFE_ENDPOINT_SOCKET`. |
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
 /// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
 /// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
@@ -158,6 +161,12 @@ pub struct Config {
     /// File with the upstream address policy. Absent: the built-in deny list. Read once at
     /// startup by [`Config::upstream_policy`].
     pub upstream_policy_file: Option<PathBuf>,
+    /// Unix socket of the SPIFFE Workload API agent (`unix://` prefix accepted). Absent: no
+    /// SPIFFE. Needs [`Config::spiffe_policy_file`].
+    pub spiffe_endpoint_socket: Option<PathBuf>,
+    /// File with the SPIFFE policy: which identity each tenant uses and which it may talk to.
+    /// Read once at startup by [`Config::spiffe`].
+    pub spiffe_policy_file: Option<PathBuf>,
     /// File the access log is appended to. Absent: standard output.
     pub access_log_file: Option<PathBuf>,
     /// TCP address of the read-only metrics listener (`GET /metrics` and nothing else). Absent:
@@ -221,6 +230,8 @@ impl Default for Config {
             acme_dns_zones: Vec::new(),
             catch_all_tenants: Vec::new(),
             upstream_policy_file: None,
+            spiffe_endpoint_socket: None,
+            spiffe_policy_file: None,
             access_log_file: None,
             metrics_addr: None,
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
@@ -378,6 +389,35 @@ impl Config {
             Some(path) => UpstreamPolicy::load(path).map_err(|err| ConfigError {
                 var: "UPSTREAM_POLICY_FILE",
                 reason: format!("{}: {err}", path.display()).into(),
+            }),
+        }
+    }
+
+    /// The process's SPIFFE configuration: the Workload API socket and the policy file. Off
+    /// when neither is set.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] when only one of `SPIFFE_ENDPOINT_SOCKET` and `SPIFFE_POLICY_FILE` is
+    /// set (a socket with no policy lets no tenant use an identity, a policy with no socket has
+    /// none to hand out), or the policy file cannot be read or is invalid.
+    pub fn spiffe(&self) -> Result<Spiffe, ConfigError> {
+        match (&self.spiffe_endpoint_socket, &self.spiffe_policy_file) {
+            (None, None) => Ok(Spiffe::default()),
+            (Some(socket), Some(file)) => {
+                let policy = SpiffePolicy::load(file).map_err(|err| ConfigError {
+                    var: "SPIFFE_POLICY_FILE",
+                    reason: format!("{}: {err}", file.display()).into(),
+                })?;
+                Ok(Spiffe::new(socket.clone(), policy))
+            }
+            (Some(_), None) => Err(ConfigError {
+                var: "SPIFFE_POLICY_FILE",
+                reason: "is required with SPIFFE_ENDPOINT_SOCKET".into(),
+            }),
+            (None, Some(_)) => Err(ConfigError {
+                var: "SPIFFE_ENDPOINT_SOCKET",
+                reason: "is required with SPIFFE_POLICY_FILE".into(),
             }),
         }
     }
@@ -601,6 +641,9 @@ impl Config {
                 })?;
         }
         config.upstream_policy_file = non_empty("UPSTREAM_POLICY_FILE")?.map(PathBuf::from);
+        config.spiffe_endpoint_socket = non_empty("SPIFFE_ENDPOINT_SOCKET")?
+            .map(|raw| PathBuf::from(raw.strip_prefix("unix://").unwrap_or(&raw)));
+        config.spiffe_policy_file = non_empty("SPIFFE_POLICY_FILE")?.map(PathBuf::from);
         config.access_log_file = non_empty("ACCESS_LOG_FILE")?.map(PathBuf::from);
         if let Some(raw) = non_empty("METRICS_ADDR")? {
             config.metrics_addr = Some(parse_addr("METRICS_ADDR", &raw)?);
@@ -706,6 +749,11 @@ mod test {
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
             ("UPSTREAM_POLICY_FILE", "/etc/podgate/upstream-policy.json"),
+            (
+                "SPIFFE_ENDPOINT_SOCKET",
+                "unix:///run/spire/sockets/agent.sock",
+            ),
+            ("SPIFFE_POLICY_FILE", "/etc/podgate/spiffe-policy.json"),
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
             ("METRICS_ADDR", "127.0.0.1:9100"),
             ("METRICS_SERIES_PER_TENANT", "50"),
@@ -757,6 +805,8 @@ mod test {
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
                 upstream_policy_file: Some(PathBuf::from("/etc/podgate/upstream-policy.json")),
+                spiffe_endpoint_socket: Some(PathBuf::from("/run/spire/sockets/agent.sock")),
+                spiffe_policy_file: Some(PathBuf::from("/etc/podgate/spiffe-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 tls_min_version: TlsVersion::V1_3,
                 otel: ExportConfig::default(),
@@ -828,6 +878,8 @@ mod test {
             ("ACME_DNS_ZONES", "*.example.com"),
             ("ACME_DNS_ZONES", "a b"),
             ("UPSTREAM_POLICY_FILE", " "),
+            ("SPIFFE_ENDPOINT_SOCKET", " "),
+            ("SPIFFE_POLICY_FILE", " "),
             ("ACCESS_LOG_FILE", " "),
             ("METRICS_ADDR", "nope"),
             ("METRICS_ADDR", " "),

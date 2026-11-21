@@ -336,6 +336,11 @@ pub struct TlsPolicy {
     /// Not enforceable per app: the compiler rejects it with `unsupported_setting`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tickets: Option<bool>,
+    /// Verify client certificates as SPIFFE X.509-SVIDs: against the live bundle of a
+    /// trust domain, by SPIFFE ID. Only for a tenant the operator's SPIFFE policy allows
+    /// `client_identity`. Excludes `client_ca_pem`. Absent: no SPIFFE client verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spiffe_client: Option<SpiffeClient>,
     /// Whether HTTP/3 may serve this app. Absent: yes, unless the app has a
     /// `client_ca_pem` or `client_auth`, `cipher_suites`, or an `alpn` without `h2`, which HTTP/3
     /// cannot honour. `true` together with one of those is rejected with `unsupported_setting`.
@@ -369,7 +374,20 @@ impl TlsPolicy {
             && self.sni_strict == other.sni_strict
             && self.session_tickets == other.session_tickets
             && self.http3 == other.http3
+            && self.spiffe_client == other.spiffe_client
     }
+}
+
+/// `tls.spiffe_client`: clients are judged as SPIFFE X.509-SVIDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SpiffeClient {
+    /// The trust domain whose live bundle a client certificate must chain to.
+    pub trust_domain: String,
+    /// SPIFFE IDs, or patterns (`*` for one path segment, a final `**` for one or more), of which
+    /// a client certificate must carry one. All are in `trust_domain`.
+    pub allowed_ids: Vec<String>,
 }
 
 /// A TLS protocol version.

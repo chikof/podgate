@@ -280,6 +280,7 @@ pub struct CompileContext {
     proxy_header: Option<Vec<Box<str>>>,
     resolver: Resolver,
     rate_limit_stores: crate::ratelimit_store::Stores,
+    spiffe: crate::spiffe::Spiffe,
 }
 
 impl Default for CompileContext {
@@ -309,6 +310,7 @@ impl CompileContext {
             proxy_header: None,
             resolver: Resolver::default(),
             rate_limit_stores: crate::ratelimit_store::Stores::default(),
+            spiffe: crate::spiffe::Spiffe::default(),
         }
     }
 
@@ -454,6 +456,20 @@ impl CompileContext {
     #[must_use]
     pub fn rate_limit_stores(&self) -> &crate::ratelimit_store::Stores {
         &self.rate_limit_stores
+    }
+
+    /// Sets the process's SPIFFE configuration (`SPIFFE_ENDPOINT_SOCKET`, `SPIFFE_POLICY_FILE`);
+    /// without one every `spiffe` and `tls.spiffe_client` is refused with `spiffe_not_allowed`.
+    #[must_use]
+    pub fn with_spiffe(mut self, spiffe: crate::spiffe::Spiffe) -> Self {
+        self.spiffe = spiffe;
+        self
+    }
+
+    /// The SPIFFE configuration transports and client authentication are bound to.
+    #[must_use]
+    pub fn spiffe(&self) -> &crate::spiffe::Spiffe {
+        &self.spiffe
     }
 
     /// Resolves servers named by host name from `resolver`'s answers. `run` installs the

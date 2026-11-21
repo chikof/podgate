@@ -60,7 +60,7 @@ impl AltSvc {
 
 /// Why `tls` cannot be served over HTTP/3, when it cannot.
 pub(crate) fn conflict(tls: &TlsPolicy) -> Option<&'static str> {
-    if tls.client_ca_pem.is_some() || tls.client_auth.is_some() {
+    if tls.client_ca_pem.is_some() || tls.client_auth.is_some() || tls.spiffe_client.is_some() {
         return Some(
             "client certificates are not available over HTTP/3, so the app would be served with mutual TLS silently dropped",
         );
