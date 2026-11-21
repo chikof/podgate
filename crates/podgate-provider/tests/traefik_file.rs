@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use common::{daemon, free_ports};
 use podgate_provider::push::AdminClient;
 use podgate_provider::traefik::Code;
-use podgate_provider::traefik_file::{Converted, Syntax, convert, convert_file};
+use podgate_provider::traefik_file::{Converted, Syntax, convert, convert_file, convert_inline};
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
@@ -865,4 +865,50 @@ async fn next_state(
     tokio::time::timeout(Duration::from_secs(20), wait)
         .await
         .expect("the state arrives in time")
+}
+
+#[test]
+fn traefik_file_inline_mode_never_touches_the_filesystem() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir::new("inline-mode");
+    let marker = "MARKER-must-not-be-read";
+    let readable = dir.write(
+        "secret.key",
+        &format!("-----BEGIN PRIVATE KEY-----\n{marker}\n"),
+    );
+    let locked = dir.0.join("locked");
+    std::fs::create_dir_all(&locked).expect("directory");
+    std::fs::write(locked.join("k.pem"), marker).expect("file");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let run = |path: &Path| {
+        let text = format!(
+            "tls:\n  certificates:\n    - certFile: {path}\n      keyFile: {path}\nhttp:\n  middlewares:\n    a:\n      basicAuth:\n        usersFile: {path}\n",
+            path = path.display()
+        );
+        let converted = convert_inline("t", &text, Syntax::Yaml).expect("YAML");
+        assert!(converted.files.is_empty());
+        assert!(converted.certificates.is_empty());
+        format!("{:?}", converted.problems)
+    };
+    let existing = run(&readable);
+    let missing = run(&dir.0.join("no-such-file"));
+    let denied = run(&locked.join("k.pem"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        existing.contains("file_reference_not_allowed"),
+        "{existing}"
+    );
+    assert!(!existing.contains(marker), "{existing}");
+    // Only the path differs between the three documents, and the answers never carry it.
+    let strip = |text: &str, path: &Path| text.replace(&path.display().to_string(), "P");
+    assert_eq!(
+        strip(&existing, &readable),
+        strip(&missing, &dir.0.join("no-such-file"))
+    );
+    assert_eq!(
+        strip(&existing, &readable),
+        strip(&denied, &locked.join("k.pem"))
+    );
+    assert_eq!(existing, missing);
+    assert_eq!(existing, denied);
 }

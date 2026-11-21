@@ -132,6 +132,29 @@ pub fn convert(
     syntax: Syntax,
     dir: &Path,
 ) -> Result<Converted, ConvertError> {
+    convert_in(id, text, syntax, Some(dir))
+}
+
+/// Converts the text of a Traefik document that does not come from this machine (an HTTP
+/// answer), in the no-disk mode: no option may name a file, so the document cannot make the
+/// converter read one. A `certFile`, `keyFile`, `usersFile` or CA that is not inline text is a
+/// problem with the fixed reason `file_reference_not_allowed`, given before any filesystem call
+/// and the same for every path, so it also says nothing about which paths exist. Inline PEM stays
+/// allowed. [`Converted::files`] is empty.
+///
+/// # Errors
+///
+/// As [`convert`].
+pub fn convert_inline(id: &str, text: &str, syntax: Syntax) -> Result<Converted, ConvertError> {
+    convert_in(id, text, syntax, None)
+}
+
+fn convert_in(
+    id: &str,
+    text: &str,
+    syntax: Syntax,
+    dir: Option<&Path>,
+) -> Result<Converted, ConvertError> {
     if text.trim().is_empty() {
         return Err(ConvertError::Empty);
     }

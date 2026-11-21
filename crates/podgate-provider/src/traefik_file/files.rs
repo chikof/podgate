@@ -12,14 +12,24 @@ use super::obj::{Cx, Obj};
 /// The largest file the converter reads, in bytes.
 const MAX_BYTES: u64 = 1024 * 1024;
 
+/// Why a file reference is refused in the no-disk mode ([`super::convert_inline`]).
+pub(super) const FILE_REFERENCE_REFUSED: &str =
+    "file_reference_not_allowed: this option names a file; give the PEM or the text inline";
+
 /// The text of the file `spec` names, relative paths from the directory of the Traefik file. The
 /// file is remembered, so a source can read the conversion again when it changes.
 pub(super) fn read(cx: &Cx, at: &str, spec: &str) -> Option<String> {
+    // The no-disk mode answers before any filesystem call, and the same way for every path, so
+    // the answer says nothing about the machine.
+    let Some(dir) = &cx.dir else {
+        cx.invalid(at, FILE_REFERENCE_REFUSED);
+        return None;
+    };
     let given = Path::new(spec);
     let full = if given.is_absolute() {
         given.to_owned()
     } else {
-        cx.dir.join(given)
+        dir.join(given)
     };
     cx.read_file(full.clone());
     let mut text = String::new();

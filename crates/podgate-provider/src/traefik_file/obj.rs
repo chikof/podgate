@@ -16,12 +16,13 @@ use crate::traefik::{Code, Problem};
 pub(super) struct Cx {
     problems: RefCell<Vec<Problem>>,
     files: RefCell<Vec<PathBuf>>,
-    /// Where a relative file path is looked up: the directory of the Traefik file.
-    pub(super) dir: PathBuf,
+    /// Where a relative file path is looked up: the directory of the Traefik file. `None` is
+    /// the no-disk mode: no file reference is followed and none touches the filesystem.
+    pub(super) dir: Option<PathBuf>,
 }
 
 impl Cx {
-    pub(super) fn new(dir: PathBuf) -> Self {
+    pub(super) fn new(dir: Option<PathBuf>) -> Self {
         Self {
             problems: RefCell::new(Vec::new()),
             files: RefCell::new(Vec::new()),

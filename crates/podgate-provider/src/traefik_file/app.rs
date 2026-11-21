@@ -70,8 +70,8 @@ fn transports(
     names
 }
 
-pub(super) fn convert(id: &str, root: &Value, dir: &Path) -> Converted {
-    let cx = Cx::new(dir.to_owned());
+pub(super) fn convert(id: &str, root: &Value, dir: Option<&Path>) -> Converted {
+    let cx = Cx::new(dir.map(Path::to_owned));
     let mut certificates = Vec::new();
     let mut app = Map::new();
     if let Some(mut top) = Obj::new(&cx, String::new(), root) {
