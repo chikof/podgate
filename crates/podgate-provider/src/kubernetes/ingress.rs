@@ -652,6 +652,7 @@ fn app_json(
     let mode = match mode {
         TlsMode::Acme => "acme",
         TlsMode::OnDemand => "on_demand",
+        TlsMode::Internal => "internal",
     };
     serde_json::from_value(json!({
         // The core replaces `tenant` and `declared_by`; they only have to exist.

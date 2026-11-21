@@ -717,7 +717,11 @@ fn tls(key: &str, value: &str) -> Result<TlsMode, Rejection> {
     match value.trim() {
         "acme" => Ok(TlsMode::Acme),
         "on_demand" => Ok(TlsMode::OnDemand),
-        _ => Err(Rejection::invalid(key, "must be acme or on_demand")),
+        "internal" => Ok(TlsMode::Internal),
+        _ => Err(Rejection::invalid(
+            key,
+            "must be acme, on_demand or internal",
+        )),
     }
 }
 
@@ -1039,6 +1043,7 @@ fn tls_name(mode: TlsMode) -> &'static str {
     match mode {
         TlsMode::Acme => "acme",
         TlsMode::OnDemand => "on_demand",
+        TlsMode::Internal => "internal",
     }
 }
 

@@ -40,7 +40,7 @@ Unknown keys are errors, so a misspelt `tenant` cannot move the source's apps to
 |`podgate.host`|Comma separated hosts (`a.test, *.b.test`): a router named `default` that matches them and uses the service `web`.|
 |`podgate.port`|The port the container listens on. Required: the source does not guess one from the image.|
 |`podgate.revision`, `podgate.revision.state`|The revision id (default `default`) and its state: `serving` (default), `retiring` or `draining`.|
-|`podgate.tls`|`acme` (default) or `on_demand`.|
+|`podgate.tls`|`acme` (default), `on_demand` or `internal` (a certificate from the internal CA, `docs/ref/internal-ca.md`).|
 |`podgate.router.<name>.match`|A matcher as JSON, as in `docs/architecture.md` (`### Routers and matchers`). Required for a router.|
 |`podgate.router.<name>.priority`, `.entry_points`, `.chain`, `.service`|Priority (a number), comma separated entry points, comma separated middleware names, and the service name (default `web`).|
 |`podgate.middleware.<name>.type`, `.config`|A middleware of the app: its type, and its fields as a JSON object (default `{}`).|

@@ -444,6 +444,9 @@ pub enum TlsMode {
     Acme,
     /// Issued at the first handshake for a matching host.
     OnDemand,
+    /// Served from the certificates the snapshot carries, which the operator's internal CA
+    /// issued; podgate orders nothing.
+    Internal,
 }
 
 /// One deployed version of an app.

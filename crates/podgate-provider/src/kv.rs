@@ -912,7 +912,11 @@ fn tree_app(
         "id": id,
         "tenant": tenant,
         "declared_by": DECLARED_BY,
-        "tls": { "mode": match tls { TlsMode::Acme => "acme", TlsMode::OnDemand => "on_demand" } },
+        "tls": { "mode": match tls {
+            TlsMode::Acme => "acme",
+            TlsMode::OnDemand => "on_demand",
+            TlsMode::Internal => "internal",
+        } },
         "routers": routers,
         "middlewares": translation.middlewares,
         "revisions": [{
