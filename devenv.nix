@@ -24,6 +24,7 @@
     pkgs.traefik # proxy benchmark baseline
     pkgs.php # a real php-fpm for the fastcgi service smoke test
     pkgs.openssl # `openssl verify` in the internal CA tests
+    pkgs.go # builds and tests the Yaegi host for Traefik Go plugins
   ];
 
   # Secrets and local overrides come from the gitignored .env file. See .env.example.
