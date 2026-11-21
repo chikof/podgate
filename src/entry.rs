@@ -281,6 +281,7 @@ pub struct CompileContext {
     resolver: Resolver,
     rate_limit_stores: crate::ratelimit_store::Stores,
     spiffe: crate::spiffe::Spiffe,
+    plugins: crate::middleware::plugin::Plugins,
 }
 
 impl Default for CompileContext {
@@ -311,6 +312,7 @@ impl CompileContext {
             resolver: Resolver::default(),
             rate_limit_stores: crate::ratelimit_store::Stores::default(),
             spiffe: crate::spiffe::Spiffe::default(),
+            plugins: crate::middleware::plugin::Plugins::default(),
         }
     }
 
@@ -470,6 +472,20 @@ impl CompileContext {
     #[must_use]
     pub fn spiffe(&self) -> &crate::spiffe::Spiffe {
         &self.spiffe
+    }
+
+    /// The plugins a `plugin` middleware may name (`PLUGINS_FILE`). Only the operator calls
+    /// this; a snapshot names a plugin and never a socket or a command.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: crate::middleware::plugin::Plugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    /// The plugins the compiler checks `plugin` middlewares against.
+    #[must_use]
+    pub fn plugins(&self) -> &crate::middleware::plugin::Plugins {
+        &self.plugins
     }
 
     /// Resolves servers named by host name from `resolver`'s answers. `run` installs the

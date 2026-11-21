@@ -428,6 +428,7 @@ impl Gateway {
             policy: &self.upstream_policy,
             body_held: &mut ctx.body_held,
             reason: &mut ctx.access.reason,
+            router: router.name(),
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
@@ -887,6 +888,25 @@ impl ProxyHttp for Gateway {
             let head =
                 middleware::run_response_head(app.stages(), router.chain(), &cx, &mut ctx.chain);
             if let Err(err) = head {
+                ctx.capacity_refusal = err.is_capacity_refusal();
+                return Err(respond::abort(session, &err).await);
+            }
+            let mut phase = middleware::plugin::ResponsePhase {
+                request: session.req_header(),
+                response: &mut *upstream_response,
+                app,
+                router: router.name(),
+                forwarded: &ctx.forwarded,
+                tenant: ctx.tenant_slot.as_ref().map(TenantSlot::tenant),
+            };
+            let asked = middleware::plugin::run_response(
+                app.stages(),
+                router.chain(),
+                &mut phase,
+                &mut ctx.chain,
+            )
+            .await;
+            if let Err(err) = asked {
                 ctx.capacity_refusal = err.is_capacity_refusal();
                 return Err(respond::abort(session, &err).await);
             }

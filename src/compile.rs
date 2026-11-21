@@ -322,6 +322,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         );
         parts.push((stages, services));
     }
+    rejected.extend(middleware::plugin::bind(
+        snapshot,
+        context.plugins(),
+        parts.iter_mut().map(|(stages, _)| stages.as_mut_slice()),
+    ));
     let stage_lists: Vec<&[middleware::Named]> =
         parts.iter().map(|(stages, _)| stages.as_slice()).collect();
     let l4_lists: Vec<&[l4::middleware::Named]> =

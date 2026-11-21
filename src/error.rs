@@ -108,6 +108,16 @@ pub enum AppError {
     /// on.
     #[error("auth service unavailable")]
     AuthSaturated,
+    /// A `plugin` call failed (the plugin is down, too slow, answered something unusable, or
+    /// its circuit is open) under `on_plugin_error: "fail_closed"`: `503`. The request is never
+    /// passed on.
+    #[error("plugin unavailable")]
+    PluginUnavailable,
+    /// A `plugin` call found no room (the plugin or the tenant is at its calls in flight, or
+    /// the tenant's buffer budget is full right now): `503`, retry in a second. The request is
+    /// never passed on.
+    #[error("plugin unavailable")]
+    PluginSaturated,
     /// A `jwt_auth` stage found no valid token: `401` with a `WWW-Authenticate` challenge. The body
     /// never says which check failed; `reason` is for the access log.
     #[error("unauthorized")]
@@ -224,6 +234,8 @@ impl AppError {
             | Self::AuthBusy
             | Self::AuthUnavailable
             | Self::AuthSaturated
+            | Self::PluginUnavailable
+            | Self::PluginSaturated
             | Self::JwtUnavailable
             | Self::OidcUnavailable { .. }
             | Self::OidcBusy
@@ -257,6 +269,7 @@ impl AppError {
             | Self::BufferingOverBudget
             | Self::AuthBusy
             | Self::AuthSaturated
+            | Self::PluginSaturated
             | Self::AuthOverBudget
             | Self::OidcBusy => Some(1),
             Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
@@ -289,6 +302,7 @@ impl AppError {
                 | Self::BufferingOverBudget
                 | Self::AuthBusy
                 | Self::AuthSaturated
+                | Self::PluginSaturated
                 | Self::OidcBusy
         ) || matches!(self, Self::Fastcgi(failure) if failure.is_capacity_refusal())
     }
@@ -320,6 +334,8 @@ impl AppError {
             Self::AuthBusy => "auth_busy",
             Self::AuthUnavailable => "auth_unavailable",
             Self::AuthSaturated => "auth_saturated",
+            Self::PluginUnavailable => "plugin_unavailable",
+            Self::PluginSaturated => "plugin_saturated",
             Self::AuthOverBudget => "auth_over_budget",
             Self::JwtUnauthorized { reason } | Self::JwtForbidden { reason } => reason,
             Self::JwtUnavailable => "jwks_unavailable",

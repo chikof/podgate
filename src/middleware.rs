@@ -59,6 +59,7 @@ pub(crate) mod limits;
 pub mod oidc;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
+pub mod plugin;
 pub mod rate_limit;
 pub mod redirect;
 pub mod redirect_regex;
@@ -120,6 +121,8 @@ pub struct RequestCx<'a> {
     pub body_held: &'a mut bool,
     /// Where a hook notes why it refuses the request, for the access log's `reason`.
     pub reason: &'a mut Option<&'static str>,
+    /// The name of the router that matched, for a hook that tells an extension where it runs.
+    pub router: &'a str,
 }
 
 /// The stages of the chain that come before the one running a routed hook, with their per-request
@@ -894,6 +897,8 @@ kinds! {
     "grpc_web" => GrpcWeb(grpc_web::GrpcWeb),
 
     "respond" => Respond(respond::Respond),
+
+    "plugin" => Plugin(plugin::Plugin),
 }
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built kind, whose
@@ -959,6 +964,8 @@ schemas! {
     "errors" => errors::Config,
 
     "respond" => respond::Config,
+
+    "plugin" => plugin::Config,
 
     "pass_tls_client_cert" => pass_tls_client_cert::Config,
 

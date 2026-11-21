@@ -506,6 +506,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     ]);
     let oidc_secret = plant("oidc-client-secret");
     plants.push(oidc_secret.clone());
+    let plugin_secret = plant("plugin-config-token");
+    plants.push(plugin_secret.clone());
 
     let kinds = vec![
         (
@@ -588,6 +590,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             "respond",
             json!({"status": 403, "headers": {"x-closed-by": respond_header}, "body": respond_body}),
         ),
+        (
+            "plugin",
+            json!({"plugin": "demo", "config": {"token": plugin_secret}}),
+        ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
     let mut built: Vec<&str> = podgate::middleware::Stage::BUILT.to_vec();
@@ -599,6 +605,19 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
          planted secret in every field that holds one"
     );
     kinds
+}
+
+/// The operator's `PLUGINS_FILE` for the planted snapshot: one plugin served in this process.
+/// Returns the file's path and the server, which must outlive the daemon.
+async fn planted_plugins() -> (String, common::plugin::Server) {
+    let dir = std::env::temp_dir().join(format!("podgate-overview-plugin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the plugin directory");
+    let socket = dir.join("demo.sock");
+    let server = common::plugin::Server::passive(&socket, "demo").await;
+    let file = dir.join("plugins.json");
+    let plugins = json!({"demo": {"socket": socket, "managed": false, "tenants": ["t1"]}});
+    std::fs::write(&file, plugins.to_string()).expect("write the plugins file");
+    (file.to_string_lossy().into_owned(), server)
 }
 
 /// The operator's `RATE_LIMIT_STORES_FILE` for the planted snapshot: a store whose address and
@@ -708,7 +727,12 @@ fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
 #[tokio::test]
 async fn overview_redacts_secrets() {
     let stores = planted_stores();
-    let podgate = Podgate::start_with_env(&[("RATE_LIMIT_STORES_FILE", &stores)]).await;
+    let (plugins, _plugin) = planted_plugins().await;
+    let podgate = Podgate::start_with_env(&[
+        ("RATE_LIMIT_STORES_FILE", &stores),
+        ("PLUGINS_FILE", &plugins),
+    ])
+    .await;
     let upstream = Upstream::start("x").await;
     let (pushed, plants) = planted(upstream.addr);
     push(&podgate, &pushed).await;
@@ -805,7 +829,12 @@ fn a_listed_name_holding_a_planted_secret_is_still_caught() {
 #[tokio::test]
 async fn every_describe_is_secret_free() {
     let stores = planted_stores();
-    let podgate = Podgate::start_with_env(&[("RATE_LIMIT_STORES_FILE", &stores)]).await;
+    let (plugins, _plugin) = planted_plugins().await;
+    let podgate = Podgate::start_with_env(&[
+        ("RATE_LIMIT_STORES_FILE", &stores),
+        ("PLUGINS_FILE", &plugins),
+    ])
+    .await;
     let upstream = Upstream::start("x").await;
     let (pushed, _) = planted(upstream.addr);
     push(&podgate, &pushed).await;

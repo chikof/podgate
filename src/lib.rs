@@ -130,8 +130,9 @@ pub use wake::{Wake, WakeService};
 /// `DASHBOARD_AUTH_FILE` is invalid, a non-loopback `DASHBOARD_ADDR` has no
 /// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
 /// bound, a TLS listener
-/// cannot be configured, the admin socket or the dashboard address cannot be bound, or an
-/// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
+/// cannot be configured, the admin socket or the dashboard address cannot be bound, an
+/// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read, `PLUGINS_FILE` is invalid, or a plugin
+/// cannot be started or does not answer `Describe` within five seconds.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
@@ -139,6 +140,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let fastcgi = config.fastcgi()?;
     let rate_limit_stores = config.rate_limit_stores()?;
     let spiffe = config.spiffe()?;
+    let plugins = config.plugins()?;
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -150,6 +152,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_static_roots(static_roots)
             .with_fastcgi(fastcgi)
             .with_rate_limit_stores(rate_limit_stores.clone())
+            .with_plugins(plugins.clone())
             .with_resolver(resolver.clone())
             .with_spiffe(spiffe.clone()),
     )
@@ -421,6 +424,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         "admin API",
         AdminService::new(admin_listener, admin_state, timeout),
     ));
+    // Last before the server runs: nothing above can fail after a plugin process exists.
+    plugins.start()?;
+    server.add_service(background_service("plugins", plugins.supervisor()));
 
     tracing::info!(
         entry_points = %config

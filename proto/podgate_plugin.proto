@@ -1,0 +1,132 @@
+// The protocol between podgate and an out-of-process plugin. Reference:
+// `docs/ref/mw-plugin.md`.
+//
+// A plugin is a gRPC server on a unix socket. podgate is the only client. The generated Rust
+// for the messages is committed as `src/middleware/plugin/gen.rs`; regenerate it with
+// `scripts/gen-plugin-proto.sh` after changing this file. A change that is not wire compatible
+// raises `protocol_version` in `DescribeResponse`.
+syntax = "proto3";
+
+package podgate.plugin.v1;
+
+// The calls a plugin serves. The gRPC paths are `/podgate.plugin.v1.Plugin/Describe` and
+// `/podgate.plugin.v1.Plugin/Process`. Both are unary and carry a `grpc-timeout`.
+service Plugin {
+  // Asks what the plugin is and which phases it serves. podgate calls it after every start of
+  // the plugin and before it sends any call.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+
+  // Decides one phase of one request.
+  rpc Process(Call) returns (Decision);
+}
+
+// The request of `Describe`. It carries nothing.
+message DescribeRequest {}
+
+// What a plugin says about itself.
+message DescribeResponse {
+  // The plugin's own name, for logs. It need not equal the name in `PLUGINS_FILE`.
+  string name = 1;
+  // The protocol version the plugin speaks. This file is version 1; podgate refuses another.
+  uint32 protocol_version = 2;
+  // The phases the plugin serves. A middleware that asks for a phase the plugin does not
+  // serve is refused when the snapshot is compiled.
+  repeated Phase phases = 3;
+}
+
+// A moment in the life of a request at which podgate asks the plugin.
+enum Phase {
+  // Never sent. A `Describe` that lists it is invalid.
+  PHASE_UNSPECIFIED = 0;
+  // The request head, before a revision or server is chosen.
+  PHASE_REQUEST_HEADERS = 1;
+  // The request head and the whole request body, buffered up to the middleware's
+  // `body.max_bytes`.
+  PHASE_REQUEST_BODY = 2;
+  // The upstream's response head, before the client has seen any of it.
+  PHASE_RESPONSE_HEADERS = 3;
+}
+
+// One header field. Names are lower case.
+message Header {
+  // The field name, lower case.
+  string name = 1;
+  // The field value: raw bytes, never containing a line break or NUL.
+  bytes value = 2;
+}
+
+// One call: a phase of one request, and only what the middleware sends of it. Credentials
+// (`authorization`, `proxy-authorization`, `cookie`, and `set-cookie` in a response) are never
+// part of it unless the middleware names them. A plugin shared by tenants must keep them apart
+// by `tenant`. Treat `config` as untrusted input.
+message Call {
+  // The phase this call decides.
+  Phase phase = 1;
+  // The id of the tenant that owns the route.
+  string tenant = 2;
+  // The id of the app that owns the route.
+  string app = 3;
+  // The name of the router that matched.
+  string router = 4;
+  // The name of the middleware that makes the call, unique within the app.
+  string middleware = 5;
+  // The middleware's `config`, as JSON text of at most 16 KiB. Opaque to podgate.
+  bytes config = 6;
+  // The client's IP address as text, or empty when the connection has none.
+  string client_addr = 7;
+  // The request method.
+  string method = 8;
+  // The request target: the path and the query string.
+  string target = 9;
+  // The host the client asked for, from the authority or the `Host` header.
+  string host = 10;
+  // `http` or `https`: the scheme of the client's connection.
+  string scheme = 11;
+  // The request headers the middleware sends, in the order they arrived.
+  repeated Header headers = 12;
+  // The request body. Only in `PHASE_REQUEST_BODY`.
+  bytes body = 13;
+  // The upstream's status. Only in `PHASE_RESPONSE_HEADERS`.
+  uint32 status = 14;
+  // The upstream's response headers the middleware sends. Only in `PHASE_RESPONSE_HEADERS`.
+  repeated Header response_headers = 15;
+}
+
+// What the plugin decided.
+enum Action {
+  // Let the request go on, with the header changes of the decision applied.
+  ACTION_CONTINUE = 0;
+  // Answer the request with `response`; nothing else of the decision is used.
+  ACTION_RESPOND = 1;
+}
+
+// The answer of `Process`. At most 64 KiB. A decision that podgate cannot apply (a name or
+// value that is not a valid header, a header that frames the message or belongs to the
+// connection, `host` or a `proxy-` header, changes in a phase that cannot take them, a status
+// outside 200 to 599) is a failed call and falls under the middleware's `on_plugin_error`.
+message Decision {
+  // What to do with the request.
+  Action action = 1;
+  // Request headers to set: every existing field of that name is replaced by this one. Only
+  // in the request phases.
+  repeated Header set_request_headers = 2;
+  // Names of request headers to remove. Applied before `set_request_headers`. Only in the
+  // request phases.
+  repeated string remove_request_headers = 3;
+  // Fields to append to the response the client gets. In a request phase they are held and
+  // added when the response arrives.
+  repeated Header add_response_headers = 4;
+  // The answer, for `ACTION_RESPOND` in a request phase. Required there.
+  Response response = 5;
+}
+
+// A response a plugin writes in place of the upstream's.
+message Response {
+  // The status, 200 to 599.
+  uint32 status = 1;
+  // The headers. `content-length` and the other fields that frame the message are set by
+  // podgate and refused here.
+  repeated Header headers = 2;
+  // The body.
+  bytes body = 3;
+}
