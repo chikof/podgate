@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{AppExt, Harness, app, daemon, free_ports};
+use common::{AppExt, Harness, app, daemon};
 use podgate_model::TlsMode;
 use podgate_provider::ca::cli;
 use podgate_provider::ca::init::{InitOptions, Initialized, init};
@@ -900,8 +900,7 @@ async fn ca_daemon_serves_internal_certificate() {
     let p = pki("daemon", &["internal"]);
     let policy = p.work.join("policy.json");
     std::fs::write(&policy, daemon::LOOPBACK_POLICY).expect("policy");
-    let ports = free_ports(2);
-    let daemon = daemon::Daemon::start(&policy, (ports[0], ports[1]), &[("NODE_NAME", "n1")]).await;
+    let daemon = daemon::Daemon::start_free(&policy, &[("NODE_NAME", "n1")]).await;
     let (backend, _task) = daemon::backend("from-the-backend").await;
 
     let config = common::config(&daemon.admin, &p.toml_full(""));
