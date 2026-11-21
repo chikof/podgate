@@ -26,7 +26,7 @@ resync_secs = 30
 | `namespaces` | `["default"]` | The namespaces to read. One request series per namespace; `*` is not accepted, so a namespace nobody mapped to a tenant is never read. |
 | `namespace_tenants` | none | `{ team-a = "acme" }`: the tenant of a namespace. Every key must be one of `namespaces`. |
 | `default_tenant` | `default` | The tenant of a namespace that `namespace_tenants` does not list. |
-| `exposed_by_default` | `false` | Whether a service without a `podgate.enable` tag counts. `podgate.enable=false` always excludes. |
+| `exposed_by_default` | `false` | Whether a service without a `podgate.enable` or `traefik.enable` tag counts. `false` in either tag always excludes. |
 | `stale` | `false` | Send `stale` with every query, so any server, not only the leader, answers. Nomad's own default is consistent reads. |
 | `resync_secs` | `30` | The longest the source goes without reading all registrations again. At least `1`. |
 
@@ -38,14 +38,38 @@ The token needs the `read-job` capability (or `read`) on the namespaces listed; 
 
 A tag is split at the first `=`, so values may hold more (`podgate.router.web.match={"host":["a.test"]}`). Tags without `=` that do not start with `podgate.` are ignored (`urlprefix-/shop`, `v2`). Keys are those of [the Docker labels](provider-docker.md#labels), with these differences:
 
-- `podgate.port` is **not accepted**: the port is the registration's. A registration that carries it is rejected with a report.
+- `podgate.port` (and a Traefik `loadbalancer.server.port`) is only accepted when it equals the registered port: the port is the registration's, and a tag that names another one rejects the registration with a report.
 - A `podgate.*` tag must be a pair, and none may be given twice: Nomad tags are a list, and with a repeated key one value would silently win. Either mistake rejects the registration.
 - `podgate.app` defaults to the service name. In the snapshot an app is called `<source name>-<namespace>.<app>` (`nomad-prod-default.shop`), so the same service name in two namespaces is two apps. The whole id may be at most 63 characters.
 - `podgate.tenant` is the job's own claim; see [Tenants](#tenants).
 
 Any other `podgate.*` key, a value that does not parse, a router without `match`, a `chain` entry that no tag defines: the registration is rejected and reported. The daemon behaves the same on unknown fields, so a misspelt tag cannot silently turn a rule off.
 
-The Traefik tags (`traefik.http.routers.<r>.rule=...`) are read through the translator of change 0071; see [the Traefik subset](#traefik-tags).
+The Traefik tags are read too; see [Traefik tags](#traefik-tags).
+
+## Traefik tags
+
+A job that is already tagged for Traefik keeps its tags:
+
+```hcl
+service {
+  name = "shop"
+  port = "http"
+  tags = [
+    "traefik.enable=true",
+    "traefik.http.routers.shop.rule=Host(`shop.acme.test`) && PathPrefix(`/api`)",
+    "traefik.http.routers.shop.middlewares=strip",
+    "traefik.http.middlewares.strip.stripprefix.prefixes=/api",
+  ]
+}
+```
+
+Every tag is split at the first `=` and every pair goes to `docker::labels::parse`, which hands the `traefik.*` ones to the translator of change 0071 (`podgate_provider::traefik::translate`, reference `docs/ref/provider-traefik.md`): rules become matchers, a router without `priority` gets the length of its rule, and `podgate.*` and `traefik.*` tags may be mixed in one registration. The rules are the same as for Docker labels:
+
+- A Traefik tag that cannot be translated exactly (v2 rule syntax, an unsupported option, `forwardauth`) leaves out its router, service or middleware and is reported with the exact tag, next to the state. One that names an address (`server.url`) rejects the registration.
+- `traefik.enable=false` hides the registration, also when a `podgate.enable=true` tag is present. `traefik.enable=true` counts as an enable tag for `exposed_by_default = false`.
+- A `traefik.http.services.<s>.loadbalancer.server.port` is only accepted when it equals the registered port. The server is always the registration's address and port.
+- Both spellings are checked for repeated keys, and a `traefik.*` tag without `=` rejects the registration.
 
 ## The address rule
 
@@ -54,7 +78,7 @@ A server is `http://<Address>:<Port>` of the registration, the address and port 
 - its `Address` is not an IP address (a hostname is not a server: a name would be resolved by whoever runs the job's DNS);
 - its `Port` is `0`;
 - a tag names an address, a URL or a `host:port` where a name or an id is expected, or JSON with a key named like a destination, as in [the Docker source](provider-docker.md#the-address-rule);
-- it carries `podgate.port`.
+- it carries a `podgate.port` or Traefik `server.port` that differs from the registered port.
 
 **A job decides what address it advertises.** Nomad registers whatever the task's `service` block says (`address`, `address_mode`), and so a job in a namespace can register a service at `169.254.169.254:80`, at a database's address, or at another tenant's allocation. The source cannot tell that from a legitimate address. The protection is the operator's upstream address policy: the provider checks every server of every app against it in the merge (`upstream_forbidden`, `docs/ref/upstream-policy.md`), per tenant, and the daemon checks every connection it opens. For a Nomad cluster, allow each tenant only the networks where its allocations run, for example when Nomad hands out addresses from `10.4.0.0/16` and `10.5.0.0/16` per node pool:
 
@@ -89,7 +113,7 @@ One watcher per namespace holds a blocking query on `GET /v1/services?namespace=
 - when the watcher connects or reconnects, because a change between the last read and the connect would otherwise wait;
 - every `resync_secs`.
 
-A read lists the services of each namespace (`GET /v1/services?namespace=<ns>`) and then, only for the services that may be exposed, their instances. A service whose tags hold no `podgate.enable` other than `false` is not read at all unless `exposed_by_default`. An index that goes backwards starts the query over from `0`. A failing watcher reconnects with a backoff of 100 ms doubling to 5 s. The first state is sent only after a complete read succeeded.
+A read lists the services of each namespace (`GET /v1/services?namespace=<ns>`) and then, only for the services that may be exposed, their instances. A service whose tags hold no `podgate.enable` or `traefik.enable` other than `false` is not read at all unless `exposed_by_default`. An index that goes backwards starts the query over from `0`. A failing watcher reconnects with a backoff of 100 ms doubling to 5 s. The first state is sent only after a complete read succeeded.
 
 The provider's own debounce (`debounce_ms`) then coalesces the update with the other sources' before one push.
 

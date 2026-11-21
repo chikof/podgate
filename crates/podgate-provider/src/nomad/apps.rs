@@ -33,26 +33,39 @@ struct Candidate<'a> {
     claim: TenantClaim,
 }
 
-/// Whether a service is worth listing its instances: some instance may carry `podgate.enable`
-/// other than `false`, or every service counts. `tags` are the tags of all its instances.
+/// The tag keys that turn exposure on or off: podgate's own, and Traefik's, which the label
+/// parser reads too.
+const ENABLE_KEYS: [&str; 2] = ["podgate.enable", "traefik.enable"];
+
+/// Whether a value of an enable tag hides the service. Traefik takes the boolean in any case.
+fn disables(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("false")
+}
+
+/// Whether a service is worth listing its instances: some instance may carry an enable tag other
+/// than `false`, or every service counts. `tags` are the tags of all its instances.
 pub(super) fn worth_fetching(tags: &[String], exposed_by_default: bool) -> bool {
     exposed_by_default
         || tags
             .iter()
-            .filter_map(|tag| tag.strip_prefix(ENABLE))
-            .any(|value| value.trim() != "false")
+            .filter_map(|tag| tag.split_once('='))
+            .any(|(key, value)| ENABLE_KEYS.contains(&key) && !disables(value))
 }
 
-const ENABLE: &str = "podgate.enable=";
+/// Whether a tag belongs to podgate or to the Traefik translator, which both reject what they
+/// do not understand.
+fn governed(tag: &str) -> bool {
+    tag.starts_with("podgate.") || tag.starts_with("traefik.")
+}
 
 /// The `key=value` tags of one registration. A tag is split at the first `=`, so a value may
-/// hold more. Every `podgate.*` tag must be a pair, and none may repeat: with a repeated key one
-/// value would silently win.
+/// hold more. Every `podgate.*` and `traefik.*` tag must be a pair, and none may repeat: with a
+/// repeated key one value would silently win.
 fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, String> {
     let mut seen = BTreeSet::new();
     let mut pairs = Vec::with_capacity(tags.len());
     for tag in tags {
-        let governed = tag.starts_with("podgate.");
+        let governed = governed(tag);
         match tag.split_once('=') {
             Some((key, value)) => {
                 if governed && !seen.insert(key) {
@@ -61,7 +74,9 @@ fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, String> {
                 pairs.push((key, value));
             }
             None if governed => {
-                return Err(format!("{tag}: a podgate tag must be written key=value"));
+                return Err(format!(
+                    "{tag}: a podgate or traefik tag must be written key=value"
+                ));
             }
             None => {}
         }
@@ -69,11 +84,19 @@ fn pairs(tags: &[String]) -> Result<Vec<(&str, &str)>, String> {
     Ok(pairs)
 }
 
+/// Whether the registration is exposed: `false` in either enable tag hides it, any other value
+/// exposes it (the label parser rejects a value that is no boolean, with a report), and without
+/// one `exposed_by_default` decides.
 fn exposed(pairs: &[(&str, &str)], exposed_by_default: bool) -> bool {
-    match pairs.iter().find(|(key, _)| *key == "podgate.enable") {
-        Some((_, value)) => value.trim() != "false",
-        None => exposed_by_default,
+    let mut values = pairs
+        .iter()
+        .filter(|(key, _)| ENABLE_KEYS.contains(key))
+        .map(|(_, value)| *value)
+        .peekable();
+    if values.peek().is_none() {
+        return exposed_by_default;
     }
+    !values.any(disables)
 }
 
 /// A name valid as the app part of an id. The label parser's own check is private to it; this one
@@ -111,7 +134,12 @@ pub(super) fn build(source: &str, settings: &Settings, instances: &[Instance]) -
             }
         });
         match candidate {
-            Ok(Some((id, candidate))) => groups.entry(id).or_default().push(candidate),
+            Ok(Some((id, candidate))) => {
+                for problem in &candidate.labels.problems {
+                    built.reports.push(report(instance, &problem.to_string()));
+                }
+                groups.entry(id).or_default().push(candidate);
+            }
             Ok(None) => {}
             Err(why) => built.reports.push(report(instance, &why)),
         }
@@ -173,11 +201,13 @@ fn candidate<'a>(
     pairs: &[(&str, &str)],
 ) -> Result<(Box<str>, Candidate<'a>), String> {
     let labels = labels::parse(pairs.iter().copied()).map_err(|why| why.to_string())?;
-    if labels.port.is_some() {
-        return Err(
-            "podgate.port: not used with Nomad; the server is the registration's own address and port"
-                .to_owned(),
-        );
+    if let Some(port) = labels.port
+        && port != instance.port
+    {
+        return Err(format!(
+            "podgate.port or traefik loadbalancer.server.port {port}: differs from the registered port {}; the server is the registration's own address and port",
+            instance.port
+        ));
     }
     let namespace = &*instance.namespace;
     let Some(tenant) = settings.tenants.get(namespace) else {

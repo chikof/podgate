@@ -331,7 +331,7 @@ async fn nomad_instances_to_servers() {
         "default/portless",
         "the registration has no port",
         "default/taggedport",
-        "podgate.port: not used with Nomad",
+        "differs from the registered port 8080",
     ] {
         assert!(report.contains(needle), "{needle:?} missing from {report}");
     }
@@ -402,7 +402,7 @@ async fn nomad_unknown_tag_rejected() {
         "default/misspelt",
         "unknown label podgate.hots",
         "default/unpaired",
-        "podgate.tls: a podgate tag must be written key=value",
+        "podgate.tls: a podgate or traefik tag must be written key=value",
         "default/twice",
         "podgate.host: the tag is given more than once",
         "default/address",
@@ -410,6 +410,93 @@ async fn nomad_unknown_tag_rejected() {
     ] {
         assert!(report.contains(needle), "{needle:?} missing from {report}");
     }
+}
+
+#[tokio::test]
+async fn nomad_traefik_tags_translate() {
+    let nomad = FakeNomad::start().await;
+    let rule = "Host(`t.acme.test`) && PathPrefix(`/api`)";
+    // Traefik tags as a job writes them, next to an unrelated tag: the rule holds a `=`-free
+    // string, the router value is split at the first `=` only.
+    nomad.add(Reg::new("default", "traefik-app", "10.4.0.1", 8080).tags(&[
+        "traefik.enable=true",
+        &format!("traefik.http.routers.web.rule={rule}"),
+        "traefik.http.routers.web.middlewares=strip",
+        "traefik.http.middlewares.strip.stripprefix.prefixes=/api",
+        "traefik.http.services.web.loadbalancer.server.port=8080",
+        "urlprefix-/ignored",
+    ]));
+    // `traefik.enable=false` hides the service, whatever else the tags say.
+    nomad.add(Reg::new("default", "hidden", "10.4.0.2", 80).tags(&[
+        "traefik.enable=false",
+        "traefik.http.routers.web.rule=Host(`hidden.acme.test`)",
+    ]));
+    // Both spellings together: the podgate tag names the app, the Traefik tag the route.
+    nomad.add(Reg::new("default", "mixed", "10.4.0.3", 80).tags(&[
+        "podgate.enable=true",
+        "podgate.app=both",
+        "traefik.http.routers.web.rule=Host(`both.acme.test`)",
+    ]));
+    // A port that is not the registration's is refused, like podgate.port.
+    nomad.add(Reg::new("default", "wrongport", "10.4.0.4", 80).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.web.rule=Host(`wrong.acme.test`)",
+        "traefik.http.services.web.loadbalancer.server.port=9999",
+    ]));
+    // Traefik v2 syntax and an unsupported option cannot be translated exactly: reported with the
+    // label, not approximated.
+    nomad.add(Reg::new("default", "v2", "10.4.0.5", 80).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.web.rule=Headers(`X-A`, `b`)",
+    ]));
+    // A Traefik tag that names an address is fatal for the registration.
+    nomad.add(Reg::new("default", "address", "10.4.0.6", 80).tags(&[
+        "traefik.enable=true",
+        "traefik.http.routers.web.rule=Host(`addr.acme.test`)",
+        "traefik.http.services.web.loadbalancer.server.url=http://10.9.9.9:80",
+    ]));
+    let mut watcher = Watcher::start(&nomad_config(&nomad.address(), "", ""));
+    let state = watcher
+        .wait_ids_and_report(&["default.both", "default.traefik-app"], "default/address")
+        .await;
+    let app = app_json(&state, "default.traefik-app");
+    let router = &app["routers"][0];
+    assert_eq!(
+        router["match"],
+        json!({ "all": [
+            { "host": "t.acme.test" },
+            { "path_prefix": "/api" },
+        ]}),
+        "{app}"
+    );
+    assert_eq!(router["priority"], json!(rule.len()), "Traefik's priority");
+    assert_eq!(router["chain"], json!(["strip"]));
+    assert_eq!(app["middlewares"][0]["name"], json!("strip"), "{app}");
+    assert_eq!(
+        app["middlewares"][0]["type"],
+        json!("strip_prefix"),
+        "{app}"
+    );
+    assert_eq!(
+        servers_of(&state, "default.traefik-app", "default"),
+        ["http://10.4.0.1:8080"],
+        "the server is the registration's address and port, whatever the tags say"
+    );
+    assert_eq!(
+        app_json(&state, "default.both")["routers"][0]["match"],
+        json!({ "host": "both.acme.test" })
+    );
+    let report = watcher.report().to_owned();
+    for needle in [
+        "default/wrongport",
+        "differs from the registered port 80",
+        "default/v2",
+        "default/address",
+        "traefik.http.services.web.loadbalancer.server.url",
+    ] {
+        assert!(report.contains(needle), "{needle:?} missing from {report}");
+    }
+    assert!(!report.contains("default/hidden"), "{report}");
 }
 
 // ---- blocking queries and outages -------------------------------------------------------------
