@@ -145,7 +145,7 @@ with `socket = "/run/docker.sock"` and `network = "podgate"` in the provider's `
 
 ## Not supported
 
-- Docker Swarm (services, tasks, the ingress network): this source reads containers. Swarm is change 0108.
+- Docker Swarm (services, tasks, the ingress network): this source reads containers. The Swarm source is `docs/ref/provider-swarm.md`.
 - Picking the port from the image's `EXPOSE`: set `podgate.port`.
 - Labels that name a destination (above) and `scheme` for servers: servers are `http://`. A gRPC backend that needs `h2c://` or an HTTPS backend belongs in a file source.
 - Changing labels of a running container: Docker does not allow it, so a revision changes state by recreating the container.
