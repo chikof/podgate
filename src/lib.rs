@@ -38,6 +38,7 @@
 //! - [`observe::tracing`]: OpenTelemetry tracing: W3C trace context to the upstream, spans exported over OTLP/HTTP
 //!   to the operator's collector from a bounded queue, a node-wide rate cap on what gets traced.
 //! - [`AppError`]: the one error type clients see; renders as `{"error": "..."}`.
+//! - [`tls::ocsp`]: OCSP stapling: verified responses fetched through the upstream address policy and stapled to the certificates the listener serves.
 //! - [`run`]: builds the Pingora server and runs it until shutdown.
 
 pub mod acme;
@@ -151,6 +152,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         config.acme_ca_file.clone(),
     );
     let backends = Backends::new();
+    let staples = tls::ocsp::Staples::default();
     let access_log = AccessLog::new();
     let access_sink: Box<dyn observe::access_log::LineSink> = match &config.access_log_file {
         Some(path) => Box::new(observe::access_log::FileSink::new(path.clone())),
@@ -209,9 +211,13 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         match point.protocol {
             entry::Protocol::Http => proxy.add_tcp(&addr),
             entry::Protocol::Https => {
-                let settings = tls::listener_settings(table.clone()).map_err(|err| {
-                    anyhow::anyhow!("cannot configure the TLS entry point {}: {err}", point.name)
-                })?;
+                let settings =
+                    tls::listener_settings(table.clone(), staples.clone()).map_err(|err| {
+                        anyhow::anyhow!(
+                            "cannot configure the TLS entry point {}: {err}",
+                            point.name
+                        )
+                    })?;
                 proxy.add_tls_with_settings(&addr, None, settings);
                 let hello =
                     clientauth::ClearDecision(tls::PreHandshake::new(acme.clone(), table.clone()));
@@ -281,6 +287,17 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     server.add_service(background_service(
         "dns resolver",
         service::resolve::ResolveService::new(resolver, table.clone()),
+    ));
+    server.add_service(background_service(
+        "ocsp stapling",
+        tls::ocsp::OcspService::new(
+            table.clone(),
+            staples,
+            tls::ocsp::Runner::new(
+                upstream_policy.clone(),
+                tls::ocsp::AllowedHosts::new(config.ocsp_allowed_hosts.iter().map(AsRef::as_ref)),
+            ),
+        ),
     ));
     server.add_service(background_service(
         "admin API",

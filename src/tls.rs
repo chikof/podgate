@@ -9,6 +9,7 @@
 //! on-demand certificates is [`PreHandshake`].
 
 mod hello;
+pub mod ocsp;
 mod options;
 
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use crate::clientauth::{self, HandshakeVerifier};
 use crate::host::{self, HostMap, HostPattern};
 use crate::sni;
 use crate::table::TableHandle;
+use ocsp::{Candidate, Staples};
 use podgate_model::Certificate;
 
 pub use hello::PreHandshake;
@@ -48,6 +50,7 @@ pub struct CertStore {
     expiries: Vec<(Box<str>, u64)>,
     default: Option<Arc<CertifiedKey>>,
     summaries: Vec<Summary>,
+    ocsp: Vec<Candidate>,
 }
 
 /// What the read-only overview says about one certificate: never the chain or the key.
@@ -94,6 +97,7 @@ impl CertStore {
         let mut expiries = Vec::new();
         let mut default = None;
         let mut summaries = Vec::with_capacity(certificates.len());
+        let mut ocsp = Vec::new();
         for certificate in certificates {
             let hosts = certificate.hosts.join(",");
             let reject = |reason: String| CertError {
@@ -112,6 +116,7 @@ impl CertStore {
                 return Err(reject("a second certificate is marked default".into()));
             }
             summaries.push(Summary::of(&certificate.hosts, certificate.default, &key));
+            ocsp.extend(Candidate::of(certificate, &key));
             for raw in &certificate.hosts {
                 expiries.extend(not_after.map(|at| (raw.clone(), at)));
                 let pattern = HostPattern::parse(raw).map_err(|err| reject(err.to_string()))?;
@@ -125,6 +130,7 @@ impl CertStore {
             expiries,
             default,
             summaries,
+            ocsp,
         })
     }
 
@@ -132,6 +138,12 @@ impl CertStore {
     #[must_use]
     pub fn summaries(&self) -> &[Summary] {
         &self.summaries
+    }
+
+    /// The certificates that want an OCSP staple, for the refresher.
+    #[must_use]
+    pub fn ocsp_candidates(&self) -> &[Candidate] {
+        &self.ocsp
     }
 
     /// The certificate for a server name from the client hello, if the snapshot has one.
@@ -179,14 +191,23 @@ fn parse_certified_key(certificate: &Certificate) -> Result<CertifiedKey, String
 /// Picks the certificate of the live routing table for each handshake: the one covering the
 /// SNI, else the default certificate unless an app that may serve the name is `sni_strict`.
 /// Without a certificate the handshake aborts. Also tells the client verifier whether this SNI
-/// belongs to an app that asks for client certificates.
+/// belongs to an app that asks for client certificates. The chosen certificate carries its
+/// OCSP staple when the registry has a verified one; a handshake never waits for it.
 #[derive(Debug)]
 struct SniResolver {
     table: TableHandle,
+    staples: Staples,
 }
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        self.choose(&client_hello)
+            .map(|key| self.staples.attach(key))
+    }
+}
+
+impl SniResolver {
+    fn choose(&self, client_hello: &ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let table = self.table.load();
         let certificates = table.certificates();
         let Some(name) = client_hello.server_name() else {
@@ -214,15 +235,15 @@ impl ResolvesServerCert for SniResolver {
 }
 
 /// Settings for the TLS listener: HTTP/2 and HTTP/1.1 over rustls, certificate chosen by SNI
-/// from the table behind `table`.
+/// from the table behind `table`, with the OCSP staples of `staples` attached.
 ///
 /// # Errors
 ///
 /// Fails when Pingora rejects the settings.
-pub fn listener_settings(table: TableHandle) -> pingora::Result<TlsSettings> {
+pub fn listener_settings(table: TableHandle, staples: Staples) -> pingora::Result<TlsSettings> {
     // Pingora ignores the file paths once a resolver is set.
     let mut settings = TlsSettings::with_callbacks(Box::new(sni::CaptureServerName))?;
-    settings.set_cert_resolver(Arc::new(SniResolver { table }));
+    settings.set_cert_resolver(Arc::new(SniResolver { table, staples }));
     settings.set_client_cert_verifier(Arc::new(HandshakeVerifier::new()));
     settings.enable_h2();
     Ok(settings)

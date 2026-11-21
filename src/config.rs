@@ -100,6 +100,7 @@ const _: () =
 /// | `DNS_TIMEOUT_MS` | `2000` | Longest one lookup takes, 1..=60000. |
 /// | `DNS_MAX_STALE_SECS` | `300` | How long after its TTL ran out the last good answer is still used while resolution fails, 0..=86400. Then the name has no address and its requests get `503`. |
 /// | `DNS_MAX_QUERIES_PER_SEC` | `200` | Lookups a second this node sends in all, 1..=100000. |
+/// | `OCSP_ALLOWED_HOSTS` | unset | Comma-separated host suffixes (`ocsp.example.com`, `.example.com`) an OCSP responder URL must match. Unset: any host the upstream address policy allows. The URL itself is read from the certificate and is never part of a snapshot. |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The listeners: `ENTRY_POINTS`, or `web` (`PROXY_ADDR`) and `websecure`
@@ -163,6 +164,9 @@ pub struct Config {
     pub upstream_pool_size: NonZeroUsize,
     /// How servers named by host name are resolved (`DNS_*`).
     pub dns: resolve::Settings,
+    /// Host suffixes an OCSP responder must match (`OCSP_ALLOWED_HOSTS`). Empty: any host the
+    /// upstream address policy allows.
+    pub ocsp_allowed_hosts: Vec<Box<str>>,
 }
 
 impl Default for Config {
@@ -192,6 +196,7 @@ impl Default for Config {
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
             upstream_pool_size: DEFAULT_UPSTREAM_POOL,
             dns: resolve::Settings::default(),
+            ocsp_allowed_hosts: Vec::new(),
         }
     }
 }
@@ -507,6 +512,14 @@ impl Config {
                 .map(Box::from)
                 .collect();
         }
+        if let Some(list) = lookup("OCSP_ALLOWED_HOSTS") {
+            config.ocsp_allowed_hosts = list
+                .split(',')
+                .map(|host| host.trim().trim_start_matches('.').to_ascii_lowercase())
+                .filter(|host| !host.is_empty())
+                .map(Box::from)
+                .collect();
+        }
         Ok(config)
     }
 }
@@ -559,6 +572,7 @@ mod test {
             ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
             ("CACHE_TENANT_MAX_PERCENT", "40"),
+            ("OCSP_ALLOWED_HOSTS", "OCSP.Example.com, .Digicert.com,,"),
         ]);
         assert_eq!(
             parsed,
@@ -599,6 +613,7 @@ mod test {
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
                 cache_tenant_max_percent: 40,
+                ocsp_allowed_hosts: vec!["ocsp.example.com".into(), "digicert.com".into()],
             })
         );
     }

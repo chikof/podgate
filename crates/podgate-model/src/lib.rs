@@ -449,6 +449,32 @@ pub enum RevisionState {
     Draining,
 }
 
+/// Whether podgate staples an OCSP response to a certificate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OcspMode {
+    /// Staple only when the certificate carries the TLS Feature `status_request` (must-staple)
+    /// extension.
+    #[default]
+    Auto,
+    /// Staple whenever the certificate names an OCSP responder in its Authority Information
+    /// Access.
+    On,
+    /// Never staple.
+    Off,
+}
+
+impl OcspMode {
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if passes a reference"
+    )]
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
 /// A certificate chain and its private key, served for the listed hosts.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -463,6 +489,10 @@ pub struct Certificate {
     /// no SNI, unless the app that owns the name sets `sni_strict`. At most one.
     #[serde(default, skip_serializing_if = "is_false")]
     pub default: bool,
+    /// OCSP stapling: `auto` (default), `on` or `off`. The responder always comes from the
+    /// certificate itself, never from the snapshot.
+    #[serde(default, skip_serializing_if = "OcspMode::is_auto")]
+    pub ocsp: OcspMode,
 }
 
 impl fmt::Debug for Certificate {
