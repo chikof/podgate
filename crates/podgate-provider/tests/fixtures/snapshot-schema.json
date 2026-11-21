@@ -2405,6 +2405,33 @@
           "minimum": 0,
           "type": "integer"
         },
+        "lease_secs": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "local_fallback": {
+          "additionalProperties": false,
+          "description": "The cap a node applies alone while its store is unavailable.",
+          "properties": {
+            "amount": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "amount"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "max_sources": {
           "default": null,
           "format": "uint32",
@@ -2416,6 +2443,50 @@
         },
         "name": {
           "type": "string"
+        },
+        "on_store_error": {
+          "anyOf": [
+            {
+              "description": "What a request does when the store gives no verdict.",
+              "oneOf": [
+                {
+                  "const": "allow",
+                  "description": "Admit it if the node's own count is under the local fallback.",
+                  "type": "string"
+                },
+                {
+                  "const": "deny",
+                  "description": "Refuse it with `503`.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "description": "Where a limit counts.",
+              "oneOf": [
+                {
+                  "const": "node",
+                  "description": "This node alone (the default).",
+                  "type": "string"
+                },
+                {
+                  "const": "cluster",
+                  "description": "Every node that shares the store.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "source": {
           "description": "A `source` as written in a snapshot.",
@@ -2491,6 +2562,13 @@
               ],
               "type": "object"
             }
+          ]
+        },
+        "store": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
           ]
         },
         "type": {

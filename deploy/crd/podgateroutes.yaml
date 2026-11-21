@@ -205,8 +205,18 @@ spec:
                   - properties:
                       amount:
                         minimum: 0
+                      lease_secs:
+                        minimum: 0
                       max_sources:
                         minimum: 0
+                      on_store_error:
+                        enum:
+                        - allow
+                        - deny
+                      scope:
+                        enum:
+                        - node
+                        - cluster
                       source:
                         properties:
                           ip:
@@ -300,15 +310,6 @@ spec:
                         minimum: 0
                       burst:
                         minimum: 0
-                      local_fallback:
-                        properties:
-                          average:
-                            minimum: 0
-                          burst:
-                            minimum: 0
-                        required:
-                        - average
-                        - burst
                       max_sources:
                         minimum: 0
                       on_store_error:
@@ -689,6 +690,10 @@ spec:
                     keys:
                       description: 'An inline JWK set, `{"keys": [...]}`; the only place a symmetric (`oct`) key may be.'
                       x-kubernetes-preserve-unknown-fields: true
+                    lease_secs:
+                      minimum: 0
+                      nullable: true
+                      type: integer
                     leeway_secs:
                       minimum: 0
                       nullable: true
@@ -699,19 +704,7 @@ spec:
                       nullable: true
                       type: integer
                     local_fallback:
-                      description: The limit a node applies alone while its store is unavailable.
-                      nullable: true
-                      properties:
-                        average:
-                          minimum: 0
-                          type: integer
-                        burst:
-                          minimum: 0
-                          type: integer
-                      required:
-                      - average
-                      - burst
-                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     logout_path:
                       nullable: true
                       type: string
