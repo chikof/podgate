@@ -531,15 +531,9 @@ async fn grpc_rate_limited_unavailable() {
 // Entry point settings
 // ---------------------------------------------------------------------------------------
 
-#[tokio::test]
-async fn grpc_entry_point_stream_limit() {
-    let (rig, server) = rig_over(Kind::H2c, |app| app).await;
-    let mut limited = pushed(2, app_over(&[server.url()], None), &rig.cert);
-    limited["entry_points"] =
-        json!([{ "name": "websecure", "http2": { "max_concurrent_streams": 2 } }]);
-    assert_eq!(rig.podgate.push_snapshot(&limited).await.status, 200);
-
-    let client = rig.client().await;
+/// With the entry point limited to two streams, two calls in flight keep a third from reaching
+/// the upstream until one of them ends.
+async fn stream_limit_holds(client: &Client, server: &Server) {
     let mut held = Vec::new();
     for _ in 0..2 {
         let mut call = client.start(path::HOLD, &[]).await;
@@ -569,13 +563,30 @@ async fn grpc_entry_point_stream_limit() {
     assert_eq!(third.collect().await.grpc_status(), Some(0));
 }
 
+#[tokio::test]
+async fn grpc_entry_point_stream_limit() {
+    let (rig, server) = rig_over(Kind::H2c, |app| app).await;
+    let mut limited = pushed(2, app_over(&[server.url()], None), &rig.cert);
+    limited["entry_points"] =
+        json!([{ "name": "websecure", "http2": { "max_concurrent_streams": 2 } }]);
+    assert_eq!(rig.podgate.push_snapshot(&limited).await.status, 200);
+    let client = rig.client().await;
+    stream_limit_holds(&client, &server).await;
+}
+
 // ---------------------------------------------------------------------------------------
 // Middlewares leave a stream alone
 // ---------------------------------------------------------------------------------------
 
 /// The chains a stream goes through: none (the platform's own compression applies), and each
 /// stage that would encode or hold an ordinary exchange, alone and together.
-const CHAINS: [&str; 2] = ["none", "compress"];
+const CHAINS: [&str; 5] = [
+    "none",
+    "compress",
+    "buffer_request",
+    "buffer_response",
+    "all",
+];
 
 fn holding_chain(mut app: Value, chain: &str) -> Value {
     let compress = json!({ "min_bytes": 1 });
@@ -1193,4 +1204,141 @@ async fn grpc_idle_stream_cut_by_read_timeout() {
     let outcome = call.collect().await;
     assert_eq!(outcome.payloads(), [b"msg2".as_slice(), b"msg3"]);
     assert_eq!(outcome.grpc_status(), Some(0));
+}
+
+// ---------------------------------------------------------------------------------------
+// Cleartext HTTP/2 on an entry point
+// ---------------------------------------------------------------------------------------
+
+/// `app` as a snapshot of `version` with the entry point policy `policy`.
+fn with_policy(version: u64, app: Value, cert: &TestCert, policy: Value) -> Value {
+    let mut pushed = pushed(version, app, cert);
+    pushed["entry_points"] = Value::Array(vec![policy]);
+    pushed
+}
+
+/// The first bytes the entry point at `addr` writes to a client that opens with the HTTP/2
+/// connection preface and an empty SETTINGS frame.
+async fn answer_to_preface(addr: std::net::SocketAddr) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    tcp.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .expect("send the preface");
+    let mut first = vec![0_u8; 64];
+    let read = timeout(Duration::from_secs(5), tcp.read(&mut first))
+        .await
+        .expect("an answer in time")
+        .expect("read");
+    first.truncate(read);
+    first
+}
+
+#[tokio::test]
+async fn grpc_downstream_h2c() {
+    let (rig, server) = rig_over(Kind::H2c, |app| app).await;
+    let addr = rig.podgate.proxy_addr;
+    let declared = || app_over(&[server.url()], None);
+    assert!(
+        answer_to_preface(addr).await.starts_with(b"HTTP/1.1"),
+        "off by default: the HTTP/2 preface is a malformed HTTP/1.1 request"
+    );
+
+    let on = with_policy(
+        2,
+        declared(),
+        &rig.cert,
+        json!({ "name": "web", "http2": { "h2c": true } }),
+    );
+    assert_eq!(rig.podgate.push_snapshot(&on).await.status, 200);
+    let first = answer_to_preface(addr).await;
+    assert_eq!(
+        first.get(3),
+        Some(&4),
+        "the first frame is SETTINGS: {first:?}"
+    );
+
+    let client = Client::h2c(addr, HOST).await;
+    assert_eq!(client.alpn(), None, "cleartext");
+    let outcome = client.unary(path::UNARY, b"plain", &[]).await;
+    assert_eq!(outcome.payloads(), [b"echo:plain".as_slice()]);
+    assert_eq!(outcome.grpc_status(), Some(0));
+    assert_grpc_request(&server, path::UNARY);
+    let mut call = client.start(path::BIDI, &[]).await;
+    for round in 0..5_u8 {
+        call.send(&payload_of(2000, round)).await;
+        assert_eq!(
+            call.message().await.expect("echo").1,
+            payload_of(2000, round)
+        );
+    }
+    call.finish();
+    assert_eq!(call.collect().await.grpc_status(), Some(0));
+
+    // The same port still serves HTTP/1.1.
+    let reply = tokio::time::timeout(Duration::from_secs(5), async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let request = format!("GET / HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n\r\n");
+        tcp.write_all(request.as_bytes()).await.expect("send");
+        let mut raw = Vec::new();
+        tcp.read_to_end(&mut raw).await.expect("read");
+        String::from_utf8_lossy(&raw).into_owned()
+    })
+    .await
+    .expect("an answer in time");
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+
+    // Taking the field away takes HTTP/2 away.
+    let off = with_policy(3, declared(), &rig.cert, json!({ "name": "web" }));
+    assert_eq!(rig.podgate.push_snapshot(&off).await.status, 200);
+    assert!(answer_to_preface(addr).await.starts_with(b"HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn grpc_h2c_policy_rejections() {
+    let (rig, server) = rig_over(Kind::H2c, |app| app).await;
+    let declared = || app_over(&[server.url()], None);
+    let cases = [
+        (
+            json!({ "name": "websecure", "http2": { "h2c": true } }),
+            "unsupported_setting",
+            "http2.h2c",
+        ),
+        (
+            json!({ "name": "web", "http2": { "h2c": "yes" } }),
+            "invalid_http2",
+            "http2",
+        ),
+        (
+            json!({ "name": "web", "http2": { "h2c": true }, "timeouts": { "read_secs": 5 } }),
+            "unsupported_setting",
+            "timeouts.read_secs",
+        ),
+        (
+            json!({ "name": "web", "http2": { "max_concurrent_streams": 5 } }),
+            "unsupported_setting",
+            "http2.max_concurrent_streams",
+        ),
+    ];
+    for (version, (policy, code, names)) in (2..).zip(cases) {
+        let reply = rig
+            .podgate
+            .push_snapshot(&with_policy(version, declared(), &rig.cert, policy.clone()))
+            .await;
+        assert_eq!(reply.status, 422, "{policy}: {}", reply.body);
+        assert_eq!(reply.json()["conflicts"][0]["code"], code, "{policy}");
+        let message = reply.json()["conflicts"][0]["message"].to_string();
+        assert!(message.contains(names), "{policy}: {message}");
+    }
+}
+
+#[tokio::test]
+async fn grpc_h2c_stream_limit() {
+    let (rig, server) = rig_over(Kind::H2c, |app| app).await;
+    let policy = json!({ "name": "web", "http2": { "h2c": true, "max_concurrent_streams": 2 } });
+    let limited = with_policy(2, app_over(&[server.url()], None), &rig.cert, policy);
+    assert_eq!(rig.podgate.push_snapshot(&limited).await.status, 200);
+    let client = Client::h2c(rig.podgate.proxy_addr, HOST).await;
+    stream_limit_holds(&client, &server).await;
 }

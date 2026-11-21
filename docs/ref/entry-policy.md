@@ -34,11 +34,12 @@ Every knob is applied through a real Pingora setting or refused with `unsupporte
 |Knob|`http` entry point|`https` entry point|Pingora setting|
 |---|---|---|---|
 |`redirect {to, permanent}`|applied|applied|podgate's own answer in `request_filter`; no Pingora knob involved|
-|`timeouts.read_secs`|applied (HTTP/1)|`unsupported_setting`|`HttpSession::set_read_timeout` (`protocols/http/server.rs`). A no-op for HTTP/2, whose `read_body_bytes` reads with no timeout (`protocols/http/v2/server.rs`, `// TODO: timeout`), and a TLS entry point serves HTTP/2|
+|`timeouts.read_secs`|applied (HTTP/1); `unsupported_setting` with `http2.h2c`|`unsupported_setting`|`HttpSession::set_read_timeout` (`protocols/http/server.rs`). A no-op for HTTP/2, whose `read_body_bytes` reads with no timeout (`protocols/http/v2/server.rs`, `// TODO: timeout`), and a TLS entry point, or an `http` one with `http2.h2c`, serves HTTP/2|
 |`timeouts.write_secs`|applied|applied|`HttpSession::set_write_timeout`, implemented for HTTP/1 and HTTP/2|
 |`timeouts.idle_secs`|applied (HTTP/1 keep-alive)|applied (HTTP/1 keep-alive and HTTP/2 connection idle)|`HttpSession::set_keepalive` before the request is read (`Policed::process_new_http`), and `HttpServerOptions::h2_idle_timeout` (`apps/mod.rs`)|
 |`timeouts.header_secs`|`unsupported_setting`|`unsupported_setting`|none. HTTP/1 reads the head under the keep-alive timeout, one value for the wait for the first byte and for every later read (`protocols/http/v1/server.rs` `read_request_buf`); HTTP/2 headers are frames with no timeout|
-|`http2.max_concurrent_streams`|`unsupported_setting` (no HTTP/2: h2c is not enabled)|applied|`h2::server::Builder::max_concurrent_streams` through `HttpServerApp::h2_options`, read per connection (`apps/mod.rs`)|
+|`http2.max_concurrent_streams`|applied with `http2.h2c`, else `unsupported_setting` (no HTTP/2 without it)|applied|`h2::server::Builder::max_concurrent_streams` through `HttpServerApp::h2_options`, read per connection (`apps/mod.rs`)|
+|`http2.h2c`|applied (`true`)|`unsupported_setting` (TLS negotiates HTTP/2 by ALPN)|`HttpServerOptions::h2c` through `HttpServerApp::server_options`, read per connection (`apps/mod.rs`): Pingora peeks at the first bytes of a cleartext connection and serves HTTP/2 when they are the connection preface, HTTP/1.1 otherwise, so one port serves both. `docs/ref/grpc.md`|
 |`max_header_bytes`|applied|applied|HTTP/2: `Builder::max_header_list_size` through `h2_options`. HTTP/1: a check of the parsed head (`431`). Above 1048575 it is `unsupported_setting`: Pingora's HTTP/1 parser refuses a head over `MAX_HEADER_SIZE = 1048575` and nothing raises it|
 |`allow_encoded_slash`|applied|applied|podgate's path normalization (`src/router/path.rs`)|
 |`underscore_headers`|applied|applied|podgate, on the parsed head|

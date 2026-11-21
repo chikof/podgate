@@ -4,8 +4,9 @@
 //!
 //! Pingora reads three things per connection from the application, not from the request:
 //! [`HttpServerApp::h2_options`] (HTTP/2 stream and header limits), [`HttpServerApp::server_options`]
-//! (the HTTP/2 idle timeout) and, for HTTP/1, whatever the application sets on the session
-//! before it reads the first byte. `HttpProxy` returns fixed values for the first two, so a
+//! (the HTTP/2 idle timeout, and whether a cleartext listener serves HTTP/2: `http2.h2c`) and,
+//! for HTTP/1, whatever the application sets on the session before it reads the first byte.
+//! `HttpProxy` returns fixed values for the first two, so a
 //! snapshot could never change them. `Policed` asks the table of the moment and delegates
 //! everything else to the inner proxy.
 
@@ -54,21 +55,31 @@ pub fn service(
     Service::new(name.to_owned(), Fronted::new(gate, policed))
 }
 
-/// The options that carry an HTTP/2 idle timeout of `secs`, `None` outside `1..=MAX_SECS`.
+/// The prebuilt options for a policy's `h2c` and HTTP/2 idle timeout of `idle` whole seconds;
+/// `None` when it sets neither, or an idle timeout outside `1..=MAX_SECS`.
 ///
 /// `HttpServerApp::server_options` returns a reference that must outlive the call, so there is
-/// one prebuilt set per whole second a policy may name (about 200 KiB, built on first use).
-fn idle_options(secs: u32) -> Option<&'static HttpServerOptions> {
-    static BY_SECS: LazyLock<Box<[HttpServerOptions]>> = LazyLock::new(|| {
-        (1..=MAX_SECS)
+/// one prebuilt set per whole second a policy may name, with and without `h2c` (about 200 KiB
+/// each, built on first use).
+fn options_for(h2c: bool, idle: Option<u32>) -> Option<&'static HttpServerOptions> {
+    /// Options for `h2c` and each idle timeout from `first` to [`MAX_SECS`] seconds (`0` is none).
+    fn build(h2c: bool, first: u32) -> Box<[HttpServerOptions]> {
+        (first..=MAX_SECS)
             .map(|secs| {
                 let mut options = HttpServerOptions::default();
-                options.h2_idle_timeout = Some(Duration::from_secs(u64::from(secs)));
+                options.h2c = h2c;
+                options.h2_idle_timeout = (secs > 0).then(|| Duration::from_secs(u64::from(secs)));
                 options
             })
             .collect()
-    });
-    BY_SECS.get(usize::try_from(secs.checked_sub(1)?).ok()?)
+    }
+    static IDLE: LazyLock<Box<[HttpServerOptions]>> = LazyLock::new(|| build(false, 1));
+    static H2C: LazyLock<Box<[HttpServerOptions]>> = LazyLock::new(|| build(true, 0));
+    match (h2c, idle) {
+        (false, None) => None,
+        (false, Some(secs)) => IDLE.get(usize::try_from(secs.checked_sub(1)?).ok()?),
+        (true, secs) => H2C.get(usize::try_from(secs.unwrap_or(0)).ok()?),
+    }
 }
 
 #[async_trait]
@@ -95,12 +106,9 @@ impl HttpServerApp for Policed {
     }
 
     fn server_options(&self) -> Option<&HttpServerOptions> {
-        let idle = self
-            .table
-            .load()
-            .entry_policy(&self.entry_point)
-            .idle_secs()?;
-        idle_options(idle)
+        let table = self.table.load();
+        let policy = table.entry_policy(&self.entry_point);
+        options_for(policy.h2c(), policy.idle_secs())
     }
 
     async fn http_cleanup(&self) {

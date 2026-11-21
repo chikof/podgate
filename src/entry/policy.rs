@@ -18,6 +18,9 @@
 //!   is read) and the HTTP/2 connection idle timeout ([`super::app`]).
 //! - `http2.max_concurrent_streams`, `max_header_bytes` on HTTP/2: the `h2` connection builder
 //!   ([`Policy::h2_options`], read per connection by [`super::app`]).
+//! - `http2.h2c`: Pingora's `HttpServerOptions::h2c`, which peeks at the first bytes of a
+//!   cleartext connection for the HTTP/2 preface ([`Policy::h2c`], read per connection by
+//!   [`super::app`]); refused on a TLS entry point, which negotiates HTTP/2 by ALPN.
 //! - `max_header_bytes`: also a check of the parsed head ([`Policy::check_head`]).
 //! - `allow_encoded_slash`: the path normalization ([`Policy::allow_encoded_slash`]).
 //! - `underscore_headers`: [`Policy::check_head`].
@@ -115,6 +118,7 @@ pub struct Policy {
     redirect: Option<Redirect>,
     timeouts: Timeouts,
     h2_streams: Option<u32>,
+    h2c: bool,
     max_header_bytes: Option<u32>,
     allow_encoded_slash: bool,
     underscore: UnderscoreHeaders,
@@ -159,6 +163,13 @@ impl Policy {
         self.timeouts
             .idle
             .and_then(|idle| u32::try_from(idle.as_secs()).ok())
+    }
+
+    /// Whether an `http` entry point serves cleartext HTTP/2 by prior knowledge next to HTTP/1.1
+    /// (`http2.h2c`); read per connection by [`super::app`].
+    #[must_use]
+    pub fn h2c(&self) -> bool {
+        self.h2c
     }
 
     /// The `h2` connection settings this policy changes, `None` when it changes none (Pingora's
@@ -331,6 +342,7 @@ struct TimeoutsConfig {
 #[serde(deny_unknown_fields)]
 struct Http2Config {
     max_concurrent_streams: Option<u32>,
+    h2c: Option<bool>,
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(
@@ -368,7 +380,13 @@ fn compile_one(
     let name = &*policy.name;
     let protocol = context.protocol_of(name);
     let serves_http = protocol.is_none_or(Protocol::is_http);
-    let serves_h2 = protocol == Some(Protocol::Https);
+    let h2c = policy
+        .http2
+        .as_ref()
+        .and_then(|http2| http2.get("h2c"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let serves_h2 = protocol == Some(Protocol::Https) || h2c;
     let carries_http_policy = policy.redirect.is_some()
         || policy.timeouts.is_some()
         || policy.http2.is_some()
@@ -404,8 +422,8 @@ fn compile_one(
                         problems.push(unsupported(
                             "timeouts.read_secs",
                             "Pingora 0.9 reads an HTTP/2 request body with no timeout \
-                             (`set_read_timeout` is a no-op for HTTP/2), and a TLS entry point \
-                             serves HTTP/2",
+                             (`set_read_timeout` is a no-op for HTTP/2), and this entry point \
+                             serves HTTP/2 (a TLS entry point, or an http one with `http2.h2c`)",
                         ));
                     } else {
                         match seconds("timeouts.read_secs", secs) {
@@ -440,12 +458,23 @@ fn compile_one(
         match parse::<Http2Config>(value, "invalid_http2", "http2") {
             Err(invalid) => problems.push(invalid),
             Ok(config) => {
+                if config.h2c == Some(true) {
+                    if protocol == Some(Protocol::Https) {
+                        problems.push(unsupported(
+                            "http2.h2c",
+                            "a TLS entry point negotiates HTTP/2 by ALPN; h2c is for an http \
+                             entry point",
+                        ));
+                    } else {
+                        compiled.h2c = true;
+                    }
+                }
                 if let Some(streams) = config.max_concurrent_streams {
                     if !serves_h2 {
                         problems.push(unsupported(
                             "http2.max_concurrent_streams",
-                            "this entry point does not serve HTTP/2: only a TLS entry point \
-                             negotiates it, and Pingora's h2c is not enabled",
+                            "this entry point does not serve HTTP/2: a TLS entry point \
+                             negotiates it, and an http one serves it with `http2.h2c`",
                         ));
                     } else if (1..=MAX_STREAMS).contains(&streams) {
                         compiled.h2_streams = Some(streams);
@@ -771,6 +800,18 @@ mod test {
                 "unsupported_setting",
             ),
             (
+                json!({ "name": "sec", "http2": { "h2c": true } }),
+                "unsupported_setting",
+            ),
+            (
+                json!({ "name": "web", "http2": { "h2c": "yes" } }),
+                "invalid_http2",
+            ),
+            (
+                json!({ "name": "web", "http2": { "h2c": true }, "timeouts": { "read_secs": 5 } }),
+                "unsupported_setting",
+            ),
+            (
                 json!({ "name": "sec", "http2": { "max_concurrent_streams": 0 } }),
                 "invalid_http2",
             ),
@@ -807,6 +848,10 @@ mod test {
             { "name": "sec", "timeouts": { "write_secs": 5, "idle_secs": 5 }, "http2": { "max_concurrent_streams": 50 } },
         ]));
         assert!(fine.is_empty(), "{fine:?}");
+        let h2c = codes(json!([
+            { "name": "web", "timeouts": { "write_secs": 5, "idle_secs": 5 }, "http2": { "h2c": true, "max_concurrent_streams": 50 } },
+        ]));
+        assert!(h2c.is_empty(), "{h2c:?}");
     }
 
     #[test]
