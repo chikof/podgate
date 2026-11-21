@@ -7,6 +7,7 @@
 //! path = "/etc/podgate/apps.d"   # a file, or a directory of *.yaml, *.yml, *.toml and *.json
 //! poll_ms = 1000                 # how often the files are looked at
 //! tenant = "acme"                # the tenant the operator maps this source to
+//! format = "podgate"             # or "traefik": the files are Traefik dynamic configuration
 //! ```
 //!
 //! A file is a partial snapshot, `{apps: [...], certificates: [...]}`, in the shape of the
@@ -14,6 +15,9 @@
 //! that names a tenant of its own is a label claim that only tenants listing the source in
 //! `label_sources` honour (see [`crate::trust`]). A `tenants` key is ignored with a warning: a
 //! file cannot invent a tenant or a budget.
+//!
+//! With `format = "traefik"` the files are Traefik dynamic configuration, one app per file (see
+//! [`crate::traefik_file`]).
 //!
 //! Changes are found by polling, so the source needs no platform API and behaves the same on
 //! bind mounts and network filesystems. A file counts as changed when its identity (device and
@@ -79,6 +83,19 @@ struct Settings {
     path: PathBuf,
     poll_ms: Option<u64>,
     tenant: Option<String>,
+    #[serde(default)]
+    format: Layout,
+}
+
+/// What the files of a source contain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Layout {
+    /// Partial snapshots in the shape of `podgate-model`.
+    #[default]
+    Podgate,
+    /// Traefik dynamic configuration, converted by [`crate::traefik_file`].
+    Traefik,
 }
 
 /// The file source.
@@ -88,6 +105,7 @@ pub struct FileSource {
     path: PathBuf,
     poll: Duration,
     tenant: Box<str>,
+    layout: Layout,
 }
 
 impl FileSource {
@@ -123,6 +141,7 @@ impl FileSource {
             path: settings.path,
             poll: Duration::from_millis(poll_ms),
             tenant: tenant.into(),
+            layout: settings.format,
         })
     }
 }
@@ -226,14 +245,19 @@ struct ParsedApp {
 struct Content {
     apps: Vec<ParsedApp>,
     certificates: Vec<Certificate>,
+    /// The files a conversion read besides the file itself, which count as part of it.
+    watched: Vec<PathBuf>,
 }
 
 /// Reads one file's content. Errors say what is wrong and where, without the file's path (the
 /// caller adds it).
-fn parse(path: &Path, bytes: &[u8], mapped: &str) -> Result<Content, String> {
+fn parse(path: &Path, bytes: &[u8], mapped: &str, layout: Layout) -> Result<Content, String> {
     let format =
         Format::of(path).ok_or("unknown extension; use .yaml, .yml, .toml or .json".to_owned())?;
     let text = std::str::from_utf8(bytes).map_err(|err| format!("not valid UTF-8: {err}"))?;
+    if layout == Layout::Traefik {
+        return parse_traefik(path, text, mapped);
+    }
     // An editor that truncates before it writes would otherwise delete every app of the file for
     // the moment between the two. A file with no apps says `apps: []`.
     if text.trim().is_empty() {
@@ -281,6 +305,40 @@ fn parse(path: &Path, bytes: &[u8], mapped: &str) -> Result<Content, String> {
     Ok(content)
 }
 
+/// Reads a Traefik dynamic configuration file: one app, whose id is the file's stem. What podgate
+/// cannot express is logged and left out; the rest is the content, so one option the translator
+/// does not know does not take the other routes of the file down.
+fn parse_traefik(path: &Path, text: &str, mapped: &str) -> Result<Content, String> {
+    let syntax = crate::traefik_file::Syntax::of(path).ok_or("unknown extension")?;
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    let converted = crate::traefik_file::convert(
+        id,
+        text,
+        syntax,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+    )
+    .map_err(|err| err.to_string())?;
+    for problem in &converted.problems {
+        warn!(file = %path.display(), "rejected: {problem}");
+    }
+    let Value::Object(mut object) = converted.app else {
+        return Err("is not a Traefik configuration".to_owned());
+    };
+    // The tenant is the source's mapping and `declared_by` the origin's, as for any file.
+    object.insert("tenant".to_owned(), Value::String(mapped.to_owned()));
+    object.insert("declared_by".to_owned(), Value::String("file".to_owned()));
+    let app: App = serde_json::from_value(Value::Object(object))
+        .map_err(|err| format!("the converted app is not valid: {err}"))?;
+    Ok(Content {
+        apps: vec![ParsedApp { label: None, app }],
+        certificates: converted.certificates,
+        watched: converted.files,
+    })
+}
+
 /// What identifies a version of a file without reading it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stamp {
@@ -322,16 +380,20 @@ struct Tracked {
     good: Option<(u64, Content)>,
     /// Why the file's current content is not in use.
     error: Option<String>,
+    /// The files the last conversion read, with their stamps: a certificate renewed on disk
+    /// changes the app without the file itself changing.
+    deps: Vec<(PathBuf, Option<Stamp>)>,
 }
 
 impl Tracked {
-    fn refresh(&mut self, path: &Path, mapped: &str, now: i64) {
+    fn refresh(&mut self, path: &Path, mapped: &str, layout: Layout, now: i64) {
         let meta = match fs::metadata(path) {
             Ok(meta) => meta,
             Err(err) => return self.unreadable(&format!("cannot stat: {err}")),
         };
         let stamp = Stamp::of(&meta);
-        if self.settled && self.stamp == Some(stamp) {
+        let deps_moved = self.deps_moved();
+        if self.settled && self.stamp == Some(stamp) && !deps_moved {
             return;
         }
         if stamp.size > MAX_FILE_BYTES {
@@ -356,17 +418,30 @@ impl Tracked {
         self.stamp = Some(stamp);
         self.settled = now.saturating_sub(stamp.modified.0) >= RACY_SECS;
         let hash = hash_of(&bytes);
-        if self.parsed == Some(hash) {
+        if self.parsed == Some(hash) && !deps_moved {
             return;
         }
         self.parsed = Some(hash);
-        match parse(path, &bytes, mapped) {
+        match parse(path, &bytes, mapped, layout) {
             Ok(content) => {
-                self.good = Some((hash, content));
+                self.deps = content
+                    .watched
+                    .iter()
+                    .map(|dep| (dep.clone(), stamp_of(dep)))
+                    .collect();
+                // The files it read are part of the version: a renewed certificate is a change.
+                let version = hash_of(format!("{hash}{:?}", self.deps).as_bytes());
+                self.good = Some((version, content));
                 self.error = None;
             }
             Err(err) => self.error = Some(err),
         }
+    }
+
+    fn deps_moved(&self) -> bool {
+        self.deps
+            .iter()
+            .any(|(path, stamp)| stamp_of(path) != *stamp)
     }
 
     /// The file cannot be read now. Its last good content stays; the next poll tries again.
@@ -376,6 +451,10 @@ impl Tracked {
         self.parsed = None;
         self.error = Some(why.to_owned());
     }
+}
+
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    fs::metadata(path).ok().map(|meta| Stamp::of(&meta))
 }
 
 fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -405,6 +484,7 @@ struct Scanner {
     name: Box<str>,
     path: PathBuf,
     tenant: Box<str>,
+    layout: Layout,
     files: BTreeMap<PathBuf, Tracked>,
     /// Whether every file has parsed once. Until then no state is sent: the files that failed
     /// have no last good content, and a state without their apps would delete them.
@@ -418,6 +498,7 @@ impl Scanner {
             name: source.name,
             path: source.path,
             tenant: source.tenant,
+            layout: source.layout,
             files: BTreeMap::new(),
             ready: false,
             sent: None,
@@ -462,10 +543,12 @@ impl Scanner {
         };
         self.files.retain(|path, _| listed.contains(path));
         for path in listed {
-            self.files
-                .entry(path.clone())
-                .or_default()
-                .refresh(&path, &self.tenant, now);
+            self.files.entry(path.clone()).or_default().refresh(
+                &path,
+                &self.tenant,
+                self.layout,
+                now,
+            );
         }
         let errors: Vec<Box<str>> = self
             .files
@@ -579,6 +662,7 @@ mod test {
             path: dir.to_owned(),
             poll: Duration::from_millis(10),
             tenant: "default".into(),
+            layout: Layout::Podgate,
         })
     }
 

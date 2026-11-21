@@ -18,6 +18,7 @@ tenant = "acme"
 | `path` | required | A file, or a directory. In a directory every `*.yaml`, `*.yml`, `*.toml` and `*.json` file counts (extension case-insensitive, no recursion). Files that start with `.` (editor swap and lock files), other extensions and sub-directories are ignored with a debug line. Symbolic links are followed, so Kubernetes ConfigMap mounts work. |
 | `poll_ms` | `1000` | The interval of the watch. At least `10`. |
 | `tenant` | `default` | The tenant the operator maps this source to. Every app and certificate of the source belongs to it. |
+| `format` | `podgate` | `podgate`: the files are partial snapshots, as below. `traefik`: the files are Traefik dynamic configuration, one app per file, translated by the converter of `docs/ref/provider-traefik-file.md`. |
 
 Unknown keys are errors: a misspelt `tenant` must not move the apps to the default tenant. An explicit `path` to a file with another extension is a parse error of that file.
 

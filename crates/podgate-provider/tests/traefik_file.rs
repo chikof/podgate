@@ -797,3 +797,72 @@ async fn converted_fixture_validates() {
     let (status, answer) = daemon_validates(&["shop.yml"]).await;
     assert_eq!(status, 200, "{answer}");
 }
+
+/// The file source with `format = "traefik"`: a Traefik file is an app of the source's tenant
+/// with `first_seen` 0, and renewing a certificate on disk is a change of the app.
+#[tokio::test]
+async fn traefik_file_source_follows_files_it_reads() {
+    use podgate_provider::file::FileSource;
+    use podgate_provider::source::Source;
+    use tokio::sync::mpsc;
+
+    let dir = Dir::new("source");
+    let (cert, key) = ca_pem("web.test");
+    dir.write("web.crt", &cert);
+    dir.write("web.key", &key);
+    dir.write(
+        "web.yml",
+        "http:\n  routers:\n    r: {rule: 'Host(`web.test`)', service: s}\n  services:\n    s: {loadBalancer: {servers: [{url: 'http://127.0.0.1:1'}]}}\ntls:\n  certificates: [{certFile: web.crt, keyFile: web.key}]\n",
+    );
+    let config = common::config(
+        &dir.0.join("admin.sock"),
+        &format!(
+            "[[source]]\nkind = \"file\"\nname = \"files\"\npath = {:?}\nformat = \"traefik\"\npoll_ms = 20\ntenant = \"acme\"\n",
+            dir.0.display().to_string()
+        ),
+    );
+    let source = FileSource::from_config(&config.sources[0]).expect("a valid file source");
+    let (tx, mut rx) = mpsc::channel(16);
+    let task = tokio::spawn(source.run(tx));
+    let state = next_state(&mut rx, None).await;
+    assert_eq!(state.apps.len(), 1);
+    let app = &state.apps[0];
+    assert_eq!(&*app.app.id, "web");
+    assert_eq!(app.tenant.mapped.as_deref(), Some("acme"));
+    assert_eq!(app.origin.first_seen, 0);
+    assert_eq!(&*app.app.routers[0].name, "r");
+    assert_eq!(&*state.certificates[0].certificate.hosts[0], "web.test");
+
+    let (renewed, renewed_key) = ca_pem("web.test");
+    dir.write("web.key", &renewed_key);
+    dir.write("web.crt", &renewed);
+    let state = next_state(&mut rx, Some(&renewed)).await;
+    assert_eq!(state.certificates[0].certificate.cert_pem, renewed);
+    task.abort();
+}
+
+/// The next state the source sends, with the certificate `wanted` when one is named.
+async fn next_state(
+    rx: &mut tokio::sync::mpsc::Receiver<podgate_provider::source::Update>,
+    wanted: Option<&str>,
+) -> podgate_provider::source::State {
+    use podgate_provider::source::UpdateBody;
+    let wait = async {
+        loop {
+            let update = rx.recv().await.expect("the source keeps running");
+            if let UpdateBody::State(state) = update.body
+                && wanted.is_none_or(|pem| {
+                    state
+                        .certificates
+                        .iter()
+                        .any(|found| found.certificate.cert_pem == pem)
+                })
+            {
+                return state;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), wait)
+        .await
+        .expect("the state arrives in time")
+}

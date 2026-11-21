@@ -44,7 +44,7 @@ pub(super) fn build(cx: &Cx, section: Option<&Value>) -> Tls {
             entry.finish();
             if cx.clean_since(mark)
                 && let (Some(cert), Some(key)) = (cert, key)
-                && let Some(certificate) = certificate(cx, &at, cert, key, false)
+                && let Some(certificate) = certificate(cx, &at, &cert, &key, false)
             {
                 out.certificates.push(certificate);
             }
@@ -74,7 +74,7 @@ pub(super) fn build(cx: &Cx, section: Option<&Value>) -> Tls {
         store.finish();
         if cx.clean_since(mark)
             && let Some((path, Some(cert), Some(key))) = pair
-            && let Some(certificate) = certificate(cx, &path, cert, key, true)
+            && let Some(certificate) = certificate(cx, &path, &cert, &key, true)
         {
             out.certificates.push(certificate);
         }
@@ -94,8 +94,8 @@ fn file_of(obj: &mut Obj<'_>, key: &str) -> Option<String> {
     pem_of(obj, key)
 }
 
-fn certificate(cx: &Cx, at: &str, cert: String, key: String, default: bool) -> Option<Certificate> {
-    let hosts = files::hosts_of(cx, at, &cert)?;
+fn certificate(cx: &Cx, at: &str, cert: &str, key: &str, default: bool) -> Option<Certificate> {
+    let hosts = files::hosts_of(cx, at, cert)?;
     let mut object = json!({ "hosts": hosts, "cert_pem": cert, "key_pem": key });
     if default {
         object["default"] = json!(true);

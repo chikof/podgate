@@ -97,6 +97,10 @@ pub enum ConvertError {
     /// The text is not valid in its syntax.
     #[error("{0}")]
     Decode(String),
+    /// The file holds nothing. An editor that truncates a file before it writes it would otherwise
+    /// remove every route for the moment between the two.
+    #[error("has no content")]
+    Empty,
 }
 
 /// What a Traefik file came to.
@@ -119,6 +123,7 @@ pub struct Converted {
 ///
 /// # Errors
 ///
+/// [`ConvertError::Empty`] when `text` has no content (blank, or only comments), and
 /// [`ConvertError::Decode`] when `text` is not valid in `syntax`. A problem with any option is
 /// not an error: it is in [`Converted::problems`].
 pub fn convert(
@@ -127,7 +132,13 @@ pub fn convert(
     syntax: Syntax,
     dir: &Path,
 ) -> Result<Converted, ConvertError> {
+    if text.trim().is_empty() {
+        return Err(ConvertError::Empty);
+    }
     let root = syntax.decode(text).map_err(ConvertError::Decode)?;
+    if root.is_null() {
+        return Err(ConvertError::Empty);
+    }
     Ok(app::convert(id, &root, dir))
 }
 
