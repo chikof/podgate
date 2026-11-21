@@ -112,7 +112,7 @@ For every kind (Ingress, Service, EndpointSlice, TLS Secret) and every namespace
 - **`410 Gone`.** A watch version the server no longer keeps (as an HTTP status or an `ERROR` frame) is not an outage: the watcher lists again and the new list replaces what the source held. Objects deleted while disconnected disappear with it.
 - **Bookmarks.** Requested on every watch; a bookmark moves the remembered version, so a reconnect after a quiet period resumes near now and needs no list.
 - **Server timeouts.** Watches are opened with `timeoutSeconds=240`. When the server ends one, the watcher resumes from its version. A watch silent for more than that plus 30 seconds is treated as dead. A watch that ends at once, with no frame, counts as a failure, so a server that closes every watch cannot make the source spin.
-- **Limits.** A list page and an error body are read up to 64 MiB, one watch frame (one object) up to 8 MiB; more is an error. Lists are paged (500 objects per request).
+- **Limits.** A list page is read up to 64 MiB, an error body up to 64 KiB, one watch frame (one object) up to 8 MiB; more is an error. Lists are paged (500 objects per request).
 
 ## RBAC
 
