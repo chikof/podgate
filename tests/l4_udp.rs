@@ -146,10 +146,9 @@ async fn udp_roundtrip_two_clients() {
     );
     assert_eq!(first, Some(("A:one".to_owned(), entry)));
     assert_eq!(second, Some(("A:two".to_owned(), entry)));
-    assert_eq!(
-        metric(&podgate, "podgate_udp_datagrams_total{direction=\"out\"}").await,
-        2
-    );
+    // The daemon counts a datagram after `send_to` returns, so a client can hold the reply first.
+    let out = "podgate_udp_datagrams_total{direction=\"out\"}";
+    assert_eq!(wait_for(&podgate, out, |sent| sent >= 2).await, 2);
 }
 
 #[tokio::test]
@@ -550,8 +549,9 @@ async fn udp_flood_sends_nothing_to_silent_clients() {
                 .is_some()
         );
     }
+    let out = "podgate_udp_datagrams_total{direction=\"out\"}";
     assert_eq!(
-        metric(&podgate, "podgate_udp_datagrams_total{direction=\"out\"}").await,
+        wait_for(&podgate, out, |sent| sent >= 3).await,
         3,
         "one datagram out for each the upstream sent"
     );
