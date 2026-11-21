@@ -744,3 +744,40 @@ async fn file_example_is_valid() {
     let state = watcher.wait_ids(&["shop"]).await;
     assert_eq!(upstream_of(&state, "shop"), "http://10.4.0.10:8080");
 }
+
+/// The object that keeps a contested host: the oldest by `(first_seen, source, object)`, as the
+/// merge and the quarantine order them.
+fn winner(state: &State) -> String {
+    state
+        .apps
+        .iter()
+        .map(|app| {
+            (
+                app.origin.first_seen,
+                &app.origin.source,
+                &app.origin.object,
+            )
+        })
+        .min()
+        .map(|(_, _, object)| object.to_string())
+        .expect("a contested host has apps")
+}
+#[tokio::test]
+async fn file_host_conflict_winner_survives_restart() {
+    let dir = Dir::new("restart-winner");
+    let config = file_config(&dir.0, "default", "");
+    dir.write_aged("b.json", &one_app("b", "web.test", "http://10.0.0.2:80"));
+    let mut first = Watcher::start(&config);
+    first.wait_ids(&["b"]).await;
+    // Stamps are whole seconds: the second file must be first read in a later second.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    dir.write_aged("a.json", &one_app("a", "web.test", "http://10.0.0.1:80"));
+    let state = first.wait_ids(&["a", "b"]).await;
+    let before = winner(&state);
+    drop(first);
+
+    let mut restarted = Watcher::start(&config);
+    let state = restarted.wait_ids(&["a", "b"]).await;
+    let after = winner(&state);
+    assert_eq!(before, after, "the winner is the same after a restart");
+}

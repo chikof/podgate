@@ -36,6 +36,8 @@ A partial snapshot in the shape of `podgate-model`: `{apps: [App...], certificat
 
 `declared_by` is `file/<source name>:<path>#<app id>`; podgate names it in conflicts. App ids in the snapshot are `<source name>-<app id>`. A certificate's object is `<path>#certificate-<index>`.
 
+`first_seen` is `0` for every file object: a file has no creation time a source can rely on (mtime changes on every edit, birth time is not portable), and the time the provider first read it would reorder winners after a restart. A host conflict between file objects falls back to source and object name, which is stable across restarts.
+
 ## Watching
 
 The source polls every `poll_ms`; it uses no new dependency and behaves the same on every filesystem, including the bind mounts containers use.

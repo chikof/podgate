@@ -406,8 +406,6 @@ struct Scanner {
     path: PathBuf,
     tenant: Box<str>,
     files: BTreeMap<PathBuf, Tracked>,
-    /// When each object was first seen, so a conflict keeps the older object across edits.
-    first_seen: BTreeMap<Box<str>, u64>,
     /// Whether every file has parsed once. Until then no state is sent: the files that failed
     /// have no last good content, and a state without their apps would delete them.
     ready: bool,
@@ -421,7 +419,6 @@ impl Scanner {
             path: source.path,
             tenant: source.tenant,
             files: BTreeMap::new(),
-            first_seen: BTreeMap::new(),
             ready: false,
             sent: None,
         }
@@ -504,7 +501,7 @@ impl Scanner {
         let Sent::Available { errors, .. } = &observed else {
             return Vec::new();
         };
-        let mut updates = vec![self.state(now)];
+        let mut updates = vec![self.state()];
         if !errors.is_empty() {
             let why = format!(
                 "{}; their last good content stays in force",
@@ -530,24 +527,20 @@ impl Scanner {
     }
 
     /// The state of the last good content of every file.
-    fn state(&mut self, now: i64) -> Update {
-        let stamp = u64::try_from(now).unwrap_or(0);
+    fn state(&self) -> Update {
         let mut apps = Vec::new();
         let mut certificates = Vec::new();
-        let mut seen = BTreeMap::new();
         for (path, tracked) in &self.files {
             let Some((_, content)) = &tracked.good else {
                 continue;
             };
             for parsed in &content.apps {
                 let object: Box<str> = format!("{}#{}", path.display(), parsed.app.id).into();
-                let first_seen = *self.first_seen.get(&object).unwrap_or(&stamp);
-                seen.insert(object.clone(), first_seen);
                 apps.push(SourceApp {
                     origin: Origin {
                         source: self.name.clone(),
                         object,
-                        first_seen,
+                        first_seen: 0,
                     },
                     tenant: TenantClaim {
                         mapped: Some(self.tenant.clone()),
@@ -558,20 +551,17 @@ impl Scanner {
             }
             for (index, certificate) in content.certificates.iter().enumerate() {
                 let object: Box<str> = format!("{}#certificate-{index}", path.display()).into();
-                let first_seen = *self.first_seen.get(&object).unwrap_or(&stamp);
-                seen.insert(object.clone(), first_seen);
                 certificates.push(SourceCertificate {
                     origin: Origin {
                         source: self.name.clone(),
                         object,
-                        first_seen,
+                        first_seen: 0,
                     },
                     tenant: TenantClaim::mapped(&self.tenant),
                     certificate: certificate.clone(),
                 });
             }
         }
-        self.first_seen = seen;
         Update {
             source: self.name.clone(),
             body: UpdateBody::State(State { apps, certificates }),
