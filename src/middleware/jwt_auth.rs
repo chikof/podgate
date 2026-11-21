@@ -344,30 +344,7 @@ impl Source {
                     request.append_header(COOKIE, value).ok();
                 }
             }
-            Self::Query(wanted) => {
-                let Some(query) = request.uri.query() else {
-                    return;
-                };
-                let kept: Vec<&str> = query
-                    .split('&')
-                    .filter(|piece| {
-                        form_urlencoded::parse(piece.as_bytes())
-                            .next()
-                            .is_none_or(|(name, _)| name != **wanted)
-                    })
-                    .collect();
-                let path = request.uri.path();
-                let target = if kept.is_empty() {
-                    path.to_owned()
-                } else {
-                    format!("{path}?{}", kept.join("&"))
-                };
-                let mut parts = request.uri.clone().into_parts();
-                parts.path_and_query = target.parse().ok();
-                if let Ok(uri) = http::Uri::from_parts(parts) {
-                    request.set_uri(uri);
-                }
-            }
+            Self::Query(wanted) => strip_query_params(request, |name| name == &**wanted),
         }
     }
 
@@ -399,6 +376,114 @@ fn without_cookie(value: &HeaderValue, wanted: &str) -> Option<HeaderValue> {
     (!kept.is_empty())
         .then(|| HeaderValue::from_str(&kept.join("; ")).ok())
         .flatten()
+}
+
+/// Removes the query parameters of `request` whose (decoded) name `is_credential` says is one,
+/// keeping every other piece of the query as it was written.
+fn strip_query_params(request: &mut RequestHeader, is_credential: impl Fn(&str) -> bool) {
+    let Some(query) = request.uri.query() else {
+        return;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|piece| {
+            form_urlencoded::parse(piece.as_bytes())
+                .next()
+                .is_none_or(|(name, _)| !is_credential(&name))
+        })
+        .collect();
+    let path = request.uri.path();
+    let target = if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    let mut parts = request.uri.clone().into_parts();
+    parts.path_and_query = target.parse().ok();
+    if let Ok(uri) = http::Uri::from_parts(parts) {
+        request.set_uri(uri);
+    }
+}
+
+/// The places the `jwt_auth` stages of one chain read a token from, for the sinks that copy or
+/// record a request and must not show it: the access log, the failed-request ring and the copy
+/// a mirror gets.
+#[derive(Debug, Default)]
+pub(crate) struct Credentials {
+    query: Vec<Box<str>>,
+    headers: Vec<HeaderName>,
+}
+
+impl Credentials {
+    /// The token places of the `jwt_auth` stages of `chain` (indices into the stages of `app`).
+    #[must_use]
+    pub(crate) fn of(app: &CompiledApp, chain: &[usize]) -> Self {
+        let mut found = Self::default();
+        for index in chain {
+            let Some(Stage::JwtAuth(auth)) = app.stages().get(*index).map(|named| &named.stage)
+            else {
+                continue;
+            };
+            for source in &auth.0.sources {
+                match source {
+                    Source::Query(name) => found.query.push(name.clone()),
+                    Source::Header { name, .. } => found.headers.push(name.clone()),
+                    Source::Cookie(_) => {}
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether the header `name` (lower case) is where a token is read from.
+    #[must_use]
+    pub(crate) fn header(&self, name: &str) -> bool {
+        self.headers.iter().any(|header| header.as_str() == name)
+    }
+
+    /// `query` with the value of every token parameter replaced by `[redacted]`.
+    #[must_use]
+    pub(crate) fn redact_query(&self, query: &str) -> String {
+        if self.query.is_empty() {
+            return query.to_owned();
+        }
+        query
+            .split('&')
+            .map(|piece| match piece.split_once('=') {
+                Some((written, _))
+                    if form_urlencoded::parse(written.as_bytes())
+                        .next()
+                        .is_some_and(|(name, _)| {
+                            self.query.iter().any(|known| **known == *name)
+                        }) =>
+                {
+                    format!("{written}=[redacted]")
+                }
+                _ => piece.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    /// `target` (a path and query) with the value of every token parameter redacted.
+    #[must_use]
+    pub(crate) fn redact_target(&self, target: &str) -> String {
+        match target.split_once('?') {
+            Some((path, query)) if !self.query.is_empty() => {
+                format!("{path}?{}", self.redact_query(query))
+            }
+            _ => target.to_owned(),
+        }
+    }
+
+    /// Removes every token parameter from `request`.
+    pub(crate) fn strip_query(&self, request: &mut RequestHeader) {
+        if !self.query.is_empty() {
+            strip_query_params(request, |name| {
+                self.query.iter().any(|known| **known == *name)
+            });
+        }
+    }
 }
 
 /// The counters of one middleware, shown by [`render`].
@@ -933,9 +1018,7 @@ impl Kind for JwtAuth {
                 ))
     }
 
-    /// What the stage checks; never a key, a secret or the query of `jwks_uri`. The overview
-    /// refuses a field named like a secret, so the three settings that say "token" are shown as
-    /// `max_age_secs`, `sources` and `remove_credential`.
+    /// What the stage checks; never a key, a secret or the query of `jwks_uri`.
     fn describe(&self) -> Value {
         let parts = &*self.0;
         json!({
@@ -950,12 +1033,12 @@ impl Kind for JwtAuth {
                 .map(|(name, want)| (name.to_string(), json!(want)))
                 .collect::<Map<String, Value>>(),
             "leeway_secs": parts.rules.leeway_secs,
-            "max_age_secs": parts.rules.max_token_age_secs,
-            "sources": parts.sources.iter().map(Source::describe).collect::<Vec<_>>(),
+            "max_token_age_secs": parts.rules.max_token_age_secs,
+            "token_sources": parts.sources.iter().map(Source::describe).collect::<Vec<_>>(),
             "forward_claims": parts.forward.iter()
                 .map(|(claim, header)| (claim.to_string(), json!(header.as_str())))
                 .collect::<Map<String, Value>>(),
-            "remove_credential": parts.remove_token,
+            "remove_token": parts.remove_token,
         })
     }
 }

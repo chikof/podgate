@@ -1206,3 +1206,69 @@ async fn wait_for_requests(server: &Server, count: usize) {
         server.requests()
     );
 }
+
+/// The app `a.test` whose router mirrors to a shadow server, behind `jwt_auth` with `config`.
+fn mirrored_site(
+    main: SocketAddr,
+    shadow: SocketAddr,
+    forward_credentials: bool,
+    config: Value,
+) -> Value {
+    let mirror = json!({
+        "name": "m", "type": "mirroring", "service": "web",
+        "mirrors": [{"service": "shadow", "percent": 100.0}],
+        "forward_credentials": forward_credentials,
+    });
+    let revision = json!({"id": "r1", "state": "serving", "weight": 100,
+        "services": [service("web", &[main]), service("shadow", &[shadow]), mirror]});
+    let mut app = app("a", &["a.test"], &[revision]);
+    app["routers"] = json!([router("default", json!({"host": ["a.test"]}), "m")]);
+    with_jwt_auth(app, config)
+}
+
+#[tokio::test]
+async fn mirror_drops_jwt_query_token() {
+    let podgate = Podgate::start().await;
+    let (main, shadow) = (echo().await, echo().await);
+    let key = Signer::es256("k");
+    let config = with(
+        &keys_config(&[&key], &["ES256"]),
+        &json!({"token_sources": [{"query": "t"}]}),
+    );
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[mirrored_site(main.addr, shadow.addr, false, config.clone())],
+        ),
+    )
+    .await;
+    let token = key.sign("ES256", &json!({}), &claims(&json!({})));
+    let path = format!("/p?x=1&t={token}&y=2");
+
+    let answer = podgate.get("a.test", &path).await;
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert!(
+        answer.body.starts_with(&format!("GET {path} HTTP/1.1")),
+        "the main service gets the request as it was: {}",
+        answer.body
+    );
+    wait_for_requests(&shadow, 1).await;
+    let copy = shadow.heads()[0].clone();
+    assert!(copy.starts_with("GET /p?x=1&y=2 HTTP/1.1"), "{copy}");
+    assert!(!copy.contains(&token), "{copy}");
+
+    // Meant to carry credentials: the copy keeps the URL as it is.
+    push(
+        &podgate,
+        &snapshot(2, &[mirrored_site(main.addr, shadow.addr, true, config)]),
+    )
+    .await;
+    assert_eq!(podgate.get("a.test", &path).await.status, 200);
+    wait_for_requests(&shadow, 2).await;
+    assert!(
+        shadow.heads()[1].starts_with(&format!("GET {path} HTTP/1.1")),
+        "{}",
+        shadow.heads()[1]
+    );
+}

@@ -42,6 +42,7 @@ use super::{BLOCK, HEAD_ALLOWANCE, Plan, WHOLE};
 use crate::budget::{BufferGuard, TenantBudget};
 use crate::compile::hash_of;
 use crate::fairq::Backends;
+use crate::middleware::jwt_auth::Credentials;
 use crate::proxy::Ctx;
 use crate::route::Selected;
 use crate::service::PickCx;
@@ -322,6 +323,7 @@ fn copy_of(
     request: &RequestHeader,
     credentials: bool,
     identity: &dyn Fn(&HeaderName) -> bool,
+    tokens: &Credentials,
 ) -> Option<RequestHeader> {
     let mut copy = request.clone();
     let mut remove: Vec<HeaderName> = copy
@@ -341,6 +343,8 @@ fn copy_of(
     }
     if !credentials {
         remove.extend(copy.headers.keys().filter(|name| identity(name)).cloned());
+        // A token read from the query string is in the URL, which the headers above do not cover.
+        tokens.strip_query(&mut copy);
     }
     for name in &remove {
         copy.remove_header(name);
@@ -415,6 +419,9 @@ pub fn begin(
         return refuse(Dropped::Budget);
     };
     let chain = ctx.matched.and_then(|matched| table.router(matched));
+    let tokens = chain.map_or_else(Credentials::default, |(app, router)| {
+        Credentials::of(app, router.chain())
+    });
     let identity = |name: &HeaderName| {
         chain.is_some_and(|(app, router)| {
             router
@@ -424,7 +431,12 @@ pub fn begin(
                 .any(|named| named.stage.carries_identity(name))
         })
     };
-    let Some(head) = copy_of(upstream_request, settings.forward_credentials, &identity) else {
+    let Some(head) = copy_of(
+        upstream_request,
+        settings.forward_credentials,
+        &identity,
+        &tokens,
+    ) else {
         return refuse(Dropped::HeadTooLarge);
     };
     if copies_body {
@@ -629,7 +641,13 @@ mod test {
         ] {
             request.insert_header(name, value).expect("header");
         }
-        let bare = copy_of(&request, false, &|name| name.as_str() == "x-user").expect("copy");
+        let bare = copy_of(
+            &request,
+            false,
+            &|name| name.as_str() == "x-user",
+            &Credentials::default(),
+        )
+        .expect("copy");
         let names: Vec<&str> = bare.headers.keys().map(HeaderName::as_str).collect();
         assert_eq!(bare.headers.get(MARKER).expect("marker"), "1");
         for gone in [
@@ -642,7 +660,13 @@ mod test {
             assert!(!names.contains(&gone), "{gone} stays out: {names:?}");
         }
         assert!(names.contains(&"host") && names.contains(&"accept"));
-        let with = copy_of(&request, true, &|name| name.as_str() == "x-user").expect("copy");
+        let with = copy_of(
+            &request,
+            true,
+            &|name| name.as_str() == "x-user",
+            &Credentials::default(),
+        )
+        .expect("copy");
         assert!(with.headers.contains_key("authorization") && with.headers.contains_key("cookie"));
         assert!(
             with.headers.contains_key("x-user"),

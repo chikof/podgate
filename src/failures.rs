@@ -51,6 +51,7 @@ use pingora::upstreams::peer::HttpPeer;
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::middleware::jwt_auth::Credentials;
 use crate::proxy::Ctx;
 use crate::table::{CompiledApp, RoutingTable};
 
@@ -288,6 +289,12 @@ impl Failures {
             .and_then(|selected| app.revisions().get(selected.revision));
         let capture = std::mem::take(&mut ctx.failures);
         let request = session.req_header();
+        let tokens = ctx
+            .matched
+            .and_then(|matched| ctx.table.router(matched))
+            .map_or_else(Credentials::default, |(app, router)| {
+                Credentials::of(app, router.chain())
+            });
         let failed = FailedRequest {
             id: 0,
             at_unix_ms: now_unix_ms(),
@@ -297,11 +304,12 @@ impl Failures {
                 Origin::Podgate
             },
             method: request.method.as_str().to_owned(),
-            uri: request
-                .uri
-                .path_and_query()
-                .map_or("/", |target| target.as_str())
-                .to_owned(),
+            uri: tokens.redact_target(
+                request
+                    .uri
+                    .path_and_query()
+                    .map_or("/", |target| target.as_str()),
+            ),
             host: crate::route::request_host(request)
                 .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default(),
@@ -310,12 +318,12 @@ impl Failures {
                 .route
                 .map(|selected| selected.upstream)
                 .filter(|addr| !addr.ip().is_unspecified()),
-            request_headers: redacted(&request.headers),
+            request_headers: redacted(&request.headers, &tokens),
             request_body: capture.request.into_body(),
             status: response.status.as_u16(),
             response_headers: capture
                 .upstream_headers
-                .unwrap_or_else(|| redacted(&response.headers)),
+                .unwrap_or_else(|| redacted(&response.headers, &Credentials::default())),
             response_body: capture.response.into_body(),
         };
         self.record(app.id(), failed);
@@ -339,11 +347,11 @@ fn is_secret(name: &str) -> bool {
     SECRET_HEADERS.contains(&name)
 }
 
-fn redacted(headers: &pingora::http::HMap) -> Headers {
+fn redacted(headers: &pingora::http::HMap, tokens: &Credentials) -> Headers {
     headers
         .iter()
         .map(|(name, value)| {
-            let shown = if is_secret(name.as_str()) {
+            let shown = if is_secret(name.as_str()) || tokens.header(name.as_str()) {
                 REDACTED.to_owned()
             } else {
                 String::from_utf8_lossy(value.as_bytes()).into_owned()
@@ -415,7 +423,7 @@ impl Capture {
     pub fn upstream_response(&mut self, response: &ResponseHeader) {
         self.upstream_answered = true;
         if response.status.is_server_error() {
-            self.upstream_headers = Some(redacted(&response.headers));
+            self.upstream_headers = Some(redacted(&response.headers, &Credentials::default()));
             if self.keep_bodies {
                 self.response = Buffer::Collecting(Vec::new());
             }
@@ -498,7 +506,10 @@ pub async fn replay(failed: &FailedRequest, mut peer: HttpPeer) -> Result<Replay
         if let Some(response) = session.resp_header()
             && !response.status.is_informational()
         {
-            break (response.status.as_u16(), redacted(&response.headers));
+            break (
+                response.status.as_u16(),
+                redacted(&response.headers, &Credentials::default()),
+            );
         }
     };
     let mut answer = Vec::new();
@@ -570,7 +581,7 @@ mod test {
         let mut map = pingora::http::HMap::new();
         map.insert("authorization", "Bearer s3cret".parse().expect("valid"));
         map.insert("x-keep", "visible".parse().expect("valid"));
-        let shown = redacted(&map);
+        let shown = redacted(&map, &Credentials::default());
         assert!(shown.contains(&("authorization".into(), REDACTED.into())));
         assert!(shown.contains(&("x-keep".into(), "visible".into())));
     }

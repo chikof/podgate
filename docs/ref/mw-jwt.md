@@ -65,9 +65,19 @@ The stage runs in the chain, before a revision is chosen and before any tenant s
 
 A request whose token was accepted carries an identity (the copied claims, whatever the `Authorization` header said) that the cache key does not hold. The `cache` stage therefore neither serves nor stores it, whatever the token source and also after `remove_token`, as for `forward_auth` and for a request with `Authorization` or `Cookie`.
 
-## Mirrors
+## Where a token is not shown
 
-The headers `forward_claims` writes, and the header the token came in when `remove_token` is off, are identity: a copy of the request sent to a `mirroring` service drops them unless the mirroring is set to `forward_credentials` (`Kind::carries_identity`). A token read from a query parameter that is not removed stays in the URL of the copy: set `remove_token` where a mirror is in use.
+A token in a query parameter is part of the URL, so every place podgate records or copies the URL redacts the parameters named in `token_sources` (the value becomes `[redacted]`), by one function, `jwt_auth::Credentials`, built from the `jwt_auth` stages of the route's chain:
+
+| Place | What happens |
+|---|---|
+| Access log (`query` field, when the operator keeps it) | the token parameter's value is `[redacted]`; a header a token is read from is logged as `[redacted]` even when headers are kept |
+| Failed-request records (`GET /v1/apps/{app}/failures`, and so a replay) | the same, in the stored URI and request headers |
+| OTLP spans | the span records `url.path` only, never the query or the full URL, so there is nothing to redact |
+| Copies sent to a `mirroring` service | the token parameter is removed from the copy's URL unless the mirroring is set to `forward_credentials`; the headers `forward_claims` writes, and the header the token came in when `remove_token` is off, are dropped the same way (`Kind::carries_identity`) |
+| Explain | it echoes only the URL the caller of explain wrote, never a recorded request |
+
+What is out of podgate's reach: a token in the query string also goes to the upstream (unless `remove_token`), and the upstream, the browser and every proxy before podgate see it. In particular an upstream page that links elsewhere sends the URL, token included, in its own `Referer`. **Prefer a header or a cookie; where a query token is unavoidable, set `remove_token: true`.**
 
 ## The JWKS
 
@@ -106,4 +116,4 @@ The headers `forward_claims` writes, and the header the token came in when `remo
 
 ## Explain
 
-`GET /v1/explain` shows the stage's algorithms, the `kid` and type of its inline keys (never the key material), the `jwks_uri` without its query, the rules (`max_token_age_secs` shown as `max_age_secs`), the `sources` (`token_sources`), `forward_claims` and `remove_credential` (`remove_token`): the overview refuses a field named like a secret.
+`GET /v1/explain` shows the stage's algorithms, the `kid` and type of its inline keys (never the key material), the `jwks_uri` without its query, the rules, `token_sources`, `forward_claims` and `remove_token`, under the names of the configuration. The overview guard lists those three names (`max_token_age_secs`, `token_sources`, `remove_token`) as non-secret; a planted secret is still caught by value.

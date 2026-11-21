@@ -31,6 +31,7 @@ use serde_json::Value;
 
 use crate::compile::Invalid;
 use crate::error::AppError;
+use crate::middleware::jwt_auth::Credentials;
 use crate::proxy::Ctx;
 use crate::route;
 use crate::sni;
@@ -214,12 +215,18 @@ impl Copier {
         &mut self,
         name: &'static str,
         policy: &Policy,
+        tokens: &Credentials,
         headers: &http::HeaderMap,
     ) -> Vec<(Box<str>, Box<str>)> {
         let mut out: Vec<(Box<str>, Box<str>)> = Vec::new();
         for (header, value) in headers {
             let header = header.as_str();
-            let Some(shown) = (match policy.header_action(header) {
+            let action = if tokens.header(header) {
+                HeaderAction::Redact
+            } else {
+                policy.header_action(header)
+            };
+            let Some(shown) = (match action {
                 HeaderAction::Keep => Some(String::from_utf8_lossy(value.as_bytes())),
                 HeaderAction::Redact => Some(Cow::Borrowed(policy::REDACTED)),
                 HeaderAction::Drop => None,
@@ -245,8 +252,10 @@ impl Copier {
     }
 }
 
-/// `query` with the values of the parameters the policy names replaced by `[redacted]`.
-fn redact_query(policy: &Policy, query: &str) -> String {
+/// `query` with the values of the parameters the policy names, and of those a `jwt_auth` stage of
+/// the route reads a token from, replaced by `[redacted]`.
+fn redact_query(policy: &Policy, tokens: &Credentials, query: &str) -> String {
+    let query = tokens.redact_query(query);
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
@@ -363,19 +372,28 @@ impl Record {
         let server_name = name(Field::Sni, sni::server_name(session));
         let user_agent = name(Field::UserAgent, header(request, "user-agent"));
         let referer = name(Field::Referer, header(request, "referer"));
+        let tokens = match (app, router) {
+            (Some(app), Some(router)) => Credentials::of(app, router.chain()),
+            _ => Credentials::default(),
+        };
         let query = request
             .uri
             .query()
             .filter(|_| wants(Field::Query))
-            .map(|query| copy.text("query", &redact_query(&policy, query)));
+            .map(|query| copy.text("query", &redact_query(&policy, &tokens, query)));
         let method = copy.text("method", request.method.as_str());
         let path = copy.text("path", request.uri.path());
         let response = session.response_written();
         let (request_headers, response_headers) = if policy.logs_headers() {
             (
-                copy.headers("request_headers", &policy, &request.headers),
+                copy.headers("request_headers", &policy, &tokens, &request.headers),
                 response.map_or_else(Vec::new, |head| {
-                    copy.headers("response_headers", &policy, &head.headers)
+                    copy.headers(
+                        "response_headers",
+                        &policy,
+                        &Credentials::default(),
+                        &head.headers,
+                    )
                 }),
             )
         } else {
@@ -538,7 +556,11 @@ mod test {
             "names": {"query": "keep"}, "query_redact": ["token", "key"]}}))
         .expect("policy");
         assert_eq!(
-            redact_query(&policy, "a=1&token=secret&b&key=x=y&c=3"),
+            redact_query(
+                &policy,
+                &Credentials::default(),
+                "a=1&token=secret&b&key=x=y&c=3"
+            ),
             "a=1&token=[redacted]&b&key=[redacted]&c=3"
         );
     }
@@ -558,7 +580,12 @@ mod test {
             headers.append(name, value.parse().expect("header value"));
         }
         headers.append("accept", "text/plain".parse().expect("header value"));
-        let copied = Copier::default().headers("request_headers", &policy, &headers);
+        let copied = Copier::default().headers(
+            "request_headers",
+            &policy,
+            &Credentials::default(),
+            &headers,
+        );
         let shown: Vec<_> = copied
             .iter()
             .map(|(name, value)| (&**name, &**value))

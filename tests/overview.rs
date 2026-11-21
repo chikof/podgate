@@ -437,6 +437,15 @@ async fn overview_without_optional_features() {
     );
 }
 
+/// The first planted secret (or private marker) that `body` shows.
+fn leaked<'a>(body: &str, plants: &'a [String]) -> Option<&'a str> {
+    plants
+        .iter()
+        .map(String::as_str)
+        .chain(["BEGIN", "client_ca_pem"])
+        .find(|secret| body.contains(secret))
+}
+
 /// A string no overview may ever show: unique, so one `contains` finds it.
 fn plant(what: &str) -> String {
     format!("PLANT-{what}-7f3a9c")
@@ -676,16 +685,11 @@ async fn overview_redacts_secrets() {
         }
     }
     for body in &bodies {
-        for secret in plants
-            .iter()
-            .map(String::as_str)
-            .chain(["BEGIN", "client_ca_pem"])
-        {
-            assert!(
-                !body.contains(secret),
-                "{secret:?} is in the overview: {body}"
-            );
-        }
+        assert_eq!(
+            leaked(body, &plants),
+            None,
+            "a secret is in the overview: {body}"
+        );
     }
 
     // The planted snapshot is really in the view: only the secrets are missing.
@@ -703,6 +707,59 @@ async fn overview_redacts_secrets() {
     );
     assert_eq!(a["services"].as_array().map(Vec::len), Some(3));
     assert_eq!(items(&document, "certificates").len(), 1);
+}
+
+/// Field names that hold a setting and never a credential, though they contain a word the guard
+/// looks for: `jwt_auth` shows its configuration under the names the operator wrote, and these are
+/// the ones with "token" in them. Only these exact names pass; the secret itself, an `oct` key or
+/// the query of a `jwks_uri`, is never shown whatever its field is called, which
+/// `overview_redacts_secrets` checks by value.
+const NOT_SECRET_NAMES: [&str; 3] = ["max_token_age_secs", "token_sources", "remove_token"];
+
+/// Whether a field name looks like it holds a secret.
+fn names_a_secret(name: &str) -> bool {
+    !NOT_SECRET_NAMES.contains(&name)
+        && ["password", "secret", "key_pem", "token", "hash"]
+            .iter()
+            .any(|word| name.contains(word))
+}
+
+#[test]
+fn the_name_guard_only_lets_the_listed_names_through() {
+    for secret in [
+        "token",
+        "access_token",
+        "api_token_hash",
+        "password",
+        "client_secret",
+        "key_pem",
+        "max_token_age",
+        "token_sources_extra",
+        "remove_token_value",
+    ] {
+        assert!(names_a_secret(secret), "{secret}");
+    }
+    for plain in NOT_SECRET_NAMES
+        .iter()
+        .copied()
+        .chain(["algorithms", "keys", "issuer"])
+    {
+        assert!(!names_a_secret(plain), "{plain}");
+    }
+}
+
+#[test]
+fn a_listed_name_holding_a_planted_secret_is_still_caught() {
+    let plants = vec![plant("jwt-leak")];
+    let leaking =
+        json!({"max_token_age_secs": plants[0], "token_sources": [], "remove_token": true});
+    assert_eq!(
+        leaked(&leaking.to_string(), &plants),
+        Some(plants[0].as_str())
+    );
+    let clean =
+        json!({"max_token_age_secs": 60, "token_sources": [{"query": "t"}], "remove_token": true});
+    assert_eq!(leaked(&clean.to_string(), &plants), None);
 }
 
 #[tokio::test]
@@ -733,13 +790,11 @@ async fn every_describe_is_secret_free() {
         let mut found = Vec::new();
         names(&middleware["config"], &mut found);
         for name in found {
-            for word in ["password", "secret", "key_pem", "token", "hash"] {
-                assert!(
-                    !name.contains(word),
-                    "{} describes itself with the field {name:?}, which names a secret",
-                    middleware["type"]
-                );
-            }
+            assert!(
+                !names_a_secret(&name),
+                "{} describes itself with the field {name:?}, which names a secret",
+                middleware["type"]
+            );
         }
     }
 }

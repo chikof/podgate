@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "fixtures/jwt/signer.rs"]
+mod signer;
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use common::{Podgate, TestCert, app, serving, snapshot};
+use common::{Podgate, TestCert, app, serving, snapshot, with_jwt_auth};
 use podgate::observe::tracing::proto::{ExportTraceServiceRequest, OtlpSpan, any_value};
 use prost::Message;
 use rustls_pki_types::pem::PemObject;
@@ -1211,4 +1214,123 @@ async fn tracing_one_tenant_cannot_take_the_whole_cap() {
         flooder <= ceiling,
         "200 requests over {flood:.2}s traced {flooder}, a tenant's share allows {ceiling:.0}"
     );
+}
+
+/// A token a client sends in a query parameter must show up nowhere the request URL is recorded:
+/// not in the access log (which the operator told to keep the query), not in the exported span
+/// and not in the failed-request record the admin API serves. One redaction
+/// (`jwt_auth::Credentials`) serves all of them; the span never carries a query at all.
+#[tokio::test]
+async fn jwt_query_token_not_logged() {
+    use signer::{Signer, now};
+    let collector = Collector::start().await;
+    let dir = std::env::temp_dir().join(format!("podgate-jwt-trace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let log_path = dir.join("access.log");
+    let mut env = collector_env(&collector);
+    env.push((
+        "ACCESS_LOG_FILE".into(),
+        log_path.to_str().expect("utf-8").to_owned(),
+    ));
+    let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let podgate = Podgate::start_with_env(&pairs).await;
+
+    // An upstream that always fails, so the failed-request ring records every request.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream = listener.local_addr().expect("upstream address");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = [0_u8; 2048];
+                drop(stream.read(&mut head).await);
+                drop(
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 500 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await,
+                );
+            });
+        }
+    });
+
+    let key = Signer::es256("k");
+    let guarded = with_jwt_auth(
+        app("a", &["a.test"], &[serving("r1", upstream)]),
+        json!({"algorithms": ["ES256"], "keys": {"keys": [key.jwk()]},
+               "token_sources": [{"query": "t"}]}),
+    );
+    let mut pushed = snapshot(1, &[guarded]);
+    pushed["observability"] = json!({
+        "tracing": {},
+        "access_log": {"fields": {"names": {"query": "keep"}}},
+    });
+    let response = podgate.push_snapshot(&pushed).await;
+    assert_eq!(response.status, 200, "{response:?}");
+
+    let token = key.sign(
+        "ES256",
+        &json!({}),
+        &json!({"sub": "ann", "exp": now() + 600}),
+    );
+    let late = key.sign(
+        "ES256",
+        &json!({}),
+        &json!({"sub": "ann", "exp": now() - 600}),
+    );
+    let failing = podgate
+        .get("a.test", &format!("/boom?x=1&t={token}&z=9"))
+        .await;
+    assert_eq!(failing.status, 500, "{failing:?}");
+    let refused = podgate.get("a.test", &format!("/late?t={late}")).await;
+    assert_eq!(refused.status, 401, "{refused:?}");
+
+    // The exported spans: no attribute holds a token, and none is a query or a full URL.
+    let spans = collector.wait_spans(3).await;
+    for span in &spans {
+        for (name, value) in attrs(span) {
+            let shown = format!("{value:?}");
+            assert!(
+                !shown.contains(&token) && !shown.contains(&late) && !shown.contains("t="),
+                "span attribute {name} shows a token: {shown}"
+            );
+            assert!(
+                !matches!(name.as_str(), "url.query" | "url.full" | "http.target"),
+                "span attribute {name} records the query"
+            );
+        }
+    }
+
+    // The access log keeps the query the operator asked for, with the token redacted.
+    let mut log = String::new();
+    for _ in 0..100 {
+        log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if log.lines().count() >= 2 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(log.lines().count(), 2, "{log}");
+    assert!(log.contains("x=1&t=[redacted]&z=9"), "{log}");
+    assert!(log.contains("t=[redacted]"), "{log}");
+    for secret in [&token, &late] {
+        assert!(
+            !log.contains(secret.as_str()),
+            "a token is in the access log: {log}"
+        );
+    }
+
+    // The failed-request record the admin API serves.
+    let failures = podgate.admin_get("/v1/apps/a/failures").await.body;
+    assert!(
+        !failures.contains(&token),
+        "a token is in the failure record: {failures}"
+    );
+    assert!(
+        failures.contains("/boom?x=1&t=[redacted]&z=9"),
+        "{failures}"
+    );
+    drop(std::fs::remove_dir_all(&dir));
 }
