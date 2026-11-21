@@ -157,7 +157,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Nomad | Nomad provider | none | built (Nomad-native service registrations tagged `podgate.*` or `traefik.*`, servers from the registered address and port, namespaces to tenants, blocking queries with reconnect, ACL token from a file; reference `docs/ref/provider-nomad.md`) |
 | File | File provider (watch, templates) | Caddyfile, JSON | built (YAML, TOML and JSON, a file or a directory, polling watch, last good content on a broken file, no templating; reference `docs/ref/provider-file.md`); Traefik files via 0079 (also a migration linter) |
 | Certificate storage and cluster issuance | `storage` (`acme.json`) in the proxy; clusters need a KV store or Enterprise | `storage` file, clustering through a shared storage module | built (the provider's broker keeps certificates, account key and answers in a `0700` state directory, persisted before pushed; follower providers read it; podgate stays stateless) |
-| Consul Catalog | yes | none | 0093 |
+| Consul Catalog | yes | none | built (catalog and health through blocking queries, `podgate.*` and `traefik.*` tags, servers from healthy instances only, tenants by fixed, meta or namespace, 512 watched services; reference `docs/ref/provider-consul.md`) |
 | Amazon ECS | yes | none | 0107 |
 | Docker Swarm | yes | `caddy-docker-proxy` | 0108 |
 | etcd, Redis (key trees) | yes | none | 0109 (shared key-value layer), 0110 |
