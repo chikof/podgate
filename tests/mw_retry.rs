@@ -335,16 +335,15 @@ async fn post(podgate: &Podgate, body: &[u8], chunked: bool) -> (u16, String) {
     (status, body.to_owned())
 }
 
-/// How many retries the service's series has counted.
+/// How many retries the services of app `a.test` have counted, the router's service (`web`, or
+/// the `mirroring` service in front of it) being the one that counts.
 async fn retries(podgate: &Podgate) -> u64 {
     let metrics = podgate.admin_get("/metrics").await.body;
     metrics
         .lines()
-        .find_map(|line| {
-            line.strip_prefix("podgate_service_retries_total{app=\"a.test\",service=\"web\"} ")
-        })
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
+        .filter_map(|line| line.strip_prefix("podgate_service_retries_total{app=\"a.test\","))
+        .filter_map(|rest| rest.split("} ").nth(1)?.trim().parse::<u64>().ok())
+        .sum()
 }
 
 /// What one request got.
@@ -1066,4 +1065,116 @@ async fn retry_dial_timeout_retried_read_timeout_not() {
         answered,
         "a timed out request was not sent to the good server"
     );
+}
+
+/// `guarded`, with the router answered by a `mirroring` service that copies every request,
+/// body included, to a service holding `shadow`.
+fn mirrored(
+    version: u64,
+    servers: &[SocketAddr],
+    shadow: SocketAddr,
+    middlewares: &[Value],
+) -> Value {
+    let mut pushed = guarded(version, servers, middlewares, 100);
+    if let Some(services) = pushed["apps"][0]["revisions"][0]["services"].as_array_mut() {
+        services.push(json!({
+            "name": "shadow", "type": "loadbalancer",
+            "servers": [{ "url": format!("http://{shadow}") }],
+        }));
+        services.push(json!({
+            "name": "m", "type": "mirroring", "service": "web",
+            "mirrors": [{ "service": "shadow", "percent": 100 }],
+            "mirror_body": true, "max_body_size": 65536,
+        }));
+    }
+    pushed["apps"][0]["routers"][0]["service"] = json!("m");
+    pushed
+}
+
+/// Waits until `server` stops receiving, so a count taken after it is final.
+async fn settled(server: &Backend) -> usize {
+    let mut last = server.hits();
+    loop {
+        sleep(Duration::from_millis(400)).await;
+        let now = server.hits();
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+}
+
+#[tokio::test]
+async fn retry_mirrors_once() {
+    // A connect error: the request is retried on another server, and mirrored once.
+    let podgate = Podgate::start().await;
+    let (dead, good, shadow) = (
+        common::refused(),
+        Backend::good().await,
+        Backend::good().await,
+    );
+    let chain = [retry(&json!({"attempts": 3, "initial_interval_ms": 1}))];
+    push(
+        &podgate,
+        &mirrored(1, &[dead.addr, good.addr], shadow.addr, &chain),
+    )
+    .await;
+    let mut bodies = Vec::new();
+    for index in 0..6 {
+        assert_eq!(get(&podgate).await.status, 200);
+        let body = body_of(index, 200);
+        assert_eq!(posted(&podgate, &body, false).await.status, 200);
+        bodies.push(body);
+    }
+    assert!(
+        retries(&podgate).await >= 1,
+        "some request met the dead server first"
+    );
+    assert_eq!(
+        settled(&shadow).await,
+        12,
+        "one copy of each of the 12 requests, retried or not"
+    );
+    for body in &bodies {
+        assert_eq!(
+            shadow.count_of(body),
+            1,
+            "a retried POST was copied once, whole"
+        );
+    }
+
+    // A dead pooled connection: the buffered body is replayed to the second server, and the copy
+    // of the request is still one, with the body once.
+    let podgate = Podgate::start().await;
+    let (stale, good, shadow) = (
+        Backend::start("stale", Mode::DropReused).await,
+        Backend::good().await,
+        Backend::good().await,
+    );
+    let chain = [
+        buffer(),
+        retry(&json!({"attempts": 2, "initial_interval_ms": 1, "methods": ["POST"]})),
+    ];
+    push(
+        &podgate,
+        &mirrored(1, &[stale.addr, good.addr], shadow.addr, &chain),
+    )
+    .await;
+    let sent = posts_until_dropped(&podgate, &stale, 5_000, false).await;
+    for (body, answer) in &sent {
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        let _ = body;
+    }
+    assert_eq!(
+        settled(&shadow).await,
+        sent.len(),
+        "one copy of every request"
+    );
+    for (body, _) in &sent {
+        assert_eq!(
+            shadow.count_of(body),
+            1,
+            "the copy has the body once, not once per attempt"
+        );
+    }
 }
