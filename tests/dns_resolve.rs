@@ -525,13 +525,8 @@ async fn dns_single_flight() {
     assert_eq!(bodies(&podgate, "a9.test", 1).await, ["ok"]);
     assert_eq!(bodies(&podgate, "b.test", 1).await, ["ok"]);
     assert_eq!(dns.a_queries_for("shared.internal"), 1);
-    // The name has no AAAA record: an empty answer is retried after the minimum TTL, once for
-    // the whole node, not once per app.
-    let aaaa = dns.aaaa_queries_for("shared.internal");
-    assert!(
-        (1..=2).contains(&aaaa),
-        "{aaaa} AAAA lookups for eleven apps"
-    );
+    // The name has no AAAA record: the empty answer is cached, so still one lookup.
+    assert_eq!(dns.aaaa_queries_for("shared.internal"), 1);
 }
 
 #[tokio::test]
@@ -664,14 +659,22 @@ async fn tls_backend(cert: &TestCert) -> (u16, Seen) {
     let seen: Seen = Arc::default();
     let record = Arc::clone(&seen);
     tokio::spawn(async move {
+        let mut accepted = 0_u64;
         while let Ok((tcp, _)) = listener.accept().await {
-            tokio::spawn(serve_tls(acceptor.clone(), tcp, Arc::clone(&record)));
+            accepted += 1;
+            tokio::spawn(serve_tls(
+                acceptor.clone(),
+                tcp,
+                accepted,
+                Arc::clone(&record),
+            ));
         }
     });
     (port, seen)
 }
 
-async fn serve_tls(acceptor: TlsAcceptor, tcp: TcpStream, seen: Seen) {
+/// Serves `number`'s connection; every answer is `<connection number>:<SNI>`.
+async fn serve_tls(acceptor: TlsAcceptor, tcp: TcpStream, number: u64, seen: Seen) {
     let Ok(mut stream) = acceptor.accept(tcp).await else {
         return;
     };
@@ -704,9 +707,10 @@ async fn serve_tls(acceptor: TlsAcceptor, tcp: TcpStream, seen: Seen) {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((path, host, sni.clone()));
+            let body = format!("{number}:{sni}");
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{sni}",
-                sni.len()
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
             );
             if stream.write_all(response.as_bytes()).await.is_err() {
                 return;
@@ -748,7 +752,7 @@ async fn dns_connects_to_checked_ip_with_name_sni() {
 
     eventually("the request reaches the backend over TLS", 10, async || {
         let answer = podgate.get("a.test", "/data").await;
-        answer.status == 200 && answer.body == "secure.internal"
+        answer.status == 200 && answer.body.ends_with(":secure.internal")
     })
     .await;
     eventually("a health probe arrived", 10, async || {
@@ -866,4 +870,137 @@ async fn dns_named_h2c_server_is_reached_over_h2c() {
         json!({ "path": "/healthz", "interval_secs": 1, "timeout_secs": 1 });
     let rejected = podgate.push_snapshot(&snapshot(2, &[probed])).await;
     assert!(rejection(&rejected).contains("service_not_built"));
+}
+
+#[tokio::test]
+async fn dns_nodata_cached() {
+    let dns = Dns::start().await;
+    // An A record and no AAAA: the AAAA question is answered with an empty, successful answer.
+    dns.set("v4only.internal", &["127.0.0.1"], 30);
+    let backends = Backends::start(&[("127.0.0.1", "ok")]).await;
+    let podgate = start(&resolver_env(&dns), &[]).await;
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[named_app("a", "a.test", &[backends.url("v4only.internal")])],
+        ),
+    )
+    .await;
+    eventually("the A answer serves", 10, async || {
+        bodies(&podgate, "a.test", 1).await == ["ok"]
+    })
+    .await;
+
+    // Not retried on the failure back-off (1, 2, 4 s): the empty answer is kept for the TTL.
+    sleep(Duration::from_millis(4500)).await;
+    assert_eq!(dns.aaaa_queries_for("v4only.internal"), 1);
+    assert_eq!(dns.a_queries_for("v4only.internal"), 1);
+}
+
+#[tokio::test]
+async fn dns_nodata_keeps_last_good_addresses() {
+    let dns = Dns::start().await;
+    dns.set("fading.internal", &["127.0.0.1"], 1);
+    let backends = Backends::start(&[("127.0.0.1", "ok")]).await;
+    let podgate = start(&resolver_env(&dns), &[("DNS_MAX_STALE_SECS", "300")]).await;
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[named_app("a", "a.test", &[backends.url("fading.internal")])],
+        ),
+    )
+    .await;
+    eventually("the A answer serves", 10, async || {
+        bodies(&podgate, "a.test", 1).await == ["ok"]
+    })
+    .await;
+
+    // The name now answers successfully with no A record at all: a family that had addresses
+    // keeps them, as it does for a failure.
+    dns.set("fading.internal", &[], 1);
+    let asked = dns.a_queries_for("fading.internal");
+    eventually("the empty answer was asked for", 10, async || {
+        dns.a_queries_for("fading.internal") > asked + 1
+    })
+    .await;
+    assert_eq!(bodies(&podgate, "a.test", 5).await, vec!["ok"; 5]);
+}
+
+#[tokio::test]
+async fn dns_same_ip_different_names_never_share_connection() {
+    // Two apps name the same backend address by different names. Pingora's reuse hash covers
+    // the SNI (`HttpPeer`'s `Hash`) and the pool partition covers the app, so each name gets its
+    // own connections and the backend sees only that name as SNI on them.
+    let cert = TestCert::new(&["one.internal", "two.internal"]);
+    let (port, seen) = tls_backend(&cert).await;
+    let dns = Dns::start().await;
+    dns.set("one.internal", &["127.0.0.1"], 30);
+    dns.set("two.internal", &["127.0.0.1"], 30);
+    let podgate = start(&resolver_env(&dns), &[]).await;
+    let secure_app = |id: &str, host: &str, name: &str| {
+        let mut web = app(
+            id,
+            &[host],
+            &[json!({
+                "id": "r1", "state": "serving", "weight": 100,
+                "services": [{
+                    "name": "web", "type": "loadbalancer", "transport": "tls",
+                    "servers": [{ "url": format!("https://{name}:{port}") }],
+                }],
+            })],
+        );
+        web["transports"] =
+            json!([{ "name": "tls", "type": "servers_transport", "ca_pem": cert.cert_pem }]);
+        web
+    };
+    push(
+        &podgate,
+        &snapshot(
+            1,
+            &[
+                secure_app("one", "one.test", "one.internal"),
+                secure_app("two", "two.test", "two.internal"),
+            ],
+        ),
+    )
+    .await;
+
+    let mut seen_by_host: [BTreeSet<String>; 2] = Default::default();
+    eventually("both names are reached", 10, async || {
+        let one = podgate.get("one.test", "/").await;
+        let two = podgate.get("two.test", "/").await;
+        one.status == 200 && two.status == 200
+    })
+    .await;
+    // Interleaved requests, so a pooled connection of one name is idle while the other asks.
+    for _ in 0..10 {
+        for (at, host) in ["one.test", "two.test"].iter().enumerate() {
+            let response = podgate.get(host, "/").await;
+            assert_eq!(response.status, 200, "{response:?}");
+            seen_by_host[at].insert(response.body);
+        }
+    }
+    let connections = |sni: &str, bodies: &BTreeSet<String>| -> BTreeSet<String> {
+        for body in bodies {
+            assert!(body.ends_with(&format!(":{sni}")), "{sni}: {body}");
+        }
+        bodies
+            .iter()
+            .filter_map(|body| body.split(':').next().map(str::to_owned))
+            .collect()
+    };
+    let one = connections("one.internal", &seen_by_host[0]);
+    let two = connections("two.internal", &seen_by_host[1]);
+    assert!(
+        one.is_disjoint(&two),
+        "one connection served both names: {one:?} {two:?}"
+    );
+    assert!(
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .all(|(_, _, sni)| sni == "one.internal" || sni == "two.internal")
+    );
 }

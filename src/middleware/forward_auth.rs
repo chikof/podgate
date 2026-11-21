@@ -256,9 +256,9 @@ fn parse_address(address: &str) -> Result<(Server, Box<str>, Box<str>), Invalid>
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'));
             return Err(if named {
                 Invalid::new(
-                    "dns_upstream_not_built",
+                    "invalid_middleware",
                     format!(
-                        "forward_auth: address {address}: a host name needs the resolver, use an IP address"
+                        "forward_auth: address {address}: a host name is not supported yet, the DNS resolver is not wired for forward_auth; use an IP address"
                     ),
                 )
             } else {
@@ -761,7 +761,7 @@ mod test {
         }
         assert_eq!(
             code(&json!({"address": "http://auth.internal:9091/"})),
-            "dns_upstream_not_built"
+            "invalid_middleware"
         );
     }
 

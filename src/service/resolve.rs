@@ -50,6 +50,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::proto::op::ResponseCode;
 use hickory_resolver::proto::rr::RData;
 use hickory_resolver::{Resolver as Client, TokioResolver};
 use pingora::server::ShutdownWatch;
@@ -326,8 +328,12 @@ impl Limiter {
 /// Why a resolution gave nothing.
 #[derive(Debug)]
 enum Failure {
-    /// The name has no record of the family (including `NXDOMAIN`).
+    /// The name does not exist (`NXDOMAIN`), or the answer holds no address of the family and
+    /// is not a clean "none".
     Empty,
+    /// A successful answer with no record of the family (`NODATA`, such as `AAAA` for a name with
+    /// only an `A` record). A valid result, with the negative TTL of the SOA when it came with one.
+    NoData(Option<u32>),
     /// The lookup failed or timed out.
     Error(String),
 }
@@ -569,7 +575,13 @@ impl Inner {
         .await;
         let lookup = match asked {
             Err(_) => return Err(Failure::Error("timed out".to_owned())),
-            Ok(Err(err)) if err.is_no_records_found() => return Err(Failure::Empty),
+            Ok(Err(NetError::Dns(DnsError::NoRecordsFound(none)))) => {
+                return Err(if none.response_code == ResponseCode::NoError {
+                    Failure::NoData(none.negative_ttl)
+                } else {
+                    Failure::Empty
+                });
+            }
             Ok(Err(err)) => return Err(Failure::Error(err.to_string())),
             Ok(Ok(lookup)) => lookup,
         };
@@ -585,7 +597,7 @@ impl Inner {
             ttl = ttl.min(record.ttl);
         }
         if addrs.is_empty() {
-            return Err(Failure::Empty);
+            return Err(Failure::NoData(None));
         }
         Ok((addrs, ttl))
     }
@@ -648,7 +660,7 @@ impl Inner {
         now: Instant,
     ) -> Duration {
         match failure {
-            Failure::Empty => {
+            Failure::Empty | Failure::NoData(_) => {
                 tracing::debug!(
                     name = &*key.name,
                     family = key.family.label(),
@@ -674,6 +686,17 @@ impl Inner {
             Some(left) if !left.is_zero() => retry.min(left),
             _ => retry,
         }
+    }
+
+    /// Whether the last good answer of `key` holds an address.
+    fn has_addresses(&self, key: &Key) -> bool {
+        self.lock()
+            .names
+            .get(&*key.name)
+            .is_some_and(|entry| match key.family {
+                Family::V4 => !entry.v4.addrs.is_empty(),
+                Family::V6 => !entry.v6.addrs.is_empty(),
+            })
     }
 
     /// Drops the answer of `key` when it has been stale for too long, and signals it.
@@ -709,6 +732,15 @@ async fn run(inner: Arc<Inner>, key: Key) {
             Ok((addrs, ttl)) => {
                 failures = 0;
                 inner.record_good(&key, addrs, ttl, now)
+            }
+            // A clean "no such record" for a family that has no address is an answer: cached
+            // empty for its negative TTL (the SOA's; `DNS_MAX_TTL_SECS` when the answer has none,
+            // since the minimum would ask again every second), clamped to min..max, and not
+            // retried as a failure.
+            // A family that had addresses keeps them like it does for any failure.
+            Err(Failure::NoData(negative)) if !inner.has_addresses(&key) => {
+                failures = 0;
+                inner.record_good(&key, Vec::new(), negative.unwrap_or(u32::MAX), now)
             }
             Err(failure) => {
                 failures = failures.saturating_add(1);
