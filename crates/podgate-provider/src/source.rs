@@ -9,8 +9,11 @@
 //! services, revisions, TLS) and leaves `tenant` and `declared_by` of the [`App`] to the core: the
 //! tenant comes from the [`TenantClaim`] next to the object, `declared_by` from the [`Origin`].
 
+use std::fmt::Write as _;
+
 use podgate_model::{App, Certificate};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 
@@ -123,8 +126,10 @@ pub struct State {
 }
 
 impl SourceApp {
-    /// A text that changes whenever the object does: quarantine uses it to tell that a source
-    /// changed an object. Never logged: it holds whatever the object holds.
+    /// A digest that changes whenever the object does: quarantine and the accepted-object check
+    /// (`engine::Accepted`) use it to tell that a source changed an object. SHA-256 of the
+    /// object's serialized text, as 64 lowercase hex characters, so the object itself (private
+    /// keys included) is never kept or shown for comparing.
     #[must_use]
     pub fn fingerprint(&self) -> Box<str> {
         fingerprint(&(&self.tenant, &self.app))
@@ -143,7 +148,14 @@ fn fingerprint(value: &impl Serialize) -> Box<str> {
     // Serializing plain data into a string cannot fail; an empty text would only make two
     // different objects compare equal, which `merge` then reports as unchanged, never wrongly
     // accepted.
-    serde_json::to_string(value).unwrap_or_default().into()
+    let text = serde_json::to_vec(value).unwrap_or_default();
+    Sha256::digest(&text)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+        .into()
 }
 
 /// What a source tells the core.

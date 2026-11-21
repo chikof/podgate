@@ -55,7 +55,8 @@ pub struct Included {
     pub declared_by: Box<str>,
     /// Its age stamp, see [`crate::source::Origin::first_seen`].
     pub first_seen: u64,
-    /// The text that changes when the source changes the object.
+    /// The digest that changes when the source changes the object
+    /// ([`crate::source::SourceApp::fingerprint`]).
     pub fingerprint: Box<str>,
 }
 

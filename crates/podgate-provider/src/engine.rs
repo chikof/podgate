@@ -112,10 +112,11 @@ pub struct QuarantinedObject {
     pub reason: Box<str>,
 }
 
-/// The objects podgate accepted in the last snapshot this provider pushed, each with the text
+/// The objects podgate accepted in the last snapshot this provider pushed, each with the digest
 /// that changes when its source changes it ([`crate::source::SourceApp::fingerprint`]). Sources
-/// compare their own objects against it to learn which ones are live. The texts hold
-/// private keys, so `Debug` shows a count only.
+/// compare their own objects against it to learn which ones are live. A digest, so
+/// no copy of an object (a certificate's private key) is kept for the comparison; `Debug` shows a
+/// count only.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Accepted(Arc<BTreeMap<ObjectRef, Box<str>>>);
 
