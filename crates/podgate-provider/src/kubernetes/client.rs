@@ -18,7 +18,8 @@
 //!
 //! The client speaks HTTP/1.1 over a fresh TCP connection per request (rustls, no OpenSSL), reads
 //! no more than [`MAX_BODY_BYTES`] of a list page or [`MAX_FRAME_BYTES`] of a watch frame, and
-//! sends only `GET`. It authenticates with a bearer token (re-read from its file on every
+//! sends `GET` for lists and watches, and (status and leader election) `GET`, `POST`,
+//! `PUT` and merge `PATCH` of single objects. It authenticates with a bearer token (re-read from its file on every
 //! request, because the kubelet rotates service account tokens) or a client certificate. Exec
 //! plugins, auth providers, basic auth, proxies and `insecure-skip-tls-verify` are refused when
 //! the configuration is read, never ignored.
@@ -36,10 +37,10 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{ACCEPT, AUTHORIZATION, HOST, USER_AGENT};
-use hyper::{Request, Response, StatusCode, Uri};
+use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, USER_AGENT};
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -105,6 +106,9 @@ pub struct ObjectMeta {
     /// The version of this object; opaque.
     #[serde(default)]
     pub resource_version: Option<String>,
+    /// The generation of the spec: a counter the API server bumps on every spec change.
+    #[serde(default)]
+    pub generation: Option<i64>,
     /// When the object was created, RFC 3339 in UTC.
     #[serde(default)]
     pub creation_timestamp: Option<String>,
@@ -213,6 +217,29 @@ fn encode(text: &str) -> String {
     out
 }
 
+/// The path of one object of `R`, or of its collection when `name` is `None`, with an optional
+/// subresource such as `status`.
+fn object_path<R: Resource>(
+    namespace: Option<&str>,
+    name: Option<&str>,
+    subresource: Option<&str>,
+) -> String {
+    let query = Query {
+        namespace: namespace.map(Into::into),
+        field_selector: None,
+    };
+    let mut path = query.path::<R>();
+    for part in [name, subresource].into_iter().flatten() {
+        path.push('/');
+        path.push_str(&encode(part));
+    }
+    path
+}
+
+fn json_body(value: &Value) -> Bytes {
+    Bytes::from(value.to_string())
+}
+
 /// A client that cannot be built, or a request that failed.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -240,6 +267,18 @@ pub enum ClientError {
     /// Nothing happened within the allowed time.
     #[error("timed out {0}")]
     Timeout(&'static str),
+}
+
+impl ClientError {
+    /// The HTTP status of an error answer, `None` for every other failure.
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Status { status, .. } => Some(*status),
+            Self::Gone(_) => Some(410),
+            _ => None,
+        }
+    }
 }
 
 /// The credentials a request carries.
@@ -729,15 +768,123 @@ impl ApiClient {
         })
     }
 
+    /// Reads one object by name. `namespace` is ignored for cluster-scoped kinds.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`]; [`ClientError::Status`] with `404` when the object does not exist.
+    pub async fn read<R: Resource>(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<R, ClientError> {
+        let path = object_path::<R>(namespace, Some(name), None);
+        self.exchange(Method::GET, &path, None, Bytes::new(), "reading")
+            .await
+    }
+
+    /// Creates an object (`POST`) from `object`, a complete JSON manifest.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`]; `409` when it exists already.
+    pub async fn create<R: Resource>(
+        &self,
+        namespace: Option<&str>,
+        object: &Value,
+    ) -> Result<R, ClientError> {
+        let path = object_path::<R>(namespace, None, None);
+        self.exchange(
+            Method::POST,
+            &path,
+            Some("application/json"),
+            json_body(object),
+            "creating",
+        )
+        .await
+    }
+
+    /// Replaces an object (`PUT`), or one subresource of it (`status`). `object` carries the
+    /// `metadata.resourceVersion` it was read at, so a concurrent change is a `409`.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`]; `409` when the version is stale.
+    pub async fn replace<R: Resource>(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+        subresource: Option<&str>,
+        object: &Value,
+    ) -> Result<R, ClientError> {
+        let path = object_path::<R>(namespace, Some(name), subresource);
+        self.exchange(
+            Method::PUT,
+            &path,
+            Some("application/json"),
+            json_body(object),
+            "replacing",
+        )
+        .await
+    }
+
+    /// Applies a JSON merge patch (RFC 7386, `PATCH` with `application/merge-patch+json`) to an
+    /// object or one subresource of it (`status`). A `metadata.resourceVersion` in `patch` is a
+    /// precondition: the server answers `409` when the object has moved on.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`]; `409` when the precondition fails.
+    pub async fn merge_patch<R: Resource>(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+        subresource: Option<&str>,
+        patch: &Value,
+    ) -> Result<R, ClientError> {
+        let path = object_path::<R>(namespace, Some(name), subresource);
+        self.exchange(
+            Method::PATCH,
+            &path,
+            Some("application/merge-patch+json"),
+            json_body(patch),
+            "patching",
+        )
+        .await
+    }
+
+    async fn exchange<R: Resource>(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: Option<&str>,
+        body: Bytes,
+        what: &'static str,
+    ) -> Result<R, ClientError> {
+        timeout(self.tuning.request_timeout, async {
+            let response =
+                Box::pin(self.connect_and_send(method, path, content_type, body)).await?;
+            let body = read_body(response, R::KIND).await?;
+            serde_json::from_slice(&body).map_err(|err| {
+                ClientError::Decode(format!("the {} answer is not valid: {err}", R::KIND).into())
+            })
+        })
+        .await
+        .map_err(|_| ClientError::Timeout(what))?
+    }
+
     /// One `GET`. The connection setup (TCP, the TLS handshake, the HTTP handshake) carries a
     /// few KiB of state, so it is boxed here once instead of in every caller's future.
     async fn get(&self, path_and_query: &str) -> Result<Response<Incoming>, ClientError> {
-        Box::pin(self.connect_and_get(path_and_query)).await
+        Box::pin(self.connect_and_send(Method::GET, path_and_query, None, Bytes::new())).await
     }
 
-    async fn connect_and_get(
+    async fn connect_and_send(
         &self,
+        method: Method,
         path_and_query: &str,
+        content_type: Option<&str>,
+        body: Bytes,
     ) -> Result<Response<Incoming>, ClientError> {
         let config = &self.config;
         let tcp = timeout(
@@ -753,10 +900,15 @@ impl ApiClient {
         })?;
         // Latency matters more than packet count for these small requests.
         let _ = tcp.set_nodelay(true);
-        let mut request = Request::get(path_and_query)
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path_and_query)
             .header(HOST, authority(config))
             .header(ACCEPT, "application/json")
             .header(USER_AGENT, "podgate-provider");
+        if let Some(content_type) = content_type {
+            request = request.header(CONTENT_TYPE, content_type);
+        }
         match &config.auth {
             Auth::None => {}
             Auth::Token(token) => request = request.header(AUTHORIZATION, bearer(token)?),
@@ -770,7 +922,7 @@ impl ApiClient {
             }
         }
         let request = request
-            .body(Empty::<Bytes>::new())
+            .body(Full::new(body))
             .map_err(|err| ClientError::Decode(format!("bad request: {err}").into()))?;
         let response = match &config.tls {
             Some(tls) => {
@@ -840,7 +992,7 @@ fn bearer(token: &str) -> Result<hyper::header::HeaderValue, ClientError> {
 
 async fn send<T>(
     io: TokioIo<T>,
-    request: Request<Empty<Bytes>>,
+    request: Request<Full<Bytes>>,
 ) -> Result<Response<Incoming>, ClientError>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
