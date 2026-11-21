@@ -1363,3 +1363,86 @@ async fn h3_goes_through_middlewares_and_budgets() {
     assert_eq!(entry["entry_point"], "secure", "{entry}");
     drop(std::fs::remove_dir_all(&dir));
 }
+
+// ------------------------------------------------------------- measurement
+
+/// Sequential GETs on one connection, the same upstream and route: HTTP/2 over TLS straight into
+/// the pipeline, against HTTP/3 through the front and its internal h2c hop. Prints the medians and
+/// 99th percentiles; the difference bounds the hop's cost (it also holds QUIC against TCP+TLS).
+/// Run alone, under the build lock: `cargo test --release --test h3 h3_hop_latency -- --ignored
+/// --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn h3_hop_latency() {
+    const WARMUP: usize = 200;
+    const RUNS: usize = 5_000;
+    let upstream = Upstream::start("hello").await;
+    let fx = Fixture::start(&[], &["a.test"]).await;
+    fx.push(
+        1,
+        &[app("a", &["a.test"], &[serving("r1", upstream.addr)])],
+        &["a.test"],
+    )
+    .await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(fx.cert.der.clone()).expect("trust the server");
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h2".to_vec()];
+    let tcp = tokio::net::TcpStream::connect(fx.podgate.entry_addr("secure"))
+        .await
+        .expect("connect");
+    tcp.set_nodelay(true).expect("nodelay");
+    let stream = tokio_rustls::TlsConnector::from(Arc::new(tls))
+        .connect(ServerName::try_from("a.test").expect("name"), tcp)
+        .await
+        .expect("TLS");
+    let (mut h2, connection) = h2::client::handshake(stream).await.expect("h2 handshake");
+    tokio::spawn(async move { drop(connection.await) });
+    let mut over_h2 = Vec::with_capacity(RUNS);
+    for at in 0..WARMUP + RUNS {
+        let started = Instant::now();
+        let request = Request::get("https://a.test/x").body(()).expect("request");
+        h2 = h2.ready().await.expect("ready");
+        let (response, _) = h2.send_request(request, true).expect("send");
+        let response = response.await.expect("response");
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.expect("body");
+            drop(body.flow_control().release_capacity(chunk.len()));
+        }
+        if at >= WARMUP {
+            over_h2.push(started.elapsed());
+        }
+    }
+
+    let mut client = fx.connect("a.test").await;
+    let mut over_h3 = Vec::with_capacity(RUNS);
+    for at in 0..WARMUP + RUNS {
+        let started = Instant::now();
+        assert_eq!(client.get("a.test", "/x").await.status, 200);
+        if at >= WARMUP {
+            over_h3.push(started.elapsed());
+        }
+    }
+
+    let quantile = |samples: &mut Vec<Duration>, q: f64| {
+        samples.sort_unstable();
+        let at = ((samples.len() - 1) as f64 * q).round() as usize;
+        samples[at]
+    };
+    let (h2_p50, h2_p99) = (quantile(&mut over_h2, 0.5), quantile(&mut over_h2, 0.99));
+    let (h3_p50, h3_p99) = (quantile(&mut over_h3, 0.5), quantile(&mut over_h3, 0.99));
+    println!(
+        "h3 hop: {RUNS} sequential GETs per protocol; HTTPS (h2) p50 {h2_p50:?} p99 {h2_p99:?}; \
+         HTTP/3 p50 {h3_p50:?} p99 {h3_p99:?}; median difference {:?}",
+        h3_p50.saturating_sub(h2_p50)
+    );
+}
