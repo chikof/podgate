@@ -156,12 +156,11 @@ fn entry_points_invalid_values() {
         );
     }
 
-    // The parser accepts tcp, udp and proxy_protocol; starting them waits for the specs that
+    // The parser accepts tcp and udp; starting them waits for the specs that
     // build them, and the error names the entry point.
     for (value, name) in [
         ("web=127.0.0.1:18080/http,db=127.0.0.1:15432/tcp", "db"),
         ("dns=127.0.0.1:15353/udp", "dns"),
-        ("edge=127.0.0.1:18080/http;proxy_protocol", "edge"),
     ] {
         let (code, stderr) = startup_failure(&[
             ("ENTRY_POINTS", value),

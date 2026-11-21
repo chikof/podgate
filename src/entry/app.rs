@@ -23,6 +23,7 @@ use pingora::server::configuration::ServerConf;
 use pingora::services::listening::Service;
 
 use super::policy::MAX_SECS;
+use super::proxy_protocol::hook::{Fronted, Gate};
 use crate::proxy::Gateway;
 use crate::table::TableHandle;
 
@@ -34,7 +35,8 @@ pub struct Policed {
 }
 
 /// The service for the entry point `gateway` serves; add its listeners to it as to any
-/// `http_proxy_service`.
+/// `http_proxy_service`. `gate` is the PROXY protocol check of a plaintext entry point with
+/// `;proxy_protocol` (a TLS entry point checks in its pre-TLS hook instead).
 #[must_use]
 pub fn service(
     conf: &Arc<ServerConf>,
@@ -42,13 +44,14 @@ pub fn service(
     table: TableHandle,
     entry_point: &str,
     name: &str,
-) -> Service<Policed> {
+    gate: Option<Gate>,
+) -> Service<Fronted<Policed>> {
     let policed = Policed {
         inner: Arc::new(http_proxy(conf, gateway)),
         table,
         entry_point: Arc::from(entry_point),
     };
-    Service::new(name.to_owned(), policed)
+    Service::new(name.to_owned(), Fronted::new(gate, policed))
 }
 
 /// The options that carry an HTTP/2 idle timeout of `secs`, `None` outside `1..=MAX_SECS`.

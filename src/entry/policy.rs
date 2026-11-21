@@ -21,6 +21,8 @@
 //! - `max_header_bytes`: also a check of the parsed head ([`Policy::check_head`]).
 //! - `allow_encoded_slash`: the path normalization ([`Policy::allow_encoded_slash`]).
 //! - `underscore_headers`: [`Policy::check_head`].
+//! - `proxy_protocol`: which peers may send a PROXY protocol header ([`Policy::proxy_protocol`],
+//!   read per connection by the gate of [`super::proxy_protocol::hook`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
@@ -34,6 +36,7 @@ use podgate_model::{EntryPointPolicy, Snapshot, UnderscoreHeaders};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::proxy_protocol::hook::Trusted;
 use super::{CompileContext, Protocol};
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
@@ -115,6 +118,7 @@ pub struct Policy {
     max_header_bytes: Option<u32>,
     allow_encoded_slash: bool,
     underscore: UnderscoreHeaders,
+    proxy_protocol: Option<Trusted>,
 }
 
 /// How many of a head's bytes `max_header_bytes` counts per header besides name and value:
@@ -139,6 +143,13 @@ impl Policy {
     #[must_use]
     pub fn allow_encoded_slash(&self) -> bool {
         self.allow_encoded_slash
+    }
+
+    /// The peers allowed to send a PROXY protocol header, when the snapshot sets any; `None`
+    /// trusts nobody. Read by the listener's [`super::proxy_protocol::hook::Gate`].
+    #[must_use]
+    pub fn proxy_protocol(&self) -> Option<&Trusted> {
+        self.proxy_protocol.as_ref()
     }
 
     /// The idle (keep-alive) timeout in whole seconds, for HTTP/1 sessions and HTTP/2
@@ -264,6 +275,13 @@ impl Policy {
         };
         if https(before) && !https(self) {
             kinds.push(kind::ENTRY_POINT_HTTPS_REDIRECT_REMOVED);
+        }
+        if let Some(kind) = self
+            .proxy_protocol
+            .as_ref()
+            .and_then(|trusted| trusted.relaxation(before.proxy_protocol.as_ref()))
+        {
+            kinds.push(kind);
         }
         kinds
     }
@@ -464,6 +482,21 @@ fn compile_one(
         match redirect_of(value, name, context, redirect_targets) {
             Ok(redirect) => compiled.redirect = Some(redirect),
             Err(invalid) => problems.push(invalid),
+        }
+    }
+    if let Some(value) = &policy.proxy_protocol {
+        if context.reads_proxy_header(name) == Some(false) {
+            problems.push(unsupported(
+                "proxy_protocol",
+                "this entry point does not read a PROXY protocol header: its `ENTRY_POINTS` \
+                 entry has no `;proxy_protocol`, and a header it did not ask for would be \
+                 served as an HTTP request",
+            ));
+        } else {
+            match Trusted::parse(value) {
+                Ok(trusted) => compiled.proxy_protocol = Some(trusted),
+                Err(invalid) => problems.push(invalid),
+            }
         }
     }
     if problems.is_empty() {

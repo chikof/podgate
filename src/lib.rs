@@ -119,7 +119,7 @@ pub use wake::{Wake, WakeService};
 /// # Errors
 ///
 /// Fails when `UPSTREAM_POLICY_FILE` or `STATIC_ROOTS_FILE` is invalid, an entry point is `tcp`
-/// or `udp` or sets `proxy_protocol` (not built yet), a TLS listener cannot be configured, the
+/// or `udp` (not built yet), a TLS listener cannot be configured, the
 /// admin socket cannot be bound, or an `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
@@ -191,12 +191,17 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             std::time::Duration::from_secs(1),
         ));
     for point in &config.entry_points {
+        let gate = point
+            .proxy_protocol
+            .then(|| entry::proxy_protocol::hook::Gate::new(table.clone(), &point.name));
         let mut proxy = entry::app::service(
             &server.configuration,
             gateway.clone().with_entry_point(&point.name),
             table.clone(),
             &point.name,
             &format!("entry point {}", point.name),
+            gate.clone()
+                .filter(|_| point.protocol == entry::Protocol::Http),
         );
         let addr = point.addr.to_string();
         match point.protocol {
@@ -206,23 +211,22 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     anyhow::anyhow!("cannot configure the TLS entry point {}: {err}", point.name)
                 })?;
                 proxy.add_tls_with_settings(&addr, None, settings);
-                proxy
-                    .endpoints()
-                    .set_pre_tls_callback(Arc::new(clientauth::ClearDecision(
-                        tls::PreHandshake::new(acme.clone(), table.clone()),
-                    )));
+                let hello =
+                    clientauth::ClearDecision(tls::PreHandshake::new(acme.clone(), table.clone()));
+                // The PROXY header comes first on the wire, so its gate runs before the
+                // ClientHello reader.
+                match gate {
+                    Some(gate) => proxy.endpoints().set_pre_tls_callback(Arc::new(
+                        entry::proxy_protocol::hook::BeforeTls::new(gate, hello),
+                    )),
+                    None => proxy.endpoints().set_pre_tls_callback(Arc::new(hello)),
+                }
             }
             entry::Protocol::Tcp | entry::Protocol::Udp => anyhow::bail!(
                 "entry point {} is {}: TCP and UDP entry points are not built yet",
                 point.name,
                 point.protocol.as_str()
             ),
-        }
-        if point.proxy_protocol {
-            anyhow::bail!(
-                "entry point {}: proxy_protocol is not built yet",
-                point.name
-            );
         }
         server.add_service(proxy);
     }

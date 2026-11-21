@@ -236,6 +236,7 @@ pub struct CompileContext {
     tls_floor: TlsVersion,
     static_roots: StaticRoots,
     addrs: Vec<(Box<str>, SocketAddr)>,
+    proxy_header: Option<Vec<Box<str>>>,
 }
 
 impl Default for CompileContext {
@@ -261,6 +262,7 @@ impl CompileContext {
             tls_floor: TlsVersion::V1_2,
             static_roots: StaticRoots::default(),
             addrs: Vec::new(),
+            proxy_header: None,
         }
     }
 
@@ -273,6 +275,13 @@ impl CompileContext {
             .iter()
             .map(|point| (point.name.clone(), point.addr))
             .collect();
+        context.proxy_header = Some(
+            points
+                .iter()
+                .filter(|point| point.proxy_protocol)
+                .map(|point| point.name.clone())
+                .collect(),
+        );
         context
     }
 
@@ -284,6 +293,15 @@ impl CompileContext {
             .iter()
             .find(|(bound, _)| &**bound == name)
             .map(|(_, addr)| *addr)
+    }
+
+    /// Whether the entry point called `name` was configured with `;proxy_protocol`. `None` when
+    /// the context was not built from the process's entry points ([`Self::new`]), which knows no
+    /// options.
+    #[must_use]
+    pub fn reads_proxy_header(&self, name: &str) -> Option<bool> {
+        let listed = self.proxy_header.as_ref()?;
+        Some(listed.iter().any(|listed| &**listed == name))
     }
 
     /// Lets the tenants called `tenants` declare routers that match hosts nobody claims (a

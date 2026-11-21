@@ -24,6 +24,8 @@
 //! an unspecified or unix family all decode to [`Header::Local`]: the receiver keeps the address
 //! of the connection's peer.
 
+pub mod hook;
+
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;

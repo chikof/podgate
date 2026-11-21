@@ -36,7 +36,7 @@ use crate::service::{self, NamedTransport, RingBudget, Service, TenantRoots, Tra
 use crate::table::{CompileError, CompiledApp, CompiledRevision, Parts, ServiceRef};
 use crate::tls::{CertStore, Options};
 use crate::wasm as engine;
-use podgate_model::{App, Declared, EntryPointPolicy, RevisionState, SkewSecret, Snapshot};
+use podgate_model::{App, Declared, RevisionState, SkewSecret, Snapshot};
 
 /// One configuration problem: a stable code, a message, and optional extra fields for the `422`
 /// body (the WASM rejection adds `module` and `name`, for example).
@@ -376,12 +376,6 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
         if let Some(Err(invalid)) = policy.forwarded_headers.as_ref().map(Trust::parse) {
             problem(invalid);
         }
-        if let Some(field) = unsupported_policy_field(policy) {
-            problem(Invalid::new(
-                "unsupported_setting",
-                format!("entry point policy {field} is planned and not built yet"),
-            ));
-        }
         for tenant in policy.tenants.iter().flatten() {
             if !tenants.contains(&**tenant) {
                 problem(Invalid::new(
@@ -444,10 +438,6 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
         }
     }
     rejected
-}
-
-fn unsupported_policy_field(policy: &EntryPointPolicy) -> Option<&'static str> {
-    policy.proxy_protocol.is_some().then_some("proxy_protocol")
 }
 
 fn duplicates<'a>(

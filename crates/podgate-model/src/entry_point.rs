@@ -38,7 +38,9 @@ pub struct EntryPointPolicy {
     /// Peers whose `X-Forwarded-*` headers are trusted.
     #[serde(default)]
     pub forwarded_headers: Option<Value>,
-    /// PROXY protocol acceptance. Not built yet.
+    /// `{trusted_ips, insecure}`: the peers allowed to send a PROXY protocol header to an entry
+    /// point started with `;proxy_protocol` (`docs/ref/proxy-protocol.md`). Neither field set
+    /// trusts nobody. `insecure: true` trusts every peer and is a posture change in a plan.
     #[serde(default)]
     pub proxy_protocol: Option<Value>,
     /// `{read_secs, write_secs, idle_secs, header_secs}`: each is applied or refused with
