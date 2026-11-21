@@ -52,6 +52,19 @@ impl HostPattern {
     }
 }
 
+/// Whether some name matches both `a` and `b`.
+#[must_use]
+pub fn overlaps(a: &HostPattern, b: &HostPattern) -> bool {
+    match (a, b) {
+        (HostPattern::Exact(x), HostPattern::Exact(y)) => x == y,
+        (HostPattern::Wildcard(x), HostPattern::Wildcard(y)) => x == y,
+        (HostPattern::Exact(name), HostPattern::Wildcard(suffix))
+        | (HostPattern::Wildcard(suffix), HostPattern::Exact(name)) => name
+            .split_once('.')
+            .is_some_and(|(_label, rest)| rest == &**suffix),
+    }
+}
+
 /// Reduces the value of a `Host` header or `:authority` to a lookup key: port removed,
 /// lowercase, no trailing dot. Allocates only when the input has uppercase letters.
 #[must_use]

@@ -277,6 +277,7 @@ fn view_of<'v>(
         tls,
         request,
         client_ip: target.client_ip,
+        hello: crate::router::matcher::Hello::NONE,
     }
 }
 

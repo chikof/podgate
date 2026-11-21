@@ -2,7 +2,7 @@
 
 A `tcp` entry point forwards raw TCP connections to a load-balanced set of servers, chosen by a TCP router (a client address match, or a catch-all). Pingora has no L4 router, so podgate runs its own `ServerApp` on a `pingora-core` listening service (`src/l4/tcp/`).
 
-Matches Traefik's `tcp.routers` and `tcp.services.loadBalancer.servers[].address` on a `:5432/tcp` entry point, and Caddy's `layer4` plugin. Not here: TLS (`HostSNI`, passthrough, termination: change 0059), PROXY protocol towards the servers and `termination_delay_ms`, TCP middlewares.
+Matches Traefik's `tcp.routers` and `tcp.services.loadBalancer.servers[].address` on a `:5432/tcp` entry point, and Caddy's `layer4` plugin. TLS on TCP routers (`HostSNI`, passthrough, termination) is in `docs/ref/l4-tls.md`. Not here: PROXY protocol towards the servers and `termination_delay_ms`, TCP middlewares.
 
 ## Configuration
 
@@ -35,8 +35,9 @@ The entry point is process configuration: `ENTRY_POINTS=pg=0.0.0.0:5432/tcp`. It
 |---|---|
 | router `entry_points` | The `tcp` entry points it listens on; at least one. |
 | router `service` | A TCP service of the same app. |
-| router `match` | Optional. A matcher tree whose only leaf is `client_ip` (`all`, `any`, `not` combine them; the leaf is the one of `docs/ref/match-request.md`). Another leaf is `invalid_matcher`: matching the TLS server name or ALPN is change 0059. Absent: a catch-all. |
-| router `tls`, `chain` | `l4_not_built` (changes 0059 and TCP middlewares). |
+| router `match` | Optional. A matcher tree of the TCP dialect: the leaves `client_ip` (the one of `docs/ref/match-request.md`), `sni`, `sni_regexp` and `alpn` (`docs/ref/l4-tls.md`), combined with `all`, `any`, `not`. An HTTP leaf is `invalid_matcher`. Absent: a catch-all. |
+| router `tls` | `{"passthrough": true}` or `{}`: the router takes TLS connections and forwards them untouched or terminates them (`docs/ref/l4-tls.md`). Absent: the router does not look at TLS. |
+| router `chain` | `l4_not_built` (TCP middlewares). |
 | service `type` | `loadbalancer` only. `weighted` and `failover` choose among the app's HTTP services by name and have no TCP form: `invalid_service`. |
 | service `servers[].address` | `host:port`, 1 to 256 of them: an IP literal (`10.0.0.5:5432`, `[2001:db8::5]:5432`) or a DNS name (`db.internal:5432`). `weight` is optional and only `weighted_round_robin` and `hrw` take one. With `"resolve": "srv"` the address is a full SRV owner name without a port (`_db._tcp.shop.service.consul`), as in `docs/ref/dns-srv.md`: the records choose the targets, ports, priorities and weights, and a `weight` is `invalid_service`. A server `tls`, and the service fields `proxy_protocol` and `termination_delay_ms`, are `service_not_built`. |
 | service `algorithm` | `round_robin` (default), `weighted_round_robin`, `least_conn`, `random` or `hrw` (the client address picks the server, and the same client keeps it). The others (`ip_hash`, `uri_hash`, `header_hash`, `p2c_ewma`) read an HTTP request or response; `ip_hash` also builds a ring: `invalid_service`. |
@@ -47,9 +48,9 @@ A TCP service is the HTTP load balancer over `http://host:port` servers: the sam
 
 ## Which router takes a connection
 
-The client address is the TCP peer's, or the source of the PROXY protocol header when the entry point has `;proxy_protocol` (`docs/ref/proxy-protocol.md`: the header comes first on the wire and only a trusted peer may send one). A router with a `match` ranks above a catch-all, and among routers with a `match` the one with more constraints wins. The routers of one entry point, in any of the tenant's apps, that can match the same connection and have the same rank are `route_ambiguity` (with `apps`, `routers`, `declared_by`): two catch-all routers are one, and so are two `client_ip` matches that overlap with equal specificity. A connection no router takes is closed and counted `podgate_l4_refused_total{reason="no_route"}`.
+The client address is the TCP peer's, or the source of the PROXY protocol header when the entry point has `;proxy_protocol` (`docs/ref/proxy-protocol.md`: the header comes first on the wire and only a trusted peer may send one). A router with a `match` ranks above a catch-all, and among routers with a `match` the one with more constraints wins. The routers of one entry point, in any of the tenant's apps, that can match the same connection and have the same rank are `route_ambiguity` (with `apps`, `routers`, `declared_by`): two catch-all routers are one, and so are two `client_ip` matches that overlap with equal specificity. A connection no router takes is closed and counted `podgate_l4_refused_total{reason="no_route"}`. With TLS routers on the entry point the ranking also looks at the server name, and the connection's first bytes are read before it is routed: see `docs/ref/l4-tls.md`.
 
-The entry point must be bound by the node (`unknown_entry_point`), be `tcp` (`entry_point_protocol`) and have a policy whose `tenants` lists only the router's tenant (`entry_point_forbidden`). That makes every TCP entry point exclusive to one tenant, so a catch-all router needs no further allowance and `catch_all_not_allowed` cannot arise. A TCP listener has no host to tell tenants apart by.
+The entry point must be bound by the node (`unknown_entry_point`), be `tcp` (`entry_point_protocol`) and have a policy whose `tenants` lists only the router's tenant (`entry_point_forbidden`). That makes the entry point of a router without `tls` exclusive to one tenant, so a catch-all router needs no further allowance and `catch_all_not_allowed` cannot arise for it: a TCP listener has no host to tell tenants apart by. A router with `tls` and literal `sni` names does have one, and may share the entry point (`docs/ref/l4-tls.md`, who may claim a name).
 
 ## One connection
 
@@ -72,7 +73,7 @@ On `GET /metrics`, process-wide and labelled by fixed reasons only:
 
 - `podgate_tcp_connections`: connections open now (the ones that reached a server).
 - `podgate_tcp_connections_total`: connections accepted.
-- `podgate_l4_refused_total{reason}`: closed before a server was dialled. Reasons: `no_route`, `over_inflight`, `over_budget`, `no_server`, `no_healthy_server` (the service's `health_check` has marked every server down), `upstream_forbidden`.
+- `podgate_l4_refused_total{reason}`: closed before a server was dialled. Reasons: `no_route`, `over_inflight`, `over_budget`, `no_server`, `no_healthy_server` (the service's `health_check` has marked every server down), `upstream_forbidden`, and for TLS routers `hello_timeout`, `hello_invalid`, `tls_handshake`, `tls_policy`, `client_cert` (`docs/ref/l4-tls.md`).
 - `podgate_tcp_connect_failures_total`: failed connects, each one a try of the next server.
 - `podgate_tcp_closed_total{reason}`: connections that reached a server and ended: `done`, `idle`, `error`, `shutdown`.
 - `podgate_tcp_bytes_total{direction}`: `in` from clients, `out` back to them.

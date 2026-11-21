@@ -466,6 +466,8 @@ struct TcpRouterView<'a> {
     service: &'a str,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     matcher: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<crate::l4::tcp::Tls>,
 }
 
 #[derive(Serialize)]
@@ -701,6 +703,7 @@ fn tcp_view(app: &CompiledApp) -> Option<TcpView<'_>> {
                     entry_points: router.entry_points(),
                     service: service.name(),
                     matcher: router.match_json(),
+                    tls: router.tls(),
                 })
             })
             .collect(),

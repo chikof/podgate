@@ -286,6 +286,16 @@ impl Options {
     /// direction: a hello that passes may still negotiate something [`Self::connection_violation`]
     /// refuses.
     pub(crate) fn hello_violation(&self, hello: &Hello) -> Option<Violation> {
+        self.transport_hello_violation(hello).or_else(|| {
+            let offers_alpn = !hello.alpn.is_empty();
+            (offers_alpn && !hello.alpn.iter().any(|protocol| self.allows_alpn(protocol)))
+                .then_some(Violation::Alpn)
+        })
+    }
+
+    /// The version and suite part of [`Self::hello_violation`]. A TCP router carries
+    /// any protocol, so the `h2` and `http/1.1` allowance of `alpn` says nothing about it.
+    pub(crate) fn transport_hello_violation(&self, hello: &Hello) -> Option<Violation> {
         let at_least_13 = self.min_version == TlsVersion::V1_3;
         let offers_tls13 =
             hello.offers_tls13 != Some(false) && hello.suites.iter().copied().any(is_tls13);
@@ -301,10 +311,6 @@ impl Options {
                 return Some(Violation::Suite);
             }
         }
-        let offers_alpn = !hello.alpn.is_empty();
-        if offers_alpn && !hello.alpn.iter().any(|protocol| self.allows_alpn(protocol)) {
-            return Some(Violation::Alpn);
-        }
         None
     }
 
@@ -314,6 +320,14 @@ impl Options {
         cipher: &str,
         h2: bool,
     ) -> Option<Violation> {
+        self.transport_violation(version, cipher).or_else(|| {
+            let served = if h2 { self.h2 } else { self.http1 };
+            (!served).then_some(Violation::Alpn)
+        })
+    }
+
+    /// The version and suite part of [`Self::connection_violation`], for a TCP router.
+    pub(crate) fn transport_violation(&self, version: &str, cipher: &str) -> Option<Violation> {
         let version = match version {
             "TLSv1_3" => TlsVersion::V1_3,
             "TLSv1_2" => TlsVersion::V1_2,
@@ -327,8 +341,7 @@ impl Options {
         {
             return Some(Violation::Suite);
         }
-        let served = if h2 { self.h2 } else { self.http1 };
-        (!served).then_some(Violation::Alpn)
+        None
     }
 }
 

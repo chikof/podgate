@@ -73,7 +73,7 @@ pub(crate) fn decide(request: bool) {
 }
 
 /// Drops a pending decision no handshake used.
-fn forget() {
+pub(crate) fn forget() {
     REQUEST_CERT.set(None);
 }
 
@@ -228,7 +228,7 @@ fn verifier_of(pem: &str) -> Result<Arc<dyn ClientCertVerifier>, String> {
 }
 
 /// Whether a connection that presented `chain` (`None`: no certificate) is served under `auth`.
-fn allows(auth: &Arc<ClientAuth>, chain: Option<&ClientChain>) -> bool {
+pub(crate) fn allows(auth: &Arc<ClientAuth>, chain: Option<&ClientChain>) -> bool {
     match auth.mode {
         ClientAuthMode::Request => true,
         ClientAuthMode::Require => chain.is_some(),

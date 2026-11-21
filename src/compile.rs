@@ -204,7 +204,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
-    let mut conflicts = conflict::detect(&snapshot.apps, &routers);
+    let sni_claims: Vec<Vec<HostPattern>> = l4s
+        .iter()
+        .map(|l4| l4.tcp().claims().cloned().collect())
+        .collect();
+    let mut conflicts = conflict::detect(&snapshot.apps, &routers, &sni_claims);
     conflicts.extend(l4::detect(&snapshot.apps, &l4s));
     if !conflicts.is_empty() {
         return Err(CompileError::Conflicts(conflicts));
@@ -337,9 +341,16 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         return Err(CompileError::Rejected(rejected));
     }
 
+    // The names a terminating TCP router serves need certificates like an HTTP host does.
     let claims: Vec<Vec<HostPattern>> = routers
         .iter()
-        .map(|list| list.iter().flat_map(|r| r.patterns().cloned()).collect())
+        .zip(&l4s)
+        .map(|(list, l4)| {
+            list.iter()
+                .flat_map(|r| r.patterns().cloned())
+                .chain(l4.tcp().terminated_claims().cloned())
+                .collect()
+        })
         .collect();
     let mut rejected = dns01::reject(snapshot, &claims, context);
     rejected.extend(alpn01::reject(snapshot, &claims));

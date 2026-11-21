@@ -280,15 +280,20 @@ impl CompiledApp {
             )))
         });
         let mut hosts: Vec<Box<str>> = Vec::new();
-        for router in &parts.routers {
-            for pattern in router.patterns() {
-                let shown: Box<str> = match pattern {
-                    crate::host::HostPattern::Exact(name) => name.clone(),
-                    crate::host::HostPattern::Wildcard(base) => format!("*.{base}").into(),
-                };
-                if !hosts.contains(&shown) {
-                    hosts.push(shown);
-                }
+        // The names a terminating TCP router serves count as the app's hosts: they get
+        // certificates, staples and an owner like an HTTP host does.
+        let patterns = parts
+            .routers
+            .iter()
+            .flat_map(CompiledRouter::patterns)
+            .chain(parts.l4.tcp().terminated_claims());
+        for pattern in patterns {
+            let shown: Box<str> = match pattern {
+                crate::host::HostPattern::Exact(name) => name.clone(),
+                crate::host::HostPattern::Wildcard(base) => format!("*.{base}").into(),
+            };
+            if !hosts.contains(&shown) {
+                hosts.push(shown);
             }
         }
         let compiled = Self {
@@ -1351,6 +1356,7 @@ mod test {
             tls: false,
             request: &request,
             client_ip: None,
+            hello: crate::router::matcher::Hello::NONE,
         };
         let matched = table.index().find(table.apps(), &view)?;
         table.app(matched.app)

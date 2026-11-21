@@ -10,12 +10,21 @@
 //! } }
 //! ```
 //!
-//! A TCP router has `entry_points`, a `service` and an optional `match`: a matcher tree whose only
-//! leaf is `client_ip` (with `all`, `any` and `not`). A router without `match` is a catch-all:
-//! it takes the connections no router with a `match` takes. The `tcp` entry point is reserved to
-//! one tenant (`tenants` in its policy), so the routers on it, in any of that tenant's apps, are
-//! ranked by whether they have a `match` and then by specificity; two of the same rank that can
-//! match one client are `route_ambiguity`, which makes a second catch-all one.
+//! A TCP router has `entry_points`, a `service`, an optional `match` and an optional `tls`. The
+//! `match` is a matcher tree of the TCP dialect: the leaves `client_ip`, `sni`, `sni_regexp` and
+//! `alpn` with `all`, `any` and `not`. A router without `match` is a catch-all: it takes the
+//! connections no router with a `match` takes. `tls` says the router speaks TLS:
+//! `{"passthrough": true}` forwards the stream untouched, `{}` terminates it with the app's
+//! certificates and forwards plain bytes; see [`super::tls`]. A router with `sni`, `sni_regexp`
+//! or `alpn` needs `tls`, because only a TLS connection has a server name or protocols.
+//!
+//! A router without `tls` owns its entry point's tenant: the `tcp` entry point is reserved to
+//! one tenant (`tenants` in its policy). A router with `tls` that names literal server names
+//! (`sni`) may share an entry point between tenants, because the names tell them apart and a
+//! name has one owner. Routers on one entry point are ranked by whether they have a `match` or
+//! `tls`, then by specificity (exact `sni` over wildcard over `sni_regexp`, then the number of
+//! other leaves); two of the same rank that can match one connection are `route_ambiguity`,
+//! which makes a second catch-all one.
 //!
 //! A service is a `loadbalancer` of `servers` (`ip:port` or `name:port`; a name is resolved off
 //! the connection path by the DNS resolver, and every answer passes the upstream address policy
@@ -25,8 +34,8 @@
 //! `weighted_round_robin`, `least_conn`, `random` and `hrw` (the client address).
 //!
 //! This file is the compiled model; the runtime is in `app` (the Pingora application of an entry
-//! point), `copy` (the byte copy) and `stats` (the metrics). `docs/ref/l4-tcp.md` has the
-//! operator's view.
+//! point), `copy` (the byte copy) and `stats` (the metrics), and the TLS side is in
+//! [`super::tls`]. `docs/ref/l4-tcp.md` and `docs/ref/l4-tls.md` have the operator's view.
 
 mod app;
 mod copy;
@@ -44,11 +53,13 @@ use serde_json::{Map, Value, json};
 
 use super::Compiled as L4;
 use super::health;
+use super::tls::Offer;
 use crate::compile::{Invalid, Rejected};
 use crate::conflict::Conflict;
 use crate::entry::{CompileContext, Protocol};
+use crate::host::{HostPattern, overlaps};
 use crate::router::Matcher;
-use crate::router::matcher::{self, View};
+use crate::router::matcher::{self, Claim, Dialect, Spec, View};
 use crate::service::resolve::{self, NameBudget};
 use crate::service::{self, Lease, PickCx};
 use podgate_model::{App, Declared, Snapshot};
@@ -95,6 +106,31 @@ pub struct RouterConfig {
     /// entry point carries one.
     #[serde(default, rename = "match")]
     matcher: Option<Value>,
+    /// `{"passthrough": true}` forwards the TLS stream untouched; `{}` terminates TLS with the
+    /// app's certificates. Absent: the router does not look at TLS (and cannot match `sni`,
+    /// `sni_regexp` or `alpn`).
+    #[serde(default)]
+    tls: Option<TlsConfig>,
+}
+
+/// What a TCP router does with TLS.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// Forward the encrypted stream to the server untouched; the server completes the
+    /// handshake. Default `false`: podgate terminates TLS and forwards plain bytes.
+    #[serde(default)]
+    passthrough: bool,
+}
+
+/// How a TLS router treats the connection's TLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tls {
+    /// The bytes are forwarded as they are.
+    Passthrough,
+    /// podgate completes the handshake with the app's certificates and forwards the plaintext.
+    Terminate,
 }
 
 /// The configuration of a TCP `loadbalancer`.
@@ -159,6 +195,11 @@ pub struct Router {
     matcher: Option<Matcher>,
     matcher_json: Option<Value>,
     service: usize,
+    tls: Option<Tls>,
+    /// The literal names the matcher is limited to; empty for a router that is not.
+    claims: Vec<HostPattern>,
+    /// The ALPN protocols the matcher names, which a handshake of this router can negotiate.
+    protocols: Box<[Box<[u8]>]>,
 }
 
 impl Router {
@@ -186,31 +227,61 @@ impl Router {
         self.matcher_json.as_ref()
     }
 
+    /// What the router does with TLS, `None` when it does not look at it.
+    #[must_use]
+    pub fn tls(&self) -> Option<Tls> {
+        self.tls
+    }
+
+    /// Whether the router is limited to literal server names (`sni`), which it claims. A router
+    /// that is not takes connections whatever name they carry.
+    #[must_use]
+    pub fn is_claimed(&self) -> bool {
+        !self.claims.is_empty()
+    }
+
+    /// The ALPN protocols the matcher names: what a terminating handshake can negotiate.
+    fn protocols(&self) -> &[Box<[u8]>] {
+        &self.protocols
+    }
+
     /// Whether the router listens on `entry_point`.
     #[must_use]
     pub fn listens_on(&self, entry_point: &str) -> bool {
         self.entry_points.iter().any(|name| &**name == entry_point)
     }
 
-    /// Which router wins over which: a router with a `match` over a catch-all, then the one with
-    /// more constraints.
-    fn rank(&self) -> (bool, u32) {
-        self.matcher
-            .as_ref()
-            .map_or((false, 0), |matcher| (true, matcher.spec().others))
+    /// Which router wins over which: a router with a `match` or `tls` over a catch-all, then the
+    /// more specific matcher.
+    fn rank(&self) -> (bool, Spec) {
+        (
+            self.matcher.is_some() || self.tls.is_some(),
+            self.matcher.as_ref().map_or(Spec::default(), Matcher::spec),
+        )
     }
 
-    /// Whether a connection from `client` matches. `probe` is the request head the matcher
-    /// interface asks for; only `client_ip` is ever read from the view.
-    fn matches(&self, entry_point: &str, client: IpAddr, probe: &RequestHeader) -> bool {
+    /// Whether a connection from `client` with `offer` matches. `probe` is the request head the
+    /// matcher interface asks for; no TCP leaf reads it. A router with `tls` takes only a
+    /// connection that starts with a ClientHello.
+    fn matches(
+        &self,
+        entry_point: &str,
+        client: IpAddr,
+        probe: &RequestHeader,
+        offer: &Offer,
+    ) -> bool {
+        if self.tls.is_some() && !offer.is_tls() {
+            return false;
+        }
         self.matcher.as_ref().is_none_or(|matcher| {
             matcher.matches(&View {
                 host: "",
                 path: "/",
                 entry_point,
-                tls: false,
+                tls: offer.is_tls(),
                 request: probe,
                 client_ip: Some(client),
+                hello: offer.hello(),
             })
         })
     }
@@ -320,6 +391,19 @@ impl Compiled {
         let router = self.routers.get(index)?;
         Some((router, self.services.get(router.service)?))
     }
+
+    /// Every literal server name a router of the app is limited to, terminating or not.
+    pub(crate) fn claims(&self) -> impl Iterator<Item = &HostPattern> {
+        self.routers.iter().flat_map(|router| &router.claims)
+    }
+
+    /// The names the app's terminating routers serve: the app needs a certificate for them.
+    pub(crate) fn terminated_claims(&self) -> impl Iterator<Item = &HostPattern> {
+        self.routers
+            .iter()
+            .filter(|router| router.tls == Some(Tls::Terminate))
+            .flat_map(|router| &router.claims)
+    }
 }
 
 /// Compiles the TCP routers and services of `app`; every problem goes to `rejected`.
@@ -396,7 +480,7 @@ pub(super) fn compile(
 }
 
 /// The fields of a router that belong to later specs: refused by name, not as unknown.
-const ROUTER_PLANNED: [&str; 2] = ["tls", "chain"];
+const ROUTER_PLANNED: [&str; 1] = ["chain"];
 /// The fields of a service that belong to later specs.
 const SERVICE_PLANNED: [&str; 2] = ["proxy_protocol", "termination_delay_ms"];
 
@@ -407,7 +491,7 @@ fn router_config(value: &Value) -> Result<RouterConfig, Invalid> {
     {
         return Err(Invalid::new(
             "l4_not_built",
-            format!("tcp router {field} is planned and not built yet (TLS on TCP routers)"),
+            format!("tcp router {field} is planned and not built yet (TCP middlewares)"),
         ));
     }
     serde_json::from_value(value.clone())
@@ -552,28 +636,28 @@ fn compile_service(
     })
 }
 
-/// Parses the `match` of a TCP router: any matcher tree, then only `client_ip` and the
-/// combinators are kept.
+/// Parses the `match` of a TCP router: the TCP dialect of the matcher grammar.
 fn parse_match(value: &Value) -> Result<Matcher, Invalid> {
-    let parsed = matcher::parse(value)
-        .map_err(|err| Invalid::new(err.code, format!("tcp router match: {err}")))?;
-    if only_client_ip(&parsed) {
-        Ok(parsed)
-    } else {
-        Err(Invalid::new(
-            "invalid_matcher",
-            "a TCP router matches on `client_ip` only, with `all`, `any` and `not`: the HTTP \
-             leaves read a request, and matching the TLS server name or ALPN is change 0059",
-        ))
-    }
+    matcher::parse_in(Dialect::Tcp, value)
+        .map_err(|err| Invalid::new(err.code, format!("tcp router match: {err}")))
 }
 
-fn only_client_ip(matcher: &Matcher) -> bool {
-    match matcher {
-        Matcher::ClientIp(_) => true,
-        Matcher::All(children) | Matcher::Any(children) => children.iter().all(only_client_ip),
-        Matcher::Not(child) => only_client_ip(child),
-        _ => false,
+/// The literal names `matcher` is limited to; empty when it is not limited to literal names:
+/// no `sni`, or one that is `any` of a literal name and a regular expression, which takes names
+/// no literal claim bounds (an `sni_regexp` in an `all` with a literal one only narrows it).
+fn literal_claims(matcher: &Matcher) -> Vec<HostPattern> {
+    let claims = matcher.claims().unwrap_or_default();
+    let literal: Vec<HostPattern> = claims
+        .iter()
+        .filter_map(|claim| match claim {
+            Claim::Pattern(pattern) => Some(pattern.clone()),
+            Claim::Regexp => None,
+        })
+        .collect();
+    if literal.len() == claims.len() {
+        literal
+    } else {
+        Vec::new()
     }
 }
 
@@ -586,6 +670,27 @@ fn compile_router(
     broken: &HashSet<&str>,
 ) -> Result<Router, Vec<Invalid>> {
     let mut problems = Vec::new();
+    let tls = config.tls.as_ref().map(|tls| {
+        if tls.passthrough {
+            Tls::Passthrough
+        } else {
+            Tls::Terminate
+        }
+    });
+    let matcher = match config.matcher.as_ref().map(parse_match).transpose() {
+        Ok(matcher) => matcher,
+        Err(invalid) => {
+            problems.push(invalid);
+            None
+        }
+    };
+    if tls.is_none() && matcher.as_ref().is_some_and(Matcher::reads_hello) {
+        problems.push(Invalid::new(
+            "invalid_router",
+            "the match uses `sni`, `sni_regexp` or `alpn`, which read the TLS ClientHello: the router needs `tls` (`{\"passthrough\": true}` to forward the stream, `{}` to terminate it)",
+        ));
+    }
+    let claims = matcher.as_ref().map(literal_claims).unwrap_or_default();
     if config.entry_points.is_empty() {
         problems.push(Invalid::new(
             "unknown_entry_point",
@@ -598,17 +703,24 @@ fn compile_router(
                 "duplicate_name",
                 format!("entry point {name} is listed twice"),
             ));
-        } else if let Some(invalid) = super::reserve(app, name, Protocol::Tcp, snapshot, context) {
-            problems.push(invalid);
+        } else if tls.is_none() {
+            problems.extend(super::reserve(app, name, Protocol::Tcp, snapshot, context));
+        } else {
+            match super::access(app, name, Protocol::Tcp, snapshot, context) {
+                Err(invalid) => problems.push(invalid),
+                Ok(exclusive) => {
+                    if claims.is_empty() && !exclusive && !context.allows_catch_all(&app.tenant) {
+                        problems.push(Invalid::new(
+                            "catch_all_not_allowed",
+                            format!(
+                                "the router can take a connection whatever server name it carries, so on entry point {name}, which other tenants may use, it could capture their names; add a literal `sni` in an `all`, attach it only to an entry point whose tenants policy names this tenant alone, or ask the operator to list the tenant in CATCH_ALL_TENANTS"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
-    let matcher = match config.matcher.as_ref().map(parse_match).transpose() {
-        Ok(matcher) => matcher,
-        Err(invalid) => {
-            problems.push(invalid);
-            None
-        }
-    };
     let service = services
         .iter()
         .position(|service| service.name == config.service);
@@ -622,17 +734,30 @@ fn compile_router(
         Some(service) if problems.is_empty() => Ok(Router {
             name: config.name.clone(),
             entry_points: config.entry_points.clone().into_boxed_slice(),
+            protocols: matcher
+                .as_ref()
+                .map(|matcher| {
+                    matcher
+                        .alpn_protocols()
+                        .into_iter()
+                        .map(Box::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
             matcher,
             matcher_json: config.matcher.clone(),
             service,
+            tls,
+            claims,
         }),
         _ => Err(problems),
     }
 }
 
 /// The routers of one entry point that can match the same connection and nothing ranks apart
-/// (`route_ambiguity`): two catch-all routers, or two with a `match` of the same specificity that are
-/// not provably disjoint.
+/// (`route_ambiguity`): two catch-all routers, or two with a `match` of the same specificity that
+/// are not provably disjoint; and two tenants' routers that can take any server name on a
+/// shared entry point (`cross_tenant_catch_all`).
 pub(super) fn detect(apps: &[App], compiled: &[L4]) -> Vec<Conflict> {
     let mut found = Vec::new();
     let mut entry_points: Vec<&str> = Vec::new();
@@ -654,14 +779,35 @@ pub(super) fn detect(apps: &[App], compiled: &[L4]) -> Vec<Conflict> {
             .collect();
         for (at, (first_app, first)) in routers.iter().enumerate() {
             for (second_app, second) in &routers[at + 1..] {
+                let (a, b) = (&apps[*first_app], &apps[*second_app]);
+                if found.len() >= MAX_CONFLICTS {
+                    continue;
+                }
+                // Two tenants that claim a common name are `host_conflict` (or
+                // `cross_tenant_wildcard`) already; the same pair is not also ambiguous.
+                if a.tenant != b.tenant
+                    && first
+                        .claims
+                        .iter()
+                        .any(|left| second.claims.iter().any(|right| overlaps(left, right)))
+                {
+                    continue;
+                }
+                if a.tenant != b.tenant && !first.is_claimed() && !second.is_claimed() {
+                    found.push(Conflict::CrossTenantCatchAll {
+                        tenants: [a.tenant.clone(), b.tenant.clone()],
+                        apps: [a.id.clone(), b.id.clone()],
+                        routers: [first.name.clone(), second.name.clone()],
+                        declared_by: [a.declared_by.clone(), b.declared_by.clone()],
+                    });
+                    continue;
+                }
                 let overlap = first.rank() == second.rank()
                     && match (&first.matcher, &second.matcher) {
                         (Some(a), Some(b)) => !matcher::disjoint(a, b),
-                        (None, None) => true,
-                        _ => false,
+                        _ => true,
                     };
-                if overlap && found.len() < MAX_CONFLICTS {
-                    let (a, b) = (&apps[*first_app], &apps[*second_app]);
+                if overlap {
                     found.push(Conflict::RouteAmbiguity {
                         host: None,
                         apps: [a.id.clone(), b.id.clone()],
@@ -772,25 +918,70 @@ mod test {
     }
 
     #[test]
-    fn matches_other_than_client_ip_are_refused() {
+    fn matches_other_than_the_tcp_dialect_are_refused() {
         for bad in [
             json!({ "host": "a.test" }),
             json!({ "all": [{ "path_prefix": "/" }] }),
+            json!({ "not": { "header": { "name": "x" } } }),
         ] {
             let message = refusal(&[router(&json!({ "match": bad }))], &[service(&json!({}))]);
             assert!(message.starts_with("invalid_matcher"), "{message}");
         }
+    }
+
+    #[test]
+    fn a_hello_leaf_needs_tls() {
+        for leaf in [
+            json!({ "sni": "a.test" }),
+            json!({ "sni_regexp": "a" }),
+            json!({ "alpn": "h2" }),
+            json!({ "all": [{ "client_ip": "10.0.0.0/8" }, { "not": { "alpn": "h2" } }] }),
+        ] {
+            let message = refusal(&[router(&json!({ "match": leaf }))], &[service(&json!({}))]);
+            assert!(message.starts_with("invalid_router"), "{leaf}: {message}");
+        }
+        for tls in [json!({}), json!({ "passthrough": true })] {
+            let tcp = compiled(&json!({
+                "routers": [router(&json!({ "match": { "sni": "a.test" }, "tls": tls }))],
+                "services": [service(&json!({}))],
+            }))
+            .expect("compiles");
+            assert!(tcp.routers()[0].tls().is_some());
+        }
         let message = refusal(
-            &[router(&json!({ "match": { "sni": "a.test" } }))],
+            &[router(&json!({ "tls": { "passthru": true } }))],
             &[service(&json!({}))],
         );
-        assert!(message.starts_with("invalid_matcher"), "{message}");
+        assert!(message.starts_with("invalid_router"), "{message}");
+    }
+
+    #[test]
+    fn routers_rank_by_the_most_specific_name_leaf() {
+        let tcp = compiled(&json!({
+            "routers": [
+                router(&json!({ "name": "plain" })),
+                router(&json!({ "name": "tls", "tls": {} })),
+                router(&json!({ "name": "regexp", "tls": {}, "match": { "sni_regexp": "a" } })),
+                router(&json!({ "name": "wild", "tls": {}, "match": { "sni": "*.a.test" } })),
+                router(&json!({ "name": "exact", "tls": {}, "match": { "sni": "x.a.test" } })),
+                router(&json!({ "name": "alpn", "tls": {},
+                    "match": { "all": [{ "sni": "x.a.test" }, { "alpn": "h2" }] } })),
+            ],
+            "services": [service(&json!({}))],
+        }))
+        .expect("compiles");
+        let mut ranked: Vec<_> = tcp.routers().iter().collect();
+        ranked.sort_by_key(|router| std::cmp::Reverse(router.rank()));
+        let names: Vec<&str> = ranked.iter().map(|router| router.name()).collect();
+        assert_eq!(names, ["alpn", "exact", "wild", "regexp", "tls", "plain"]);
+        let claimed: Vec<bool> = ranked.iter().map(|router| router.is_claimed()).collect();
+        assert_eq!(claimed, [true, true, true, false, false, false]);
     }
 
     #[test]
     fn planned_fields_are_refused_by_name() {
         let message = refusal(
-            &[router(&json!({ "tls": { "passthrough": true } }))],
+            &[router(&json!({ "chain": ["limit"] }))],
             &[service(&json!({}))],
         );
         assert!(message.starts_with("l4_not_built"), "{message}");

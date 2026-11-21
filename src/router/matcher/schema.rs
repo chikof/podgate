@@ -167,6 +167,30 @@ pub fn schemas() -> Vec<(&'static str, Value)> {
             ),
         ),
         (
+            "sni",
+            keyed(
+                "sni",
+                "TCP routers only: the server name in the ClientHello is an exact name or a `*.` wildcard, or a list of them. Claims the names like `host`.",
+                &one_or_many("A host name or `*.` wildcard, or a list of them."),
+            ),
+        ),
+        (
+            "sni_regexp",
+            keyed(
+                "sni_regexp",
+                "TCP routers only: the server name in the ClientHello matches a regular expression. It only narrows a literal `sni` claim, like `host_regexp`.",
+                &string("A Rust `regex` pattern."),
+            ),
+        ),
+        (
+            "alpn",
+            keyed(
+                "alpn",
+                "TCP routers only: the ClientHello offers one of these application protocols.",
+                &one_or_many("An ALPN protocol name, or a list of them."),
+            ),
+        ),
+        (
             "all",
             keyed(
                 "all",

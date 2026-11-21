@@ -8,6 +8,11 @@
 //! built yet (none today) are refused with `matcher_not_built`; a key that is not planned is
 //! `invalid_matcher`.
 //!
+//! There are two dialects. An HTTP router matches a request (`host`, `path*`, `method`,
+//! `header*`, `query*`, `client_ip`); a TCP router matches a connection (`sni`, `sni_regexp`,
+//! `alpn`, `client_ip`). A leaf of the other dialect is `invalid_matcher`, so a router never
+//! carries a leaf that has nothing to read. The combinators and `client_ip` belong to both.
+//!
 //! Adding a leaf: a file in this directory with the four functions, one variant in [`Matcher`],
 //! and one arm in each of its `match` statements (the compiler lists them); remove the key from
 //! `UNBUILT` and add its schema to `schema.rs` (`GET /v1/schema`).
@@ -20,6 +25,7 @@ use serde_json::Value;
 
 use crate::host::HostPattern;
 
+mod alpn;
 mod client_ip;
 mod combinator;
 mod header;
@@ -33,7 +39,10 @@ mod path_regexp;
 mod query;
 mod query_regexp;
 mod schema;
+mod sni;
+mod sni_regexp;
 
+use alpn::Alpn;
 use client_ip::ClientIp;
 use header::Header;
 use header_regexp::HeaderRegexp;
@@ -45,6 +54,8 @@ use path_prefix::PathPrefix;
 use path_regexp::PathRegexp;
 use query::Query;
 use query_regexp::QueryRegexp;
+use sni::Sni;
+use sni_regexp::SniRegexp;
 
 pub use schema::schemas;
 
@@ -57,7 +68,7 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 /// Every key `parse_at` builds. `parse_at` refuses a key that is not listed here before it
 /// looks at its arms, so an arm for a new leaf is dead until its key is listed; the schema
 /// guard (`every_built_kind_has_a_schema`) compares this list with `schemas()`.
-pub const BUILT: [&str; 14] = [
+pub const BUILT: [&str; 17] = [
     "host",
     "host_regexp",
     "path",
@@ -69,10 +80,30 @@ pub const BUILT: [&str; 14] = [
     "header_regexp",
     "query",
     "query_regexp",
+    "sni",
+    "sni_regexp",
+    "alpn",
     "all",
     "any",
     "not",
 ];
+
+/// The leaves only an HTTP router has.
+const HTTP_ONLY: [&str; 10] = [
+    "host",
+    "host_regexp",
+    "path",
+    "path_prefix",
+    "path_regexp",
+    "method",
+    "header",
+    "header_regexp",
+    "query",
+    "query_regexp",
+];
+
+/// The leaves only a TCP router has.
+const TCP_ONLY: [&str; 3] = ["sni", "sni_regexp", "alpn"];
 
 /// Leaves that are planned and not built: refused with `matcher_not_built`.
 pub const UNBUILT: [&str; 0] = [];
@@ -117,6 +148,35 @@ pub struct View<'a> {
     /// The resolved client address (see [`crate::client_ip`]); `None` when it is not known, which
     /// no `client_ip` leaf matches.
     pub client_ip: Option<IpAddr>,
+    /// What the connection's TLS ClientHello offered; [`Hello::NONE`] for an HTTP request, and
+    /// for a TCP connection that is not TLS.
+    pub hello: Hello<'a>,
+}
+
+/// What a TLS ClientHello offered, as the TCP leaves read it.
+#[derive(Debug, Clone, Copy)]
+pub struct Hello<'a> {
+    /// The normalized server name; `None` when the client sent none.
+    pub server_name: Option<&'a str>,
+    /// The ALPN protocols offered, in the client's order; empty when it sent none.
+    pub alpn: &'a [Vec<u8>],
+}
+
+impl Hello<'_> {
+    /// No ClientHello: no server name and no protocols.
+    pub const NONE: Hello<'static> = Hello {
+        server_name: None,
+        alpn: &[],
+    };
+}
+
+/// Which leaves a matcher tree may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// The `match` of an HTTP router.
+    Http,
+    /// The `match` of a TCP router.
+    Tcp,
 }
 
 /// A host a router is for.
@@ -198,6 +258,12 @@ pub enum Matcher {
     Query(Query),
     /// `query_regexp`
     QueryRegexp(QueryRegexp),
+    /// `sni`
+    Sni(Sni),
+    /// `sni_regexp`
+    SniRegexp(SniRegexp),
+    /// `alpn`
+    Alpn(Alpn),
     /// `all`: every child matches.
     All(Vec<Matcher>),
     /// `any`: some child matches.
@@ -206,18 +272,27 @@ pub enum Matcher {
     Not(Box<Matcher>),
 }
 
-/// Parses a matcher tree.
+/// Parses the matcher tree of an HTTP router.
 ///
 /// # Errors
 ///
 /// [`Error`] for a value that is not an object with exactly one key, an unknown or unbuilt key,
-/// a leaf with a bad argument (including a bad host or regular expression), or nesting deeper
-/// than [`MAX_DEPTH`].
+/// a TCP leaf, a leaf with a bad argument (including a bad host or regular expression), or
+/// nesting deeper than [`MAX_DEPTH`].
 pub fn parse(value: &Value) -> Result<Matcher, Error> {
-    parse_at(value, 0)
+    parse_in(Dialect::Http, value)
 }
 
-pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
+/// Parses the matcher tree of a router of `dialect`; see [`parse`] for the errors.
+///
+/// # Errors
+///
+/// [`Error`], and `invalid_matcher` for a leaf of the other dialect.
+pub fn parse_in(dialect: Dialect, value: &Value) -> Result<Matcher, Error> {
+    parse_at(dialect, value, 0)
+}
+
+pub(super) fn parse_at(dialect: Dialect, value: &Value, depth: usize) -> Result<Matcher, Error> {
     if depth > MAX_DEPTH {
         return Err(Error::invalid(format!(
             "matchers nest at most {MAX_DEPTH} deep"
@@ -232,6 +307,23 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
             "a matcher is an object with exactly one key",
         ));
     };
+    let (wrong, other_dialect) = match dialect {
+        Dialect::Http => (&TCP_ONLY[..], "TCP"),
+        Dialect::Tcp => (&HTTP_ONLY[..], "HTTP"),
+    };
+    if wrong.contains(&key.as_str()) {
+        return Err(Error::invalid(format!(
+            "{key} is a {other_dialect} leaf: {}",
+            match dialect {
+                Dialect::Http => {
+                    "a router on an HTTP entry point matches host, path, method, header, query and client_ip"
+                }
+                Dialect::Tcp => {
+                    "a TCP router matches sni, sni_regexp, alpn and client_ip, because a connection has no request yet"
+                }
+            }
+        )));
+    }
     Ok(match key.as_str() {
         other if !BUILT.contains(&other) && UNBUILT.contains(&other) => {
             return Err(Error {
@@ -253,9 +345,12 @@ pub(super) fn parse_at(value: &Value, depth: usize) -> Result<Matcher, Error> {
         "header_regexp" => Matcher::HeaderRegexp(HeaderRegexp::parse(argument)?),
         "query" => Matcher::Query(Query::parse(argument)?),
         "query_regexp" => Matcher::QueryRegexp(QueryRegexp::parse(argument)?),
-        "all" => Matcher::All(combinator::parse_list(key, argument, depth)?),
-        "any" => Matcher::Any(combinator::parse_list(key, argument, depth)?),
-        "not" => Matcher::Not(Box::new(parse_at(argument, depth + 1)?)),
+        "sni" => Matcher::Sni(Sni::parse(argument)?),
+        "sni_regexp" => Matcher::SniRegexp(SniRegexp::parse(argument)?),
+        "alpn" => Matcher::Alpn(Alpn::parse(argument)?),
+        "all" => Matcher::All(combinator::parse_list(dialect, key, argument, depth)?),
+        "any" => Matcher::Any(combinator::parse_list(dialect, key, argument, depth)?),
+        "not" => Matcher::Not(Box::new(parse_at(dialect, argument, depth + 1)?)),
         other => return Err(Error::invalid(format!("unknown matcher {other}"))),
     })
 }
@@ -284,6 +379,9 @@ impl Matcher {
             Self::HeaderRegexp(leaf) => leaf.matches(view),
             Self::Query(leaf) => leaf.matches(view),
             Self::QueryRegexp(leaf) => leaf.matches(view),
+            Self::Sni(leaf) => leaf.matches(view),
+            Self::SniRegexp(leaf) => leaf.matches(view),
+            Self::Alpn(leaf) => leaf.matches(view),
             Self::All(children) => children.iter().all(|child| child.matches(view)),
             Self::Any(children) => children.iter().any(|child| child.matches(view)),
             Self::Not(child) => !child.matches(view),
@@ -317,6 +415,9 @@ impl Matcher {
             Self::HeaderRegexp(leaf) => said("header_regexp", leaf.describe()),
             Self::Query(leaf) => said("query", leaf.describe()),
             Self::QueryRegexp(leaf) => said("query_regexp", leaf.describe()),
+            Self::Sni(_) => Failure::key("sni"),
+            Self::SniRegexp(_) => Failure::key("sni_regexp"),
+            Self::Alpn(_) => Failure::key("alpn"),
             Self::Not(_) => Failure::key("not"),
             Self::All(children) | Self::Any(children) => {
                 for child in children {
@@ -336,7 +437,8 @@ impl Matcher {
     pub fn claims(&self) -> Option<Vec<Claim>> {
         match self {
             Self::Host(leaf) => Some(leaf.claims()),
-            Self::HostRegexp(_) => Some(vec![Claim::Regexp]),
+            Self::HostRegexp(_) | Self::SniRegexp(_) => Some(vec![Claim::Regexp]),
+            Self::Sni(leaf) => Some(leaf.claims()),
             Self::Path(_)
             | Self::PathPrefix(_)
             | Self::PathRegexp(_)
@@ -346,6 +448,7 @@ impl Matcher {
             | Self::HeaderRegexp(_)
             | Self::Query(_)
             | Self::QueryRegexp(_)
+            | Self::Alpn(_)
             | Self::Not(_) => None,
             Self::All(children) => {
                 let limited: Vec<Vec<Claim>> = children.iter().filter_map(Self::claims).collect();
@@ -393,6 +496,9 @@ impl Matcher {
             Self::HeaderRegexp(leaf) => leaf.spec(),
             Self::Query(leaf) => leaf.spec(),
             Self::QueryRegexp(leaf) => leaf.spec(),
+            Self::Sni(leaf) => leaf.spec(),
+            Self::SniRegexp(leaf) => leaf.spec(),
+            Self::Alpn(leaf) => leaf.spec(),
             Self::All(children) => {
                 children
                     .iter()
@@ -410,6 +516,45 @@ impl Matcher {
                     others: least.others.min(next.others),
                 })
                 .unwrap_or_default(),
+        }
+    }
+
+    /// Whether the tree has a leaf that reads the TLS ClientHello (`sni`, `sni_regexp`,
+    /// `alpn`): such a router can only take a TLS connection.
+    #[must_use]
+    pub fn reads_hello(&self) -> bool {
+        match self {
+            Self::Sni(_) | Self::SniRegexp(_) | Self::Alpn(_) => true,
+            Self::All(children) | Self::Any(children) => children.iter().any(Self::reads_hello),
+            Self::Not(child) => child.reads_hello(),
+            _ => false,
+        }
+    }
+
+    /// The protocols of the `alpn` leaves that are not under a `not`, in the order written and
+    /// without repeats: what a handshake for this matcher can negotiate.
+    #[must_use]
+    pub fn alpn_protocols(&self) -> Vec<&[u8]> {
+        let mut found: Vec<&[u8]> = Vec::new();
+        self.collect_alpn(&mut found);
+        found
+    }
+
+    fn collect_alpn<'a>(&'a self, found: &mut Vec<&'a [u8]>) {
+        match self {
+            Self::Alpn(leaf) => {
+                for protocol in leaf.protocols() {
+                    if !found.contains(&protocol) {
+                        found.push(protocol);
+                    }
+                }
+            }
+            Self::All(children) | Self::Any(children) => {
+                for child in children {
+                    child.collect_alpn(found);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -436,6 +581,7 @@ pub fn disjoint(a: &Matcher, b: &Matcher) -> bool {
         (Matcher::ClientIp(a), Matcher::ClientIp(b)) => client_ip::disjoint(a, b),
         (Matcher::Header(a), Matcher::Header(b)) => header::disjoint(a, b),
         (Matcher::Query(a), Matcher::Query(b)) => query::disjoint(a, b),
+        (Matcher::Sni(a), Matcher::Sni(b)) => sni::disjoint(a, b),
         _ => false,
     }
 }
@@ -484,7 +630,12 @@ mod test {
     #[test]
     fn built_lists_exactly_the_keys_the_parser_builds() {
         for key in BUILT {
-            let err = parse(&json!({ key: null })).expect_err(key);
+            let dialect = if TCP_ONLY.contains(&key) {
+                Dialect::Tcp
+            } else {
+                Dialect::Http
+            };
+            let err = parse_in(dialect, &json!({ key: null })).expect_err(key);
             assert_ne!(err.code, "matcher_not_built", "{key}");
             assert!(
                 !err.message.starts_with("unknown matcher"),
@@ -494,6 +645,68 @@ mod test {
         let err = parse(&json!({ "zzz_unlisted": "x" })).expect_err("unlisted");
         assert_eq!(err.message, "unknown matcher zzz_unlisted");
         assert!(UNBUILT.iter().all(|key| !BUILT.contains(key)));
+        let shared = ["client_ip"];
+        let dialects = HTTP_ONLY.iter().chain(&TCP_ONLY).chain(&shared);
+        assert!(
+            BUILT
+                .iter()
+                .filter(|key| !["all", "any", "not"].contains(key))
+                .all(|key| dialects.clone().any(|known| known == key)),
+            "every leaf belongs to a dialect"
+        );
+    }
+
+    #[test]
+    fn matcher_dialect_enforced() {
+        let http_leaves = [
+            json!({"host": "a.test"}),
+            json!({"host_regexp": "a"}),
+            json!({"path": "/a"}),
+            json!({"path_prefix": "/a"}),
+            json!({"path_regexp": "a"}),
+            json!({"method": "GET"}),
+            json!({"header": {"name": "x"}}),
+            json!({"header_regexp": {"name": "x", "regex": "y"}}),
+            json!({"query": {"name": "x"}}),
+            json!({"query_regexp": {"name": "x", "regex": "y"}}),
+        ];
+        let tcp_leaves = [
+            json!({"sni": "a.test"}),
+            json!({"sni_regexp": "a"}),
+            json!({"alpn": "h2"}),
+        ];
+        let both = [
+            json!({"client_ip": "10.0.0.0/8"}),
+            json!({"all": [{"client_ip": "10.0.0.0/8"}]}),
+        ];
+        for leaf in &http_leaves {
+            assert!(parse_in(Dialect::Http, leaf).is_ok(), "{leaf}");
+            let err = parse_in(Dialect::Tcp, leaf).expect_err("an HTTP leaf on a TCP router");
+            assert_eq!(err.code, "invalid_matcher", "{leaf}: {err}");
+            // Nested under every combinator it is still refused.
+            for wrap in ["all", "any"] {
+                let nested = json!({ wrap: [{"client_ip": "10.0.0.0/8"}, leaf] });
+                assert!(parse_in(Dialect::Tcp, &nested).is_err(), "{nested}");
+            }
+            let nested = json!({"not": leaf});
+            assert!(parse_in(Dialect::Tcp, &nested).is_err(), "{nested}");
+        }
+        for leaf in &tcp_leaves {
+            assert!(parse_in(Dialect::Tcp, leaf).is_ok(), "{leaf}");
+            let err = parse_in(Dialect::Http, leaf).expect_err("a TCP leaf on an HTTP router");
+            assert_eq!(err.code, "invalid_matcher", "{leaf}: {err}");
+            assert!(parse(leaf).is_err(), "`parse` is the HTTP dialect");
+            for wrap in ["all", "any"] {
+                let nested = json!({ wrap: [{"client_ip": "10.0.0.0/8"}, leaf] });
+                assert!(parse_in(Dialect::Http, &nested).is_err(), "{nested}");
+            }
+            let nested = json!({"not": leaf});
+            assert!(parse_in(Dialect::Http, &nested).is_err(), "{nested}");
+        }
+        for leaf in &both {
+            assert!(parse_in(Dialect::Http, leaf).is_ok(), "{leaf}");
+            assert!(parse_in(Dialect::Tcp, leaf).is_ok(), "{leaf}");
+        }
     }
 
     #[test]
@@ -674,6 +887,7 @@ mod test {
             tls: false,
             request: &request,
             client_ip: None,
+            hello: Hello::NONE,
         };
         let failed = |value: Value| -> Vec<String> {
             parsed(&value)

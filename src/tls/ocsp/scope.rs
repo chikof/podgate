@@ -9,7 +9,7 @@
 //! certificate that is neither default nor claimed by any app has no owner to hold to, so it is
 //! not fetched (`unowned`).
 
-use crate::host::HostPattern;
+use crate::host::{HostPattern, overlaps};
 use crate::table::RoutingTable;
 
 /// The tenant id the operator scope is checked as. The policy has no entry for it, so it gets
@@ -64,18 +64,6 @@ impl Scope {
             Self::Tenants(list) => Some(list.iter().map(AsRef::as_ref).collect()),
             Self::Unowned => None,
         }
-    }
-}
-
-/// Whether some name matches both patterns.
-fn overlaps(a: &HostPattern, b: &HostPattern) -> bool {
-    match (a, b) {
-        (HostPattern::Exact(x), HostPattern::Exact(y)) => x == y,
-        (HostPattern::Wildcard(x), HostPattern::Wildcard(y)) => x == y,
-        (HostPattern::Exact(name), HostPattern::Wildcard(suffix))
-        | (HostPattern::Wildcard(suffix), HostPattern::Exact(name)) => name
-            .split_once('.')
-            .is_some_and(|(_label, rest)| rest == &**suffix),
     }
 }
 

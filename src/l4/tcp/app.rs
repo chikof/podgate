@@ -7,16 +7,25 @@
 //!
 //! One connection:
 //!
-//! 1. The client address (the PROXY protocol source when the entry point has the header gate)
-//!    picks the router among the routers of the live table that listen here.
-//! 2. It takes a `max_inflight` slot of the router's tenant and charges its two copy buffers to
-//!    `max_buffer_bytes`; either refusal closes it at once.
-//! 3. It tries up to [`CONNECT_ATTEMPTS`] servers: the balancer picks one (skipping the ones
+//! 1. When a router of the entry point has `tls`, the start of the connection is
+//!    read first: [`super::super::tls::peek`] reads the ClientHello (5 seconds, 16 KiB) and the
+//!    router's `sni`, `sni_regexp` and `alpn` leaves match what it offered. The PROXY protocol
+//!    header, when the entry point has the gate, was read before this, by `Fronted`.
+//! 2. The client address (the PROXY protocol source when the entry point has the header gate)
+//!    and that offer pick the router among the routers of the live table that listen here. A
+//!    router with `tls` that is not limited to literal server names never takes a name another
+//!    tenant claims.
+//! 3. It takes a `max_inflight` slot of the router's tenant and charges its two copy buffers to
+//!    `max_buffer_bytes`; either refusal closes it at once. The bytes read in step 1 go back to
+//!    the stream, and a terminating router (`tls` without `passthrough`) runs the TLS handshake
+//!    with the app's certificates and `client_auth` before any server is dialled.
+//! 4. It tries up to [`CONNECT_ATTEMPTS`] servers: the balancer picks one (skipping the ones
 //!    already tried), the upstream address policy checks its exact address, and that address is
 //!    dialled. A failed dial moves on to the next server. No byte of the client has been read
 //!    into a server by then, which is why a retry is safe; after a connect succeeds there is no
 //!    retry, whatever happens next.
-//! 4. [`super::copy::relay`] copies both ways until the connection ends.
+//! 5. [`super::copy::relay`] copies both ways until the connection ends: the client's stream
+//!    (the decrypted one for a terminating router) and the server's.
 //!
 //! The table the connection routed by is let go before the copy starts: a connection that
 //! outlives a snapshot holds its server's lease, its slot and its buffers, and nothing of the
@@ -24,7 +33,8 @@
 //! do and lets this one finish.
 //!
 //! A PROXY protocol header towards the server goes on the stream `dial` returns,
-//! before `relay` copies the first byte.
+//! before `relay` copies the first byte, and so before the client's ClientHello reaches a
+//! passthrough server.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
@@ -35,16 +45,20 @@ use async_trait::async_trait;
 use pingora::apps::ServerApp;
 use pingora::connectors::TransportConnector;
 use pingora::http::RequestHeader;
+use pingora::protocols::GetSocketDigest;
 use pingora::protocols::Stream;
+use pingora::protocols::l4::stream::Stream as L4Stream;
 use pingora::server::ShutdownWatch;
 use pingora::upstreams::peer::BasicPeer;
 use tokio::time::timeout;
 
 use super::copy::relay;
 use super::stats::{Refused, STATS};
-use super::{CONNECT_ATTEMPTS, CONNECTION_BYTES, Router, Service};
+use super::{CONNECT_ATTEMPTS, CONNECTION_BYTES, Router, Service, Tls};
 use crate::budget::Budgets;
 use crate::client_ip::normalize;
+use crate::l4::tls::{self, Cause, Failed, Offer, Owners, Terminator};
+use crate::router::matcher::Spec;
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::{CompiledApp, RoutingTable, TableHandle};
 
@@ -62,6 +76,10 @@ struct Plan {
     /// its allocation lives as long as the plan, so its address cannot name another table.
     table: Weak<RoutingTable>,
     routes: Box<[Route]>,
+    /// Whether some router has `tls`: the connection's start is read before it is routed.
+    needs_hello: bool,
+    /// Who claims each server name of the table; only built when `needs_hello`.
+    owners: Arc<Owners>,
 }
 
 impl Plan {
@@ -69,11 +87,13 @@ impl Plan {
         Self {
             table: Weak::new(),
             routes: Box::default(),
+            needs_hello: false,
+            owners: Arc::default(),
         }
     }
 
     fn of(table: &Arc<RoutingTable>, entry_point: &str) -> Self {
-        let mut routes: Vec<(Route, (bool, u32))> = table
+        let mut routes: Vec<(Route, (bool, Spec))> = table
             .apps()
             .iter()
             .enumerate()
@@ -97,9 +117,21 @@ impl Plan {
             })
             .collect();
         routes.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+        let needs_hello = routes.iter().any(|(route, _)| {
+            table
+                .app(route.app)
+                .and_then(|app| app.l4().tcp().routers().get(route.router))
+                .is_some_and(|router| router.tls().is_some())
+        });
         Self {
             table: Arc::downgrade(table),
             routes: routes.into_iter().map(|(route, _)| route).collect(),
+            needs_hello,
+            owners: Arc::new(if needs_hello {
+                Owners::of(table)
+            } else {
+                Owners::default()
+            }),
         }
     }
 }
@@ -119,6 +151,7 @@ pub struct App {
     table: TableHandle,
     budgets: Budgets,
     policy: UpstreamPolicy,
+    terminator: Terminator,
     connector: TransportConnector,
     /// The request head the matcher and balancer interfaces ask for; no TCP code reads it.
     probe: RequestHeader,
@@ -131,9 +164,9 @@ pub struct App {
 
 impl App {
     /// The application of the entry point called `entry_point`: routes by the live `table`,
-    /// charges `budgets`, checks every address against `policy` before dialling it. `timeout`
-    /// bounds a connect and is the grace a live connection gets at shutdown
-    /// (`REQUEST_TIMEOUT_SECS`).
+    /// charges `budgets`, checks every address against `policy` before dialling it, completes
+    /// the handshake of terminating routers with `terminator`. `timeout` bounds a connect and
+    /// is the grace a live connection gets at shutdown (`REQUEST_TIMEOUT_SECS`).
     ///
     /// # Errors
     ///
@@ -143,6 +176,7 @@ impl App {
         table: TableHandle,
         budgets: Budgets,
         policy: UpstreamPolicy,
+        terminator: Terminator,
         timeout: Duration,
     ) -> pingora::Result<Self> {
         Ok(Self {
@@ -150,6 +184,7 @@ impl App {
             table,
             budgets,
             policy,
+            terminator,
             connector: TransportConnector::new(None),
             probe: RequestHeader::build("GET", b"/", None)?,
             dial: timeout,
@@ -169,19 +204,30 @@ impl App {
         fresh
     }
 
-    /// The router that takes a connection from `client`, with its app and service.
+    /// The router that takes a connection from `client` that offered `offer`, with its app and
+    /// service.
     fn route<'a>(
         &self,
         live: &'a RoutingTable,
         plan: &Plan,
         client: IpAddr,
+        offer: &Offer,
     ) -> Option<(&'a CompiledApp, &'a Router, &'a Service)> {
         plan.routes.iter().find_map(|route| {
             let app = live.app(route.app)?;
             let (router, service) = app.l4().tcp().route(route.router)?;
-            router
-                .matches(&self.entry_point, client, &self.probe)
-                .then_some((app, router, service))
+            if !router.matches(&self.entry_point, client, &self.probe, offer) {
+                return None;
+            }
+            // A TLS router that is not limited to literal names takes whatever name arrives,
+            // so it must leave the names another tenant claims to that tenant's routers.
+            let foreign = router.tls().is_some()
+                && !router.is_claimed()
+                && offer
+                    .server_name()
+                    .and_then(|name| plan.owners.tenant_of(name))
+                    .is_some_and(|owner| owner != app.tenant());
+            (!foreign).then_some((app, router, service))
         })
     }
 
@@ -206,7 +252,7 @@ impl App {
         }
     }
 
-    async fn serve(&self, mut client: Stream, shutdown: ShutdownWatch) {
+    async fn serve(&self, mut client: L4Stream, shutdown: ShutdownWatch) {
         STATS.accepted();
         let Some(peer) = client
             .get_socket_digest()
@@ -218,7 +264,22 @@ impl App {
         };
         let live = self.table.load();
         let plan = self.plan(&live);
-        let Some((app, _, service)) = self.route(&live, &plan, peer) else {
+        let (offer, seen) = if plan.needs_hello {
+            match tls::peek(&mut client).await {
+                Ok(read) => read,
+                Err(Cause::Timeout) => {
+                    STATS.refused(Refused::HelloTimeout);
+                    return;
+                }
+                Err(Cause::Invalid) => {
+                    STATS.refused(Refused::HelloInvalid);
+                    return;
+                }
+            }
+        } else {
+            (Offer::none(), Vec::new())
+        };
+        let Some((app, router, service)) = self.route(&live, &plan, peer, &offer) else {
             STATS.refused(Refused::NoRoute);
             return;
         };
@@ -235,6 +296,39 @@ impl App {
         let Some(_bytes) = account.charge(CONNECTION_BYTES) else {
             STATS.refused(Refused::OverBudget);
             return;
+        };
+        // The peek buffer is dropped here, once the stream holds its bytes: the connection
+        // never has it and the copy buffers at once.
+        client.rewind(&seen);
+        drop(seen);
+        let mut client: Stream = match router.tls() {
+            Some(Tls::Terminate) => {
+                let accepted = Box::pin(self.terminator.accept(
+                    client,
+                    &live,
+                    &plan.owners,
+                    app,
+                    &offer,
+                    router.protocols(),
+                ))
+                .await;
+                match accepted {
+                    Ok(stream) => stream,
+                    Err(Failed::Handshake) => {
+                        STATS.refused(Refused::TlsHandshake);
+                        return;
+                    }
+                    Err(Failed::Policy) => {
+                        STATS.refused(Refused::TlsPolicy);
+                        return;
+                    }
+                    Err(Failed::ClientCert) => {
+                        STATS.refused(Refused::ClientCert);
+                        return;
+                    }
+                }
+            }
+            _ => Box::new(client),
         };
         let mut tried = Vec::with_capacity(CONNECT_ATTEMPTS);
         let mut forbidden = 0_usize;
@@ -294,7 +388,10 @@ impl ServerApp for App {
         client: Stream,
         shutdown: &ShutdownWatch,
     ) -> Option<Stream> {
-        self.serve(client, shutdown.clone()).await;
+        // A plaintext listener hands over the accepted socket itself: the TLS bytes are read
+        // here, and a stream that is not the socket has nothing to read them from.
+        let client = client.into_any().downcast::<L4Stream>().ok()?;
+        Box::pin(self.serve(*client, shutdown.clone())).await;
         None
     }
 }
@@ -312,14 +409,20 @@ mod test {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::acme::Acme;
     use crate::entry::{CompileContext, Protocol};
+    use crate::events::EventFeed;
+    use crate::tls::ocsp::Staples;
 
     fn app(policy: UpstreamPolicy) -> App {
+        let table = TableHandle::with_context(CompileContext::new([("pg", Protocol::Tcp)]));
+        let acme = Acme::new(table.clone(), EventFeed::new(), None, None);
         App::new(
             "pg",
-            TableHandle::with_context(CompileContext::new([("pg", Protocol::Tcp)])),
+            table,
             Budgets::new(),
             policy,
+            Terminator::new(acme, Staples::default()).expect("terminator"),
             Duration::from_secs(2),
         )
         .expect("app")

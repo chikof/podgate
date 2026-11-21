@@ -263,11 +263,14 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 continue;
             }
             entry::Protocol::Tcp => {
+                let terminator = l4::tls::Terminator::new(acme.clone(), staples.clone())
+                    .map_err(|err| anyhow::anyhow!("tcp entry point {}: {err}", point.name))?;
                 let app = l4::tcp::Listener::new(
                     &point.name,
                     table.clone(),
                     budgets.clone(),
                     upstream_policy.clone(),
+                    terminator,
                     timeout,
                 )
                 .map_err(|err| anyhow::anyhow!("tcp entry point {}: {err}", point.name))?;

@@ -5,7 +5,10 @@
 //! both apps and both `declared_by` sources, in the order documented on its variant.
 //!
 //! Rules, over every literal host pattern a router claims (an exact name, or a `*.` wildcard
-//! that covers one extra label; see [`crate::router::CompiledRouter::patterns`]):
+//! that covers one extra label; see [`crate::router::CompiledRouter::patterns`]). The `sni`
+//! leaf of a TCP router claims names the same way, so a name has one owner
+//! whichever protocol it arrives by, and the rules below hold between an HTTP router and a TCP
+//! router (only the ownership rules: ambiguity between TCP routers is `crate::l4::tcp`'s):
 //!
 //! - Two tenants claiming the same pattern: [`Conflict::Host`], whatever else their routers
 //!   match. Priority therefore only ever orders the routers of one tenant for a host.
@@ -251,7 +254,9 @@ fn pair(first: &str, second: &str) -> [Box<str>; 2] {
 struct Claim<'a> {
     pattern: &'a HostPattern,
     app: usize,
-    router: usize,
+    /// The HTTP router that claims it; `None` for a claim of a TCP router (`sni`), which only
+    /// takes part in ownership: ambiguity between TCP routers is the L4 module's.
+    router: Option<usize>,
 }
 
 /// The apps and routers of a snapshot, for looking things up by position.
@@ -296,8 +301,13 @@ impl<'a> World<'a> {
 }
 
 /// Finds every conflict among the routers of `apps` (`routers[i]` are the compiled routers of
-/// `apps[i]`). Returns them in claim order; empty means the snapshot is clean.
-pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Conflict> {
+/// `apps[i]`, `sni[i]` the literal server names its TCP routers claim). Returns them in claim
+/// order; empty means the snapshot is clean.
+pub(crate) fn detect(
+    apps: &[App],
+    routers: &[Vec<CompiledRouter>],
+    sni: &[Vec<HostPattern>],
+) -> Vec<Conflict> {
     let world = World { apps, routers };
     let mut found = Vec::new();
 
@@ -307,9 +317,16 @@ pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Confl
             claims.extend(compiled.patterns().map(|pattern| Claim {
                 pattern,
                 app,
-                router,
+                router: Some(router),
             }));
         }
+    }
+    for (app, patterns) in sni.iter().enumerate() {
+        claims.extend(patterns.iter().map(|pattern| Claim {
+            pattern,
+            app,
+            router: None,
+        }));
     }
 
     // The same pattern claimed more than once.
@@ -359,17 +376,20 @@ pub(crate) fn detect(apps: &[App], routers: &[Vec<CompiledRouter>]) -> Vec<Confl
                 if !world.same_tenant(a.app, b.app) {
                     continue;
                 }
-                let (Some(left), Some(right)) =
-                    (world.router(a.app, a.router), world.router(b.app, b.router))
-                else {
-                    continue;
-                };
-                if left.same_order_as(right) && !left.disjoint(right) {
+                let ambiguous = a.router.zip(b.router).filter(|&(left, right)| {
+                    match (world.router(a.app, left), world.router(b.app, right)) {
+                        (Some(left), Some(right)) => {
+                            left.same_order_as(right) && !left.disjoint(right)
+                        }
+                        _ => false,
+                    }
+                });
+                if let Some((left, right)) = ambiguous {
                     if a.app == b.app {
                         found.push(world.ambiguity(
                             Some(host.clone()),
-                            (a.app, a.router),
-                            (b.app, b.router),
+                            (a.app, left),
+                            (b.app, right),
                         ));
                     } else if settled.insert((a.app.min(b.app), a.app.max(b.app))) {
                         found.push(Conflict::Host {

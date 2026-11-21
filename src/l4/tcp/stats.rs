@@ -27,15 +27,30 @@ pub(super) enum Refused {
     NoHealthyServer,
     /// The upstream address policy refused every server tried.
     UpstreamForbidden,
+    /// No ClientHello came within the deadline.
+    HelloTimeout,
+    /// The first bytes were a malformed or oversized ClientHello, or the client left first.
+    HelloInvalid,
+    /// The TLS handshake of a terminating router failed or timed out.
+    TlsHandshake,
+    /// The ClientHello or the negotiated connection broke the app's TLS options.
+    TlsPolicy,
+    /// The client certificate did not satisfy the app's `client_auth`.
+    ClientCert,
 }
 
-const REFUSED: [(Refused, &str); 6] = [
+const REFUSED: [(Refused, &str); 11] = [
     (Refused::NoRoute, "no_route"),
     (Refused::OverInflight, "over_inflight"),
     (Refused::OverBudget, "over_budget"),
     (Refused::NoServer, "no_server"),
     (Refused::NoHealthyServer, "no_healthy_server"),
     (Refused::UpstreamForbidden, "upstream_forbidden"),
+    (Refused::HelloTimeout, "hello_timeout"),
+    (Refused::HelloInvalid, "hello_invalid"),
+    (Refused::TlsHandshake, "tls_handshake"),
+    (Refused::TlsPolicy, "tls_policy"),
+    (Refused::ClientCert, "client_cert"),
 ];
 
 /// Why a connection that reached a server ended.

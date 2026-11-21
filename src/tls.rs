@@ -8,7 +8,7 @@
 //! options are in [`Options`], and the pre-TLS hook that reads the ClientHello for them and for
 //! on-demand certificates is [`PreHandshake`].
 
-mod hello;
+pub(crate) mod hello;
 pub mod ocsp;
 mod options;
 

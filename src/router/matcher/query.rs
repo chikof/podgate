@@ -74,6 +74,7 @@ mod test {
             tls: false,
             request: &request,
             client_ip: None,
+            hello: crate::router::matcher::Hello::NONE,
         };
         Query::parse(leaf).expect("parses").matches(&view)
     }

@@ -23,7 +23,7 @@ use pingora::protocols::l4::stream::Stream;
 use pingora::{Error, ErrorType};
 use rustls::CipherSuite;
 use rustls::server::Acceptor;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 use super::options::Violation;
@@ -32,9 +32,11 @@ use crate::host;
 use crate::table::TableHandle;
 
 /// Longest a client may take to send its ClientHello before the hook gives up reading it.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// A ClientHello larger than a TLS record cannot be one.
 const MAX_HELLO: usize = 17 * 1024;
+/// The record type of a TLS handshake: the first byte of every ClientHello.
+const HANDSHAKE: u8 = 22;
 /// Longest the hook waits to write the alert that tells a refused client why.
 const ALERT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -133,32 +135,56 @@ impl PreTlsProcess for PreHandshake {
 /// The ClientHello of the connection; the stream is left as it was.
 async fn peek(stream: &mut Stream) -> Option<Hello> {
     let mut seen = Vec::new();
-    let hello = timeout(HELLO_TIMEOUT, read_hello(stream, &mut seen))
+    let hello = timeout(HELLO_TIMEOUT, read_hello(stream, &mut seen, MAX_HELLO))
         .await
         .ok()
-        .flatten();
+        .and_then(Result::ok);
     stream.rewind(&seen);
     hello
 }
 
-/// Reads records into `seen` until rustls has a whole ClientHello. `None` when the connection
-/// ends, errors or sends something that is not a ClientHello.
-async fn read_hello(stream: &mut Stream, seen: &mut Vec<u8>) -> Option<Hello> {
+/// Why no ClientHello was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unread {
+    /// The first byte is not a TLS handshake record: the connection speaks something else.
+    NotTls,
+    /// The connection ended or failed, sent a malformed hello, or sent one over the cap.
+    Broken,
+}
+
+/// Reads records of `stream` into `seen`, at most `cap` bytes, until rustls has a whole
+/// ClientHello. The parser is rustls' `Acceptor`: nothing here understands TLS beyond the
+/// first byte, which tells a TLS connection from another protocol.
+pub(crate) async fn read_hello<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    seen: &mut Vec<u8>,
+    cap: usize,
+) -> Result<Hello, Unread> {
     let mut acceptor = Acceptor::default();
     let mut chunk = [0_u8; 2048];
-    while seen.len() < MAX_HELLO {
+    while seen.len() < cap {
+        let room = chunk.len().min(cap - seen.len());
         let read = stream
-            .read(&mut chunk)
+            .read(&mut chunk[..room])
             .await
             .ok()
-            .filter(|read| *read > 0)?;
+            .filter(|read| *read > 0)
+            .ok_or(Unread::Broken)?;
+        if seen.is_empty() && chunk[0] != HANDSHAKE {
+            seen.extend_from_slice(&chunk[..read]);
+            return Err(Unread::NotTls);
+        }
         seen.extend_from_slice(&chunk[..read]);
         let mut rest = &chunk[..read];
         while !rest.is_empty() {
-            acceptor.read_tls(&mut rest).ok().filter(|used| *used > 0)?;
-            if let Some(accepted) = acceptor.accept().ok()? {
+            acceptor
+                .read_tls(&mut rest)
+                .ok()
+                .filter(|used| *used > 0)
+                .ok_or(Unread::Broken)?;
+            if let Some(accepted) = acceptor.accept().map_err(|_| Unread::Broken)? {
                 let hello = accepted.client_hello();
-                return Some(Hello {
+                return Ok(Hello {
                     offers_tls13: offers_tls13(seen),
                     server_name: hello.server_name().map(str::to_owned),
                     suites: hello.cipher_suites().to_vec(),
@@ -170,13 +196,12 @@ async fn read_hello(stream: &mut Stream, seen: &mut Vec<u8>) -> Option<Hello> {
             }
         }
     }
-    None
+    Err(Unread::Broken)
 }
 
 /// Whether the ClientHello at the start of `bytes` offers TLS 1.3 in `supported_versions`; `None`
 /// when it does not parse as one whole record, in which case nothing is concluded from it.
 fn offers_tls13(bytes: &[u8]) -> Option<bool> {
-    const HANDSHAKE: u8 = 22;
     const CLIENT_HELLO: u8 = 1;
     const SUPPORTED_VERSIONS: u16 = 43;
     const TLS13: u16 = 0x0304;

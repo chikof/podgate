@@ -7,18 +7,20 @@
 //! Each protocol owns its own module and adds one field to [`Compiled`] and one call to
 //! `compile` and `detect`:
 //!
-//! - [`tcp`]: TCP routers and services. Built; TCP middlewares and TLS on TCP
-//!   routers are not, and [`reject`] refuses a snapshot that carries middlewares with
-//!   `l4_not_built`, so nothing is silently left unrouted.
+//! - [`tcp`]: TCP routers and services and TLS on TCP routers (with the
+//!   [`tls`] module). TCP middlewares are not built, and [`reject`] refuses a snapshot that
+//!   carries them with `l4_not_built`, so nothing is silently left unrouted.
 //! - [`udp`]: UDP routers and services. Built.
 //!
 //! What every L4 protocol needs is here: `reserve` checks that the entry point a router
 //! listens on exists, speaks the router's protocol and is reserved to the router's tenant (an L4
-//! listener has no host to tell tenants apart by), and `server_address` parses a server
+//! listener has no host to tell tenants apart by), `access` is the same check for a TLS router,
+//! whose server name does tell tenants apart, and `server_address` parses a server
 //! address and applies the upstream address policy.
 
 pub mod health;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 
 use std::net::SocketAddr;
@@ -104,31 +106,10 @@ pub(crate) fn reserve(
     snapshot: &Snapshot,
     context: &CompileContext,
 ) -> Option<Invalid> {
-    let Some(bound) = context.protocol_of(entry_point) else {
-        return Some(Invalid::new(
-            "unknown_entry_point",
-            format!("entry point {entry_point} is not bound by this node"),
-        ));
-    };
-    if bound != protocol {
-        return Some(Invalid::new(
-            "entry_point_protocol",
-            format!(
-                "entry point {entry_point} is {}, so a {} router cannot listen on it",
-                bound.as_str(),
-                protocol.as_str()
-            ),
-        ));
+    if let Some(invalid) = unbound(entry_point, protocol, context) {
+        return Some(invalid);
     }
-    let reserved = snapshot
-        .entry_points
-        .iter()
-        .find(|policy| &*policy.name == entry_point)
-        .and_then(|policy| policy.tenants.as_deref())
-        .is_some_and(|tenants| {
-            !tenants.is_empty() && tenants.iter().all(|tenant| *tenant == app.tenant)
-        });
-    (!reserved).then(|| {
+    (!reserved_to(app, entry_point, snapshot)).then(|| {
         Invalid::new(
             "entry_point_forbidden",
             format!(
@@ -138,6 +119,77 @@ pub(crate) fn reserve(
             ),
         )
     })
+}
+
+/// The refusal for an entry point that does not exist or does not speak `protocol`.
+fn unbound(entry_point: &str, protocol: Protocol, context: &CompileContext) -> Option<Invalid> {
+    let Some(bound) = context.protocol_of(entry_point) else {
+        return Some(Invalid::new(
+            "unknown_entry_point",
+            format!("entry point {entry_point} is not bound by this node"),
+        ));
+    };
+    (bound != protocol).then(|| {
+        Invalid::new(
+            "entry_point_protocol",
+            format!(
+                "entry point {entry_point} is {}, so a {} router cannot listen on it",
+                bound.as_str(),
+                protocol.as_str()
+            ),
+        )
+    })
+}
+
+/// Whether the policy of `entry_point` lists `app`'s tenant and no other.
+fn reserved_to(app: &App, entry_point: &str, snapshot: &Snapshot) -> bool {
+    snapshot
+        .entry_points
+        .iter()
+        .find(|policy| &*policy.name == entry_point)
+        .and_then(|policy| policy.tenants.as_deref())
+        .is_some_and(|tenants| {
+            !tenants.is_empty() && tenants.iter().all(|tenant| *tenant == app.tenant)
+        })
+}
+
+/// Checks that a TLS router of `app` may listen on `entry_point`: it exists, speaks `protocol`,
+/// and its policy admits the tenant (no `tenants` admits every tenant, like an HTTP entry
+/// point). A router that names the server names it serves tells tenants apart by them, so it
+/// need not have the entry point to itself. Returns whether the tenant does have it alone.
+///
+/// # Errors
+///
+/// `unknown_entry_point`, `entry_point_protocol`, or `entry_point_forbidden` when the policy
+/// does not list the tenant.
+pub(crate) fn access(
+    app: &App,
+    entry_point: &str,
+    protocol: Protocol,
+    snapshot: &Snapshot,
+    context: &CompileContext,
+) -> Result<bool, Invalid> {
+    if let Some(invalid) = unbound(entry_point, protocol, context) {
+        return Err(invalid);
+    }
+    let admits = snapshot
+        .entry_points
+        .iter()
+        .find(|policy| &*policy.name == entry_point)
+        .and_then(|policy| policy.tenants.as_ref())
+        .is_none_or(|tenants| tenants.contains(&app.tenant));
+    if admits {
+        Ok(reserved_to(app, entry_point, snapshot))
+    } else {
+        Err(Invalid::new(
+            "entry_point_forbidden",
+            format!(
+                "{} entry point {entry_point} does not admit tenant {}",
+                protocol.as_str(),
+                app.tenant
+            ),
+        ))
+    }
 }
 
 /// Parses the IP literal `text` (`ip:port`) of a server of `service` and checks it against the

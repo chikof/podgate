@@ -83,6 +83,7 @@ mod test {
             tls: false,
             request: &request,
             client_ip: client.map(|text| text.parse::<IpAddr>().expect("address")),
+            hello: crate::router::matcher::Hello::NONE,
         })
     }
 
