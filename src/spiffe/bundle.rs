@@ -27,7 +27,7 @@ pub enum BundleError {
     /// No certificate at all.
     #[error("the bundle holds no certificate")]
     Empty,
-    /// More than [`MAX_ROOTS`].
+    /// More than 64 certificates.
     #[error("the bundle holds more than {MAX_ROOTS} certificates")]
     TooMany,
     /// rustls refuses a certificate as a trust anchor.
