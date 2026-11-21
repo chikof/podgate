@@ -160,8 +160,8 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | etcd, Redis (key trees) | yes | none | 0109 (shared key-value layer), 0110 |
 | HTTP provider | yes | `--config <url>` | 0111 |
 | Marathon, Rancher, Nomad-less legacy providers | Marathon, Rancher (removed in v3) | none | not planned: end-of-life platforms |
-| One writer per node | not applicable (providers merge in-process) | not applicable | built (refused by name, takeover by the operator), 0069, 0080 |
-| Tenants, budgets, host claims | none | none | built, providers 0069 |
+| One writer per node | not applicable (providers merge in-process) | not applicable | built (refused by name, takeover by the operator; 0069: the provider pushes as `podgate-provider` and stops with an error naming another writer), 0080 |
+| Tenants, budgets, host claims | none | none | built; provider side built (a tenant claims only its configured `hosts`, labels only from `label_sources`, catch-all preflight, quarantine of rejected objects; reference `docs/ref/provider.md`) |
 
 ## Observability and operations
 
