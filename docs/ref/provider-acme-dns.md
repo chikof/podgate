@@ -57,6 +57,8 @@ On `acme_challenge_done` the solver removes exactly the value it published (`rfc
 
 - It keeps no state. After a provider restart a record published earlier stays until its TTL ends or the operator removes it, because podgate's `acme_challenge_done` is matched against the challenges this process saw.
 - It does not apply the upstream address policy to the webhook or the DNS servers: the operator wrote those addresses.
+- An `https://` webhook is not tested end to end; the tests use `http://`.
+- `check_resolvers`, when set, replaces the NS lookup.
 - An unreachable webhook or server is retried, never skipped: no `dns_ready` is ever reported for a record that is not visible.
 
 ## Tests

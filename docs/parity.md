@@ -123,7 +123,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Certificates from the control plane | `tls.certificates` | `tls cert key` | built (`certificates`) |
 | ACME HTTP-01 | `httpChallenge` | default | built (HA, ARI, on-demand) |
 | ACME TLS-ALPN-01 | `tlsChallenge` | default | built (opt-in per app; answered by the pre-TLS hook because Pingora's listener cannot carry `acme-tls/1`, see `docs/ref/acme-alpn01.md`) |
-| ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 adds the provider's ACME broker and the solver hook, 0083 the solvers); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
+| ACME DNS-01 and wildcard certificates | `dnsChallenge` | `acme_dns` plugins | built (0081 in podgate; 0082 the provider's ACME broker and the solver hook; 0083 the solvers: RFC 2136 with TSIG and a webhook in the provider, two generic mechanisms instead of vendor SDKs); no DNS credential in podgate, see `docs/ref/acme-dns01.md` |
 | ACME options (key type, preferred chain, profile, EAB) | `keyType`, `preferredChain`, `profile`, `eab` | `key_type`, `preferred_chains`, `acme_eab` | partly built (EAB, account key in 0014); recommend a small follow-up for key type and preferred chain |
 | On-demand certificates | none | `on_demand_tls` with `ask` | built (the control plane approves through `acme.requested_hosts`) |
 | Internal CA (`tls internal`) | none | yes | 0103 (key material in the provider and offline root, name-constrained intermediate, short-lived leaves) |
