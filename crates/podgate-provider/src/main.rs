@@ -1,4 +1,4 @@
-//! The `podgate-provider` program: `run`, `print` and `check`.
+//! The `podgate-provider` program: `run`, `print`, `check` and `print-crd`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use podgate_provider::docker::DockerSource;
 use podgate_provider::file::FileSource;
 use podgate_provider::kubernetes::KubernetesSource;
+use podgate_provider::kubernetes::crd::{SchemaSource, print, read_schema};
 use podgate_provider::quarantine::Verdict;
 use podgate_provider::{Config, Engine, UpstreamPolicy};
 use tracing::error;
@@ -20,7 +21,11 @@ const USAGE: &str = "usage: podgate-provider <run|print|check> --config <file>
 
   run     merge the sources and keep pushing the snapshot to the admin socket
   print   merge once and print the snapshot JSON; pushes nothing
-  check   merge once and ask podgate whether it would accept the snapshot";
+  check   merge once and ask podgate whether it would accept the snapshot
+
+usage: podgate-provider print-crd (--socket <admin socket> | --schema <file>) [--out <dir>] [--save-schema <file>]
+
+  print-crd   generate the PodgateRoute and PodgateMiddleware CRDs from the daemon's GET /v1/schema";
 
 #[derive(Clone, Copy)]
 enum Command {
@@ -64,6 +69,33 @@ fn register_sources(engine: &mut Engine, config: &Config) -> anyhow::Result<()> 
             ),
         }
     }
+    Ok(())
+}
+
+/// `print-crd`: the CRD manifests from the daemon's schema, to stdout or to `--out`.
+async fn print_crd(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let (mut socket, mut schema, mut out, mut save) = (None, None, None, None);
+    while let Some(arg) = args.next() {
+        let slot = match arg.as_str() {
+            "--socket" => &mut socket,
+            "--schema" => &mut schema,
+            "--out" => &mut out,
+            "--save-schema" => &mut save,
+            other => bail!("unknown argument {other:?}\n{USAGE}"),
+        };
+        *slot = Some(PathBuf::from(
+            args.next()
+                .with_context(|| format!("{arg} needs a value\n{USAGE}"))?,
+        ));
+    }
+    let source = match (&socket, &schema) {
+        (Some(path), None) => SchemaSource::Socket(path),
+        (None, Some(path)) => SchemaSource::File(path),
+        _ => bail!("give exactly one of --socket and --schema\n{USAGE}"),
+    };
+    let document = read_schema(source).await?;
+    let manifests = print(&document, out.as_deref(), save.as_deref())?;
+    print!("{manifests}");
     Ok(())
 }
 
@@ -129,6 +161,15 @@ async fn main() -> ExitCode {
     } else {
         builder.try_init()
     };
+    if std::env::args().nth(1).as_deref() == Some("print-crd") {
+        return match print_crd(std::env::args().skip(2)).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                error!("{err:#}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let (command, config) = match parse_args(std::env::args()) {
         Ok(parsed) => parsed,
         Err(err) => {

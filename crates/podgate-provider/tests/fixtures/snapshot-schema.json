@@ -1,0 +1,5014 @@
+{
+  "$defs": {
+    "Acme": {
+      "description": "How certificates are issued and which node issues them. the daemon's `acme` module reads\nevery field.",
+      "properties": {
+        "account_key_pem": {
+          "default": null,
+          "description": "PKCS#8 PEM key of the ACME account, so every restart and every issuer node uses the same\naccount. Absent: the issuer creates a fresh account in memory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "challenges": {
+          "default": [],
+          "description": "HTTP-01 and TLS-ALPN-01 answers the control plane pushes back after an `acme_challenge`\nevent. Every node serves the HTTP-01 ones on the plain HTTP listener and answers the\nTLS-ALPN-01 ones on the TLS listener.",
+          "items": {
+            "$ref": "#/$defs/Challenge"
+          },
+          "type": "array"
+        },
+        "contact": {
+          "default": [],
+          "description": "Contact URIs of the account, such as `mailto:ops@example.com`. Used when podgate creates\nthe account itself; ignored with `account_key_pem`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "directory_url": {
+          "description": "The ACME directory URL, `https://...`.",
+          "type": "string"
+        },
+        "dns_ready": {
+          "default": [],
+          "description": "DNS-01 TXT records the control plane has published and sees on the zone's authoritative\nservers, pushed back after `acme_challenge` events of type `dns-01`. The\nissuer tells the CA to validate a challenge only once it is listed here.",
+          "items": {
+            "$ref": "#/$defs/DnsReady"
+          },
+          "type": "array"
+        },
+        "eab": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExternalAccount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "External account binding for CAs that require one. Excludes `account_key_pem`."
+        },
+        "issuer_node": {
+          "description": "`NODE_NAME` of the one node that orders certificates. Every other node ignores the\nordering fields and only serves `challenges`.",
+          "type": "string"
+        },
+        "requested_hosts": {
+          "default": [],
+          "description": "Hosts the control plane asks the issuer to get certificates for: the hosts of\n`certificate_requested` events it approved. Only hosts of `on_demand` apps count.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "issuer_node",
+        "directory_url"
+      ],
+      "type": "object"
+    },
+    "App": {
+      "description": "One app: the unit of tenancy and deployment. It owns its routers, middlewares, services and\ntransports; every name resolves inside the app only.",
+      "properties": {
+        "allow_domain_fronting": {
+          "default": false,
+          "description": "Serve TLS requests whose `Host` differs from the SNI. Absent: refuse them\nwith `421`.",
+          "type": "boolean"
+        },
+        "canary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Canary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ramp one serving revision up while it stays healthy, and pull it back when it does not\n. Absent: revisions share traffic by their weights."
+        },
+        "declared_by": {
+          "description": "Free text naming the source of this declaration; used in errors and explain output.",
+          "type": "string"
+        },
+        "default_chain": {
+          "default": [],
+          "description": "Names of middlewares that run before every router's own chain.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forwarded": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Forwarded"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which forwarding headers the app's upstreams receive. Absent: the default set,\n[`Forwarded::default`]."
+        },
+        "id": {
+          "description": "Unique id.",
+          "type": "string"
+        },
+        "middlewares": {
+          "default": [],
+          "description": "Middlewares routers may name in their `chain`.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        },
+        "record_bodies": {
+          "default": false,
+          "description": "Keep request and response bodies (up to 64 KiB) of failed requests for replay.\nAbsent: record headers only.",
+          "type": "boolean"
+        },
+        "revisions": {
+          "description": "Deployed revisions, split by weight and state.",
+          "items": {
+            "$ref": "#/$defs/Revision"
+          },
+          "type": "array"
+        },
+        "routers": {
+          "description": "Routers: what the app answers for and where each request goes.",
+          "items": {
+            "$ref": "#/$defs/Router"
+          },
+          "type": "array"
+        },
+        "scale_to_zero": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScaleToZero"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Let the app sleep with no upstreams and wake on its first request. Absent:\na request to an app with no upstream gets `503`."
+        },
+        "services": {
+          "default": [],
+          "description": "Services shared by every revision. A revision's own services are in [`Revision::services`].",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        },
+        "tcp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tcp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "TCP routers and services. Not built yet."
+        },
+        "tenant": {
+          "description": "Owning [`Tenant::id`].",
+          "type": "string"
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsPolicy",
+          "description": "TLS policy."
+        },
+        "transports": {
+          "default": [],
+          "description": "Upstream transports services may name. Not built yet.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        },
+        "udp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Udp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "UDP routers and services."
+        }
+      },
+      "required": [
+        "id",
+        "tenant",
+        "declared_by",
+        "tls",
+        "routers",
+        "revisions"
+      ],
+      "type": "object"
+    },
+    "Budget": {
+      "description": "Resource limits of a tenant.",
+      "properties": {
+        "max_buffer_bytes": {
+          "description": "Most bytes of proxy memory the tenant may buffer.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_inflight": {
+          "description": "Most requests the tenant may have in flight.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_inflight",
+        "max_buffer_bytes"
+      ],
+      "type": "object"
+    },
+    "Canary": {
+      "description": "Canary policy of an app: the rollout of one revision, judged by its own `5xx` rate.\n\nThe snapshot owns the policy; podgate owns the live share at runtime (see `crate::canary` in\nthe daemon).",
+      "properties": {
+        "interval_secs": {
+          "description": "Seconds between two judgments, at least `1`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_error_permille": {
+          "description": "At this many `5xx` per thousand requests of the canary, or more, it is pulled back to\n`0`. `1..=1000`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "description": "The canary's [`Revision::id`]; it must be `serving`. Its own `weight` is ignored: the\ncanary's share replaces it.",
+          "type": "string"
+        },
+        "step_percent": {
+          "description": "Percent of new sessions the canary gains per healthy interval, `1..=100`. It is also the\nshare the canary starts with.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "step_percent",
+        "interval_secs",
+        "max_error_permille"
+      ],
+      "type": "object"
+    },
+    "Certificate": {
+      "description": "A certificate chain and its private key, served for the listed hosts.",
+      "properties": {
+        "cert_pem": {
+          "description": "Leaf certificate first, PEM.",
+          "type": "string"
+        },
+        "default": {
+          "description": "Serve this certificate for a name no other certificate covers, and for a handshake with\nno SNI, unless the app that owns the name sets `sni_strict`. At most one.",
+          "type": "boolean"
+        },
+        "hosts": {
+          "description": "Hosts the certificate answers for: exact names or `*.` wildcards.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key_pem": {
+          "description": "PKCS#8, PKCS#1 or SEC1 private key, PEM.",
+          "type": "string"
+        },
+        "ocsp": {
+          "$ref": "#/$defs/OcspMode",
+          "description": "OCSP stapling: `auto` (default), `on` or `off`. The responder always comes from the\ncertificate itself, never from the snapshot."
+        }
+      },
+      "required": [
+        "hosts",
+        "cert_pem",
+        "key_pem"
+      ],
+      "type": "object"
+    },
+    "Challenge": {
+      "description": "One challenge answer pushed back after an `acme_challenge` event. Exactly one of `token`\n(HTTP-01: `GET /.well-known/acme-challenge/<token>` returns `key_authorization`) and `name`\n(TLS-ALPN-01: the host that an `acme-tls/1` handshake proves with a challenge\ncertificate over `key_authorization`) is set.",
+      "properties": {
+        "key_authorization": {
+          "description": "The key authorization to answer with.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The host of a TLS-ALPN-01 challenge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "The HTTP-01 challenge token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key_authorization"
+      ],
+      "type": "object"
+    },
+    "ChallengeKind": {
+      "description": "The ACME challenge the issuer answers for an `acme` app's hosts.",
+      "oneOf": [
+        {
+          "const": "http-01",
+          "description": "Answered over plain HTTP by every node; cannot prove a wildcard.",
+          "type": "string"
+        },
+        {
+          "const": "dns-01",
+          "description": "Answered with a TXT record the control plane publishes; proves wildcards and hosts\nthat cannot serve plain HTTP.",
+          "type": "string"
+        },
+        {
+          "const": "tls-alpn-01",
+          "description": "Answered on the TLS listener with a challenge certificate, so only port 443 must be\nreachable; cannot prove a wildcard.",
+          "type": "string"
+        }
+      ]
+    },
+    "ClientAuthMode": {
+      "description": "Whether and how clients are asked for a certificate (Traefik's `clientAuthType`).",
+      "oneOf": [
+        {
+          "const": "request",
+          "description": "Ask for a certificate; serve clients with none and trust none.",
+          "type": "string"
+        },
+        {
+          "const": "require",
+          "description": "Require some certificate; the chain is not judged.",
+          "type": "string"
+        },
+        {
+          "const": "verify_if_given",
+          "description": "A certificate, when sent, must chain to `client_ca_pem`; none is fine.",
+          "type": "string"
+        },
+        {
+          "const": "require_and_verify",
+          "description": "A certificate that chains to `client_ca_pem` is required.",
+          "type": "string"
+        }
+      ]
+    },
+    "Declared": {
+      "additionalProperties": true,
+      "description": "A kind-tagged, named object: a middleware, service or transport.\n\nThe envelope only knows the name and the type; the module of that type owns the rest and\nparses it strictly.",
+      "properties": {
+        "name": {
+          "description": "Unique among the app's objects of this kind of object.",
+          "type": "string"
+        },
+        "type": {
+          "description": "The type, such as `loadbalancer` or `wasm`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DnsReady": {
+      "additionalProperties": false,
+      "description": "One published DNS-01 TXT record. Carries no credential: it names a record that is already\npublic.",
+      "properties": {
+        "name": {
+          "description": "The record's name, `_acme-challenge.<domain>`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The record's value: base64url of the SHA-256 of the key authorization. It tells apart\nthe challenges of an apex and its wildcard, which share one name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "EntryPointPolicy": {
+      "description": "The policy for the entry point called `name`.",
+      "properties": {
+        "allow_encoded_slash": {
+          "default": null,
+          "description": "Accept an encoded `/` (`%2F`) in the path. It is kept as an escape inside its segment,\nnever turned into a separator. A posture change in a plan.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "forwarded_headers": {
+          "default": null,
+          "description": "Peers whose `X-Forwarded-*` headers are trusted."
+        },
+        "http2": {
+          "default": null,
+          "description": "`{max_concurrent_streams}` of HTTP/2 connections."
+        },
+        "max_header_bytes": {
+          "default": null,
+          "description": "Largest request head (request line and headers) in bytes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The entry point this policy is for; the process must have bound it.",
+          "type": "string"
+        },
+        "proxy_protocol": {
+          "default": null,
+          "description": "`{trusted_ips, insecure}`: the peers allowed to send a PROXY protocol header to an entry\npoint started with `;proxy_protocol` (`docs/ref/proxy-protocol.md`). Neither field set\ntrusts nobody. `insecure: true` trusts every peer and is a posture change in a plan."
+        },
+        "redirect": {
+          "default": null,
+          "description": "`{to, permanent}`: answer every request with a redirect to the entry point `to`."
+        },
+        "tenants": {
+          "default": null,
+          "description": "Tenants that may attach routers to the entry point. Absent: every tenant. A router with\nno literal host that lists an entry point whose `tenants` names only its own tenant may\nmatch any host there.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeouts": {
+          "default": null,
+          "description": "`{read_secs, write_secs, idle_secs, header_secs}`: each is applied or refused with\n`unsupported_setting` (`docs/ref/entry-policy.md`)."
+        },
+        "underscore_headers": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnderscoreHeaders"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What to do with request headers whose name holds an underscore. Absent: `keep`."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ExternalAccount": {
+      "description": "External account binding credentials, as a CA hands them out.",
+      "properties": {
+        "hmac_key": {
+          "description": "The HMAC key, base64url.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "The key identifier.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "hmac_key"
+      ],
+      "type": "object"
+    },
+    "Forwarded": {
+      "additionalProperties": false,
+      "description": "The forwarding headers an app's upstreams receive. Every field is optional; an absent one has\nthe default below, so `{}` is the same as no object at all.",
+      "properties": {
+        "real_ip": {
+          "default": true,
+          "description": "Write `X-Real-IP`. Default `true`.",
+          "type": "boolean"
+        },
+        "rfc7239": {
+          "default": false,
+          "description": "Also write the RFC 7239 `Forwarded` header. Default `false`.",
+          "type": "boolean"
+        },
+        "server": {
+          "default": false,
+          "description": "Write `X-Forwarded-Server` with the node's name. Default `false`: the header tells the\napp which host proxies it, which it does not need.",
+          "type": "boolean"
+        },
+        "x_forwarded": {
+          "default": true,
+          "description": "Write `X-Forwarded-For`, `-Proto`, `-Host` and `-Port`. Default `true`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Observability": {
+      "description": "Snapshot-wide observability settings; a router may override them per router.",
+      "properties": {
+        "access_log": {
+          "default": null,
+          "description": "Structured access log: `format`, `fields`, `headers`, `filters`, `sampling_percent`; a\nboolean switches it off or on with the defaults. Absent: nothing is logged."
+        },
+        "metrics": {
+          "default": null,
+          "description": "Per entry point, router and service metrics."
+        },
+        "tracing": {
+          "default": null,
+          "description": "OpenTelemetry tracing: sample rate, propagation, recorded headers."
+        }
+      },
+      "type": "object"
+    },
+    "OcspMode": {
+      "description": "Whether podgate staples an OCSP response to a certificate.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Staple only when the certificate carries the TLS Feature `status_request` (must-staple)\nextension.",
+          "type": "string"
+        },
+        {
+          "const": "on",
+          "description": "Staple whenever the certificate names an OCSP responder in its Authority Information\nAccess.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Never staple.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "description": "One deployed version of an app.",
+      "properties": {
+        "id": {
+          "description": "Unique within its app.",
+          "type": "string"
+        },
+        "services": {
+          "default": [],
+          "description": "The services of this release. A router's service is looked up here first.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/RevisionState",
+          "description": "Whether the revision takes new traffic."
+        },
+        "weight": {
+          "description": "Share of new traffic against the app's other serving revisions.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "RevisionState": {
+      "description": "Lifecycle state of a revision; see `docs/architecture.md` (`### Revision states`).",
+      "oneOf": [
+        {
+          "const": "serving",
+          "description": "Gets new sessions by weight.",
+          "type": "string"
+        },
+        {
+          "const": "retiring",
+          "description": "Gets no new sessions; still serves pinned ones.",
+          "type": "string"
+        },
+        {
+          "const": "draining",
+          "description": "Gets no new requests; in-flight requests finish.",
+          "type": "string"
+        }
+      ]
+    },
+    "Router": {
+      "description": "One router: a matcher, a middleware chain and a service.",
+      "properties": {
+        "chain": {
+          "default": [],
+          "description": "Names of middlewares that run after the app's `default_chain`, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "declared_by": {
+          "default": null,
+          "description": "Source of this router when it differs from the app's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entry_points": {
+          "default": null,
+          "description": "Entry points the router listens on. Absent: every HTTP and HTTPS entry point.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "match": {
+          "$ref": "#/$defs/matcher"
+        },
+        "name": {
+          "description": "Unique among the app's routers.",
+          "type": "string"
+        },
+        "observability": {
+          "default": null,
+          "description": "Per-router observability overrides: `{\"access_log\": false}` silences the router, `true`\nlogs it. Metrics and tracing overrides are not built yet."
+        },
+        "priority": {
+          "default": null,
+          "description": "Higher goes first among the routers of one tenant. Absent: `0`. Never orders routers of\ndifferent tenants.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "The service that answers, by name: one of the revision's services, else one of the app's.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "match",
+        "service"
+      ],
+      "type": "object"
+    },
+    "ScaleToZero": {
+      "description": "Scale-to-zero policy of an app.",
+      "properties": {
+        "idle_secs": {
+          "description": "Seconds without a request after which the app is reported idle (`app_idle`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wake_timeout_secs": {
+          "default": 30,
+          "description": "Seconds a request waits for the app to wake before it gets `503`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "idle_secs"
+      ],
+      "type": "object"
+    },
+    "SkewSecret": {
+      "description": "The HMAC key for session cookies: the snapshot's `skew_secret`. Never printed: `Debug` hides it.\n\nAny string deserializes; the daemon's snapshot compiler refuses one shorter than\n[`Self::MIN_LEN`].",
+      "type": "string"
+    },
+    "Tcp": {
+      "description": "The TCP side of an app.",
+      "properties": {
+        "middlewares": {
+          "default": [],
+          "description": "Middlewares.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        },
+        "routers": {
+          "default": [],
+          "description": "Routers: `name`, `entry_points`, `match`, `tls`, `chain` and `service`, kept raw.",
+          "items": {
+            "$ref": "#/$defs/tcp.router"
+          },
+          "type": "array"
+        },
+        "services": {
+          "default": [],
+          "description": "Services.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Tenant": {
+      "description": "One tenant of the PaaS.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/Budget",
+          "description": "Resource limits."
+        },
+        "id": {
+          "description": "Unique id; apps name it in [`App::tenant`].",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Fair-share weight against other tenants.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "weight",
+        "budget"
+      ],
+      "type": "object"
+    },
+    "TlsMode": {
+      "description": "Certificate source for an app.",
+      "oneOf": [
+        {
+          "const": "acme",
+          "description": "Issued for the app's declared hosts.",
+          "type": "string"
+        },
+        {
+          "const": "on_demand",
+          "description": "Issued at the first handshake for a matching host.",
+          "type": "string"
+        }
+      ]
+    },
+    "TlsPolicy": {
+      "description": "How an app gets certificates, plus optional client authentication.",
+      "properties": {
+        "alpn": {
+          "description": "The ALPN protocols a connection to this app may negotiate: `h2` and `http/1.1`. Absent:\nboth.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "challenge": {
+          "$ref": "#/$defs/ChallengeKind",
+          "default": "http-01",
+          "description": "How the issuer proves the app's hosts to the CA. Absent: `http-01`."
+        },
+        "cipher_suites": {
+          "description": "The cipher suites a connection to this app may negotiate, by rustls name. Absent: every\nsuite of the listener.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "client_auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClientAuthMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How client certificates are asked for and judged. Absent: `require_and_verify`\nwhen `client_ca_pem` is set, no client authentication otherwise."
+        },
+        "client_ca_pem": {
+          "default": null,
+          "description": "PEM of the CA that must sign client certificates. Absent: no client authentication.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "curves": {
+          "description": "Not enforceable per app: the compiler rejects it with `unsupported_setting`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "http3": {
+          "description": "Whether HTTP/3 may serve this app. Absent: yes, unless the app has a\n`client_ca_pem` or `client_auth`, `cipher_suites`, or an `alpn` without `h2`, which HTTP/3\ncannot honour. `true` together with one of those is rejected with `unsupported_setting`.\nOnly matters on an HTTPS entry point with the `;http3` option.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Not enforceable per app: the compiler rejects it with `unsupported_setting`."
+        },
+        "min_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lowest TLS version a connection to this app may have. Absent: the listener's floor."
+        },
+        "mode": {
+          "$ref": "#/$defs/TlsMode",
+          "description": "Where certificates come from."
+        },
+        "pass_client_cert": {
+          "description": "Removed in change 0055; a snapshot that sets it to `true` is rejected with\n`unsupported_setting`, which names the `pass_tls_client_cert` middleware as the\nreplacement. `false` and absent are accepted and mean nothing.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "session_tickets": {
+          "description": "Not enforceable per app: the compiler rejects it with `unsupported_setting`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sni_strict": {
+          "description": "Refuse a handshake for a name of this app that has no certificate, instead of serving the\ndefault certificate.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "TlsVersion": {
+      "description": "A TLS protocol version.",
+      "oneOf": [
+        {
+          "const": "1.2",
+          "description": "TLS 1.2.",
+          "type": "string"
+        },
+        {
+          "const": "1.3",
+          "description": "TLS 1.3.",
+          "type": "string"
+        }
+      ]
+    },
+    "Udp": {
+      "description": "The UDP side of an app.",
+      "properties": {
+        "routers": {
+          "default": [],
+          "description": "Routers: `name`, `entry_points`, `service`, `max_sessions?` and `max_reply_ratio?`, kept raw.",
+          "items": {
+            "$ref": "#/$defs/udp.router"
+          },
+          "type": "array"
+        },
+        "services": {
+          "default": [],
+          "description": "Services.",
+          "items": {
+            "$ref": "#/$defs/Declared"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UnderscoreHeaders": {
+      "description": "What an entry point does with a request header whose name holds an underscore (`X_Forwarded_For`),\nwhich a CGI-style upstream may read as `X-Forwarded-For`.",
+      "oneOf": [
+        {
+          "const": "keep",
+          "description": "Pass the header on. What an entry point with no policy does.",
+          "type": "string"
+        },
+        {
+          "const": "delete",
+          "description": "Remove the header and serve the request.",
+          "type": "string"
+        },
+        {
+          "const": "reject",
+          "description": "Answer `400` and serve nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "matcher": {
+      "description": "A matcher tree: an object with exactly one key, a leaf or a combinator.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/matcher.host"
+        },
+        {
+          "$ref": "#/$defs/matcher.host_regexp"
+        },
+        {
+          "$ref": "#/$defs/matcher.path"
+        },
+        {
+          "$ref": "#/$defs/matcher.path_prefix"
+        },
+        {
+          "$ref": "#/$defs/matcher.path_regexp"
+        },
+        {
+          "$ref": "#/$defs/matcher.method"
+        },
+        {
+          "$ref": "#/$defs/matcher.client_ip"
+        },
+        {
+          "$ref": "#/$defs/matcher.header"
+        },
+        {
+          "$ref": "#/$defs/matcher.header_regexp"
+        },
+        {
+          "$ref": "#/$defs/matcher.query"
+        },
+        {
+          "$ref": "#/$defs/matcher.query_regexp"
+        },
+        {
+          "$ref": "#/$defs/matcher.sni"
+        },
+        {
+          "$ref": "#/$defs/matcher.sni_regexp"
+        },
+        {
+          "$ref": "#/$defs/matcher.alpn"
+        },
+        {
+          "$ref": "#/$defs/matcher.all"
+        },
+        {
+          "$ref": "#/$defs/matcher.any"
+        },
+        {
+          "$ref": "#/$defs/matcher.not"
+        }
+      ]
+    },
+    "matcher.all": {
+      "additionalProperties": false,
+      "description": "Every child matches.",
+      "properties": {
+        "all": {
+          "description": "Matchers, at least one.",
+          "items": {
+            "$ref": "#/$defs/matcher"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "all"
+      ],
+      "type": "object"
+    },
+    "matcher.alpn": {
+      "additionalProperties": false,
+      "description": "TCP routers only: the ClientHello offers one of these application protocols.",
+      "properties": {
+        "alpn": {
+          "description": "An ALPN protocol name, or a list of them.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "alpn"
+      ],
+      "type": "object"
+    },
+    "matcher.any": {
+      "additionalProperties": false,
+      "description": "Some child matches.",
+      "properties": {
+        "any": {
+          "description": "Matchers, at least one.",
+          "items": {
+            "$ref": "#/$defs/matcher"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "any"
+      ],
+      "type": "object"
+    },
+    "matcher.client_ip": {
+      "additionalProperties": false,
+      "description": "The resolved client address is in one of these blocks.",
+      "properties": {
+        "client_ip": {
+          "description": "An address or CIDR block, or a list of them.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "client_ip"
+      ],
+      "type": "object"
+    },
+    "matcher.header": {
+      "additionalProperties": false,
+      "description": "A request header is present, with the value when given.",
+      "properties": {
+        "header": {
+          "additionalProperties": false,
+          "description": "The header `name` and, optionally, its exact `value`.",
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "header"
+      ],
+      "type": "object"
+    },
+    "matcher.header_regexp": {
+      "additionalProperties": false,
+      "description": "A request header's value matches a regular expression.",
+      "properties": {
+        "header_regexp": {
+          "additionalProperties": false,
+          "description": "The header `name` and a Rust `regex` pattern.",
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "regex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "regex"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "header_regexp"
+      ],
+      "type": "object"
+    },
+    "matcher.host": {
+      "additionalProperties": false,
+      "description": "The request's host, without port: an exact name or a `*.` wildcard, or a list of them.",
+      "properties": {
+        "host": {
+          "description": "A host name or `*.` wildcard, or a list of them.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "host"
+      ],
+      "type": "object"
+    },
+    "matcher.host_regexp": {
+      "additionalProperties": false,
+      "description": "The host matches a regular expression. It only narrows a literal `host` claim.",
+      "properties": {
+        "host_regexp": {
+          "description": "A Rust `regex` pattern.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host_regexp"
+      ],
+      "type": "object"
+    },
+    "matcher.method": {
+      "additionalProperties": false,
+      "description": "The request method is one of these.",
+      "properties": {
+        "method": {
+          "description": "An HTTP method, or a list of them.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "matcher.not": {
+      "additionalProperties": false,
+      "description": "The child does not match.",
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/matcher"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "matcher.path": {
+      "additionalProperties": false,
+      "description": "The normalized path is exactly this.",
+      "properties": {
+        "path": {
+          "description": "A path starting with `/`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "matcher.path_prefix": {
+      "additionalProperties": false,
+      "description": "The normalized path is this or under it, at a segment boundary.",
+      "properties": {
+        "path_prefix": {
+          "description": "A path starting with `/`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path_prefix"
+      ],
+      "type": "object"
+    },
+    "matcher.path_regexp": {
+      "additionalProperties": false,
+      "description": "The normalized path matches a regular expression.",
+      "properties": {
+        "path_regexp": {
+          "description": "A Rust `regex` pattern.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path_regexp"
+      ],
+      "type": "object"
+    },
+    "matcher.query": {
+      "additionalProperties": false,
+      "description": "A query parameter is present, with the value when given.",
+      "properties": {
+        "query": {
+          "additionalProperties": false,
+          "description": "The parameter `name` and, optionally, its exact `value`.",
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "matcher.query_regexp": {
+      "additionalProperties": false,
+      "description": "A query parameter's value matches a regular expression.",
+      "properties": {
+        "query_regexp": {
+          "additionalProperties": false,
+          "description": "The parameter `name` and a Rust `regex` pattern.",
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "regex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "regex"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "query_regexp"
+      ],
+      "type": "object"
+    },
+    "matcher.sni": {
+      "additionalProperties": false,
+      "description": "TCP routers only: the server name in the ClientHello is an exact name or a `*.` wildcard, or a list of them. Claims the names like `host`.",
+      "properties": {
+        "sni": {
+          "description": "A host name or `*.` wildcard, or a list of them.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sni"
+      ],
+      "type": "object"
+    },
+    "matcher.sni_regexp": {
+      "additionalProperties": false,
+      "description": "TCP routers only: the server name in the ClientHello matches a regular expression. It only narrows a literal `sni` claim, like `host_regexp`.",
+      "properties": {
+        "sni_regexp": {
+          "description": "A Rust `regex` pattern.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sni_regexp"
+      ],
+      "type": "object"
+    },
+    "middleware.add_prefix": {
+      "additionalProperties": false,
+      "description": "The configuration of an `add_prefix` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "prefix": {
+          "description": "The prefix, starting with `/`.",
+          "type": "string"
+        },
+        "type": {
+          "const": "add_prefix"
+        }
+      },
+      "required": [
+        "prefix",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.basic_auth": {
+      "additionalProperties": false,
+      "description": "The configuration of a `basic_auth` middleware.",
+      "properties": {
+        "header_field": {
+          "default": null,
+          "description": "A request header that receives the user name; a value the client sent for it is replaced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "default": null,
+          "description": "The realm of the challenge; default `podgate`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remove_header": {
+          "default": false,
+          "description": "Remove `Authorization` before the request goes to the upstream; default `false`, as in\nTraefik.",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "basic_auth"
+        },
+        "users": {
+          "description": "htpasswd entries, `user:hash`, with a bcrypt (`$2a$`, `$2b$`, `$2y$`) or argon2\n(`$argon2id$`, `$argon2i$`, `$argon2d$`, PHC form) hash.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "users",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.buffering": {
+      "additionalProperties": false,
+      "description": "The configuration of a `buffering` middleware.",
+      "properties": {
+        "buffer_request": {
+          "default": false,
+          "description": "Holds the whole request body before the upstream request starts. Needs\n`max_request_body_bytes`, at most [`MAX_BUFFERED_REQUEST_BYTES`].",
+          "type": "boolean"
+        },
+        "buffer_response": {
+          "default": false,
+          "description": "Holds the whole response body before the client gets it. Needs `max_response_body_bytes`.",
+          "type": "boolean"
+        },
+        "max_request_body_bytes": {
+          "default": null,
+          "description": "Largest request body, in bytes; a larger one is refused with `413`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_response_body_bytes": {
+          "default": null,
+          "description": "Largest response body, in bytes; a larger one is refused with `502`. Needs\n`buffer_response`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "buffering"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.cache": {
+      "additionalProperties": false,
+      "description": "The declaration of a `cache` middleware. Every field is optional; see `docs/ref/mw-cache.md`.",
+      "properties": {
+        "cache_set_cookie": {
+          "description": "Store a `Set-Cookie` response with the cookie removed from the stored copy; default\n`false`: such responses are never stored.",
+          "type": "boolean"
+        },
+        "collapse_timeout_ms": {
+          "default": null,
+          "description": "How long a request waits for the fetch another request leads, in milliseconds;\ndefault 3000, at most 10000.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "default_ttl_secs": {
+          "default": null,
+          "description": "Freshness for a response that names none; absent: only explicit freshness is stored.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ignore_request_cookies": {
+          "description": "Serve and store for requests that carry `Cookie`; default `false`: they bypass the cache.",
+          "type": "boolean"
+        },
+        "max_bytes": {
+          "default": null,
+          "description": "Most bytes the tenant's cache may hold when this middleware stores; default a quarter of\nthe tenant's `max_buffer_bytes`, at most the operator's `CACHE_TENANT_MAX_PERCENT`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_object_bytes": {
+          "default": null,
+          "description": "Largest response kept, in bytes; default 1 MiB or `max_bytes`, whichever is lower.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_stale_secs": {
+          "additionalProperties": false,
+          "description": "Longest the response's own `stale-while-revalidate` and `stale-if-error` are honoured.",
+          "properties": {
+            "if_error": {
+              "default": null,
+              "description": "Seconds of `stale-if-error`; default 300.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "while_revalidate": {
+              "default": null,
+              "description": "Seconds of `stale-while-revalidate`; default 60.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "max_ttl_secs": {
+          "default": null,
+          "description": "Longest an entry stays fresh, in seconds; default 86400.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "normalize_query": {
+          "description": "Sort the query parameters before they are part of the key; default `false`.",
+          "type": "boolean"
+        },
+        "respect_request_cache_control": {
+          "description": "Obey a client's `no-cache`, `max-age=0` and `no-store`; default `false`.",
+          "type": "boolean"
+        },
+        "share_across_revisions": {
+          "description": "Share entries between the revisions of the app; default `false`.",
+          "type": "boolean"
+        },
+        "statuses": {
+          "default": null,
+          "description": "Statuses that may be stored; default `200 203 204 301 308 404 410`.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tag_header": {
+          "default": null,
+          "description": "The response header that lists purge tags (for example `Cache-Tag`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "cache"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.circuit_breaker": {
+      "additionalProperties": false,
+      "description": "The configuration of a `circuit_breaker` middleware.",
+      "properties": {
+        "check_period_ms": {
+          "default": 100,
+          "description": "How often the closed circuit is judged, in milliseconds. Default `100`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fallback_secs": {
+          "default": 10,
+          "description": "How long the circuit stays open, in seconds. Default `10`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_requests": {
+          "default": 20,
+          "description": "Fewest requests a window needs before it can trip the circuit. Default `20`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "recovery_secs": {
+          "default": 10,
+          "description": "How long traffic takes to return from 0 to 100%, in seconds. Default `10`; `0` closes the\ncircuit as soon as the fallback is over.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "response_code": {
+          "default": 503,
+          "description": "The status of the answer while the circuit is not letting a request through. Default\n`503`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trip_when": {
+          "additionalProperties": false,
+          "description": "What opens the circuit; any one of the triggers does.",
+          "properties": {
+            "latency_quantile_ms": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Trips when a latency quantile of the window is above a limit. Traefik's\n`LatencyAtQuantileMS(q) > ms`.",
+              "properties": {
+                "ms": {
+                  "description": "Trips above this many milliseconds. The quantile is estimated from a histogram whose\nbuckets are 25% wide and read at the middle of the bucket, so it is off by up to 12%.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "quantile": {
+                  "description": "The quantile as a percentage, `0..=100`: `50.0` is the median, `99.0` the 99th percentile.",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "quantile",
+                "ms"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "network_error_ratio": {
+              "default": null,
+              "description": "Trips when more than this share of the window's requests ended in a network error: the\nupstream could not be reached or failed before it answered. Traefik's\n`NetworkErrorRatio() > r`. `0..=1`.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "response_code_ratio": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "Trips when responses in one status range are more than a share of those in another.\nTraefik's `ResponseCodeRatio(from, to, over_from, over_to) > r`.",
+              "properties": {
+                "from": {
+                  "description": "First status of the counted range.",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "over_from": {
+                  "default": 0,
+                  "description": "First status of the range it is measured against. Default `0`.",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "over_to": {
+                  "default": 600,
+                  "description": "One past the last status of the range it is measured against. Default `600`.",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ratio": {
+                  "description": "Trips above this ratio. `0..=1`.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "to": {
+                  "description": "One past the last status of the counted range.",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "from",
+                "to",
+                "ratio"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "type": {
+          "const": "circuit_breaker"
+        }
+      },
+      "required": [
+        "trip_when",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.compress": {
+      "additionalProperties": false,
+      "description": "The configuration of a `compress` middleware.",
+      "properties": {
+        "algorithms": {
+          "default": [
+            "gzip"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exclude_content_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "include_content_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "level": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "compress"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.content_type": {
+      "additionalProperties": false,
+      "description": "The configuration of a `content_type` middleware.",
+      "properties": {
+        "auto_detect": {
+          "default": false,
+          "description": "Only `false` is accepted.",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "content_type"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.digest_auth": {
+      "additionalProperties": false,
+      "description": "The configuration of a `digest_auth` middleware.",
+      "properties": {
+        "header_field": {
+          "default": null,
+          "description": "A request header that receives the user name; a value the client sent for it is replaced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "qop": {
+          "default": null,
+          "description": "Only `auth` is accepted; `auth-int` needs the body and is refused.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "realm": {
+          "default": null,
+          "description": "The realm of the challenge; default `podgate`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remove_header": {
+          "default": true,
+          "description": "Remove `Authorization` before the request goes to the upstream; default `true`. The\nupstream has no use for a digest response, and one it could replay is not worth handing\nout.",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "digest_auth"
+        },
+        "users": {
+          "description": "htdigest entries, `user:realm:HA1`, where `HA1` is `hex(H(user:realm:password))`: 32 hex\ndigits for MD5, 64 for SHA-256. The realm of every entry is the middleware's `realm`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "users",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.errors": {
+      "additionalProperties": false,
+      "description": "The configuration of an `errors` middleware.",
+      "properties": {
+        "max_body_bytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "query": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "type": "string"
+        },
+        "status": {
+          "items": {
+            "anyOf": [
+              {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "errors"
+        }
+      },
+      "required": [
+        "status",
+        "service",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.forward_auth": {
+      "additionalProperties": false,
+      "description": "The configuration of a `forward_auth` middleware.",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "max_concurrent": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_response_bytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "request_headers": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "response_headers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "response_headers_regex": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trust_forward_header": {
+          "default": false,
+          "type": "boolean"
+        },
+        "type": {
+          "const": "forward_auth"
+        }
+      },
+      "required": [
+        "address",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.grpc_web": {
+      "additionalProperties": false,
+      "description": "The configuration of a `grpc_web` middleware.",
+      "properties": {
+        "allow_origins": {
+          "default": [],
+          "description": "Origins allowed to call from a browser: exact `scheme://host[:port]`, or `*` for any.\nAbsent or empty: no CORS headers and no preflight answer.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "grpc_web"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.headers": {
+      "additionalProperties": false,
+      "description": "The configuration of a `headers` middleware.",
+      "properties": {
+        "cors": {
+          "additionalProperties": false,
+          "description": "CORS; absent means the middleware does nothing about `Origin`.",
+          "properties": {
+            "add_vary": {
+              "default": true,
+              "description": "Add `Vary: Origin` to responses that depend on the origin. Default `true`.",
+              "type": "boolean"
+            },
+            "allow_credentials": {
+              "default": false,
+              "description": "`Access-Control-Allow-Credentials: true`; refused together with the `*` origin.",
+              "type": "boolean"
+            },
+            "allow_headers": {
+              "default": [],
+              "description": "`Access-Control-Allow-Headers`; never copied from the request.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "allow_methods": {
+              "default": [],
+              "description": "`Access-Control-Allow-Methods`; absent means the header is not sent.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "allow_origin_regexes": {
+              "default": [],
+              "description": "Regular expressions an origin must match entirely.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "allow_origins": {
+              "default": [],
+              "description": "Allowed origins, exact (`scheme://host[:port]`), or `*` for any.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "expose_headers": {
+              "default": [],
+              "description": "`Access-Control-Expose-Headers`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "max_age_secs": {
+              "default": null,
+              "description": "`Access-Control-Max-Age`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "request": {
+          "additionalProperties": false,
+          "description": "Edits to the request on its way to the upstream.",
+          "properties": {
+            "remove": {
+              "default": [],
+              "description": "Header names to remove.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "set": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Header name to value. An empty value is refused: removal is `remove`.",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "response": {
+          "additionalProperties": false,
+          "description": "Edits to the upstream's response, and the security headers.",
+          "properties": {
+            "remove": {
+              "default": [],
+              "description": "Header names to remove.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "security": {
+              "additionalProperties": false,
+              "description": "The standard security headers.",
+              "properties": {
+                "content_type_nosniff": {
+                  "default": false,
+                  "description": "`X-Content-Type-Options: nosniff`.",
+                  "type": "boolean"
+                },
+                "cross_origin_opener_policy": {
+                  "default": null,
+                  "description": "`Cross-Origin-Opener-Policy`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cross_origin_resource_policy": {
+                  "default": null,
+                  "description": "`Cross-Origin-Resource-Policy`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "csp": {
+                  "default": null,
+                  "description": "`Content-Security-Policy`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "csp_report_only": {
+                  "default": null,
+                  "description": "`Content-Security-Policy-Report-Only`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "frame_options": {
+                  "default": null,
+                  "description": "`X-Frame-Options`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "hsts": {
+                  "additionalProperties": false,
+                  "description": "`Strict-Transport-Security`, added to responses of TLS connections only.",
+                  "properties": {
+                    "include_subdomains": {
+                      "default": false,
+                      "description": "`includeSubDomains`.",
+                      "type": "boolean"
+                    },
+                    "max_age_secs": {
+                      "description": "`max-age`, in seconds; `0` tells browsers to forget the policy.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "preload": {
+                      "default": false,
+                      "description": "`preload`.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "max_age_secs"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "permissions_policy": {
+                  "default": null,
+                  "description": "`Permissions-Policy`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "referrer_policy": {
+                  "default": null,
+                  "description": "`Referrer-Policy`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "set": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Header name to value.",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "type": {
+          "const": "headers"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.in_flight_req": {
+      "additionalProperties": false,
+      "description": "The configuration of an `in_flight_req` middleware.",
+      "properties": {
+        "amount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_sources": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "description": "A `source` as written in a snapshot.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "The client address under an `ipStrategy`.",
+              "properties": {
+                "ip": {
+                  "additionalProperties": false,
+                  "description": "A `source.ip` as written in a snapshot: Traefik's `ipStrategy`, plus the IPv6 prefix.",
+                  "properties": {
+                    "depth": {
+                      "default": null,
+                      "format": "uint16",
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "excluded": {
+                      "items": {
+                        "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "ipv6_subnet_bits": {
+                      "default": null,
+                      "description": "Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].",
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [
+                "ip"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The first value of a request header.",
+              "properties": {
+                "header": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "header"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The host of the request; only `true` is valid.",
+              "properties": {
+                "host": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "host"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "type": {
+          "const": "in_flight_req"
+        }
+      },
+      "required": [
+        "amount",
+        "source",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.ip_allow_list": {
+      "additionalProperties": false,
+      "description": "The configuration of an `ip_allow_list` middleware.",
+      "properties": {
+        "ip_strategy": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "default": null,
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "excluded": {
+              "items": {
+                "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ipv6_subnet_bits": {
+              "default": null,
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source_range": {
+          "items": {
+            "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "ip_allow_list"
+        }
+      },
+      "required": [
+        "source_range",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.jwt_auth": {
+      "additionalProperties": false,
+      "description": "The configuration of a `jwt_auth` middleware.",
+      "properties": {
+        "algorithms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "audiences": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forward_claims": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "issuer": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jwks_refresh_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "jwks_uri": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keys": {
+          "default": null,
+          "description": "An inline JWK set, `{\"keys\": [...]}`; the only place a symmetric (`oct`) key may be."
+        },
+        "leeway_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_token_age_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "remove_token": {
+          "default": false,
+          "type": "boolean"
+        },
+        "required_claims": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ],
+                  "description": "A string or a number or a boolean: what a required claim is compared with."
+                },
+                "type": "array"
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ],
+                "description": "A string or a number or a boolean: what a required claim is compared with."
+              }
+            ],
+            "description": "One value, or a list of which one must match."
+          },
+          "type": "object"
+        },
+        "token_sources": {
+          "items": {
+            "additionalProperties": false,
+            "description": "A place a token may be in: one of `header`, `cookie`, `query`.",
+            "properties": {
+              "cookie": {
+                "default": null,
+                "description": "A cookie.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "default": null,
+                "description": "A request header; with `scheme`, the value is `<scheme> <token>`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "query": {
+                "default": null,
+                "description": "A query parameter. A token in a URL is logged by every proxy on the way: avoid it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scheme": {
+                "default": null,
+                "description": "The authentication scheme of a `header`; `Bearer` for `authorization`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "jwt_auth"
+        }
+      },
+      "required": [
+        "algorithms",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.oidc": {
+      "additionalProperties": false,
+      "description": "The configuration of an `oidc` middleware.",
+      "properties": {
+        "allow_subjects": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "allowed_algorithms": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "A secret. `Debug` shows nothing of it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "forward_claims": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "logout_path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "redirect_path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_claims": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ],
+                  "description": "A string or a number or a boolean: what a required claim is compared with."
+                },
+                "type": "array"
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ],
+                "description": "A string or a number or a boolean: what a required claim is compared with."
+              }
+            ],
+            "description": "One value, or a list of which one must match."
+          },
+          "type": "object"
+        },
+        "scopes": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "additionalProperties": false,
+          "description": "The `session` setting.",
+          "properties": {
+            "cookie_name": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "max_age_secs": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "same_site": {
+              "description": "The `SameSite` attribute of the session cookie.",
+              "enum": [
+                "Lax",
+                "Strict",
+                "None",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "oidc"
+        }
+      },
+      "required": [
+        "issuer",
+        "client_id",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.pass_tls_client_cert": {
+      "additionalProperties": false,
+      "description": "The configuration of a `pass_tls_client_cert` middleware.",
+      "properties": {
+        "info": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "Send these fields in `X-Forwarded-Tls-Client-Cert-Info`. Absent: no info header.",
+          "properties": {
+            "issuer": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "`Issuer`: the selected parts of the issuer name.",
+              "properties": {
+                "common_name": {
+                  "default": false,
+                  "description": "`CN`.",
+                  "type": "boolean"
+                },
+                "country": {
+                  "default": false,
+                  "description": "`C`.",
+                  "type": "boolean"
+                },
+                "domain_component": {
+                  "default": false,
+                  "description": "`DC`.",
+                  "type": "boolean"
+                },
+                "locality": {
+                  "default": false,
+                  "description": "`L`.",
+                  "type": "boolean"
+                },
+                "organization": {
+                  "default": false,
+                  "description": "`O`.",
+                  "type": "boolean"
+                },
+                "province": {
+                  "default": false,
+                  "description": "`ST`.",
+                  "type": "boolean"
+                },
+                "serial_number": {
+                  "default": false,
+                  "description": "`SN`: the issuer's own serial number attribute.",
+                  "type": "boolean"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "not_after": {
+              "default": false,
+              "description": "`NA`: the end of the validity, in Unix seconds.",
+              "type": "boolean"
+            },
+            "not_before": {
+              "default": false,
+              "description": "`NB`: the start of the validity, in Unix seconds.",
+              "type": "boolean"
+            },
+            "sans": {
+              "default": false,
+              "description": "`SAN`: DNS names, e-mail addresses, IP addresses and URIs, `,` separated.",
+              "type": "boolean"
+            },
+            "serial_number": {
+              "default": false,
+              "description": "`SerialNumber`: the certificate serial in decimal.",
+              "type": "boolean"
+            },
+            "subject": {
+              "additionalProperties": false,
+              "default": null,
+              "description": "`Subject`: the selected parts of the subject name.",
+              "properties": {
+                "common_name": {
+                  "default": false,
+                  "description": "`CN`.",
+                  "type": "boolean"
+                },
+                "country": {
+                  "default": false,
+                  "description": "`C`.",
+                  "type": "boolean"
+                },
+                "domain_component": {
+                  "default": false,
+                  "description": "`DC`.",
+                  "type": "boolean"
+                },
+                "locality": {
+                  "default": false,
+                  "description": "`L`.",
+                  "type": "boolean"
+                },
+                "organization": {
+                  "default": false,
+                  "description": "`O`.",
+                  "type": "boolean"
+                },
+                "organizational_unit": {
+                  "default": false,
+                  "description": "`OU`.",
+                  "type": "boolean"
+                },
+                "province": {
+                  "default": false,
+                  "description": "`ST`.",
+                  "type": "boolean"
+                },
+                "serial_number": {
+                  "default": false,
+                  "description": "`SN`: the subject's own serial number attribute.",
+                  "type": "boolean"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pem": {
+          "default": false,
+          "description": "Send the certificate chain in `X-Forwarded-Tls-Client-Cert`.",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "pass_tls_client_cert"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.rate_limit": {
+      "additionalProperties": false,
+      "description": "The configuration of a `rate_limit` middleware.",
+      "properties": {
+        "average": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "burst": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_fallback": {
+          "additionalProperties": false,
+          "description": "The limit a node applies alone while its store is unavailable.",
+          "properties": {
+            "average": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "burst": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "average",
+            "burst"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "max_sources": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_store_error": {
+          "anyOf": [
+            {
+              "description": "What a request does when the store gives no verdict.",
+              "oneOf": [
+                {
+                  "const": "allow",
+                  "description": "Admit it if the local fallback bucket allows it.",
+                  "type": "string"
+                },
+                {
+                  "const": "deny",
+                  "description": "Refuse it with `503`.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "period_secs": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "description": "Where a limit counts.",
+              "oneOf": [
+                {
+                  "const": "node",
+                  "description": "This node alone (the default).",
+                  "type": "string"
+                },
+                {
+                  "const": "cluster",
+                  "description": "Every node that shares the store.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "description": "A `source` as written in a snapshot.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "The client address under an `ipStrategy`.",
+              "properties": {
+                "ip": {
+                  "additionalProperties": false,
+                  "description": "A `source.ip` as written in a snapshot: Traefik's `ipStrategy`, plus the IPv6 prefix.",
+                  "properties": {
+                    "depth": {
+                      "default": null,
+                      "format": "uint16",
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "excluded": {
+                      "items": {
+                        "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "ipv6_subnet_bits": {
+                      "default": null,
+                      "description": "Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].",
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [
+                "ip"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The first value of a request header.",
+              "properties": {
+                "header": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "header"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The host of the request; only `true` is valid.",
+              "properties": {
+                "host": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "host"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "store": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store_timeout_ms": {
+          "default": null,
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "rate_limit"
+        }
+      },
+      "required": [
+        "average",
+        "burst",
+        "source",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.redirect_regex": {
+      "additionalProperties": false,
+      "description": "The configuration of a `redirect_regex` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "permanent": {
+          "default": false,
+          "description": "`301` instead of `302`.",
+          "type": "boolean"
+        },
+        "regex": {
+          "description": "The pattern, over `scheme://host[:port]/path?query`.",
+          "type": "string"
+        },
+        "replacement": {
+          "description": "The target, with `$1`, `${1}`, `$name` and `${name}` for groups.",
+          "type": "string"
+        },
+        "type": {
+          "const": "redirect_regex"
+        }
+      },
+      "required": [
+        "regex",
+        "replacement",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.redirect_scheme": {
+      "additionalProperties": false,
+      "description": "The configuration of a `redirect_scheme` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "permanent": {
+          "default": false,
+          "description": "`301` instead of `302`.",
+          "type": "boolean"
+        },
+        "port": {
+          "default": null,
+          "description": "The port to redirect to; a port that is the scheme's default is not written in the URL.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scheme": {
+          "description": "The scheme to redirect to: `http` or `https`.",
+          "type": "string"
+        },
+        "type": {
+          "const": "redirect_scheme"
+        }
+      },
+      "required": [
+        "scheme",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.replace_path": {
+      "additionalProperties": false,
+      "description": "The configuration of a `replace_path` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The new path, starting with `/`.",
+          "type": "string"
+        },
+        "type": {
+          "const": "replace_path"
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.replace_path_regex": {
+      "additionalProperties": false,
+      "description": "The configuration of a `replace_path_regex` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "regex": {
+          "description": "A regular expression (Rust `regex` syntax, unanchored).",
+          "type": "string"
+        },
+        "replacement": {
+          "description": "What replaces each match; `$1`, `$name` and `${name}` insert capture groups.",
+          "type": "string"
+        },
+        "type": {
+          "const": "replace_path_regex"
+        }
+      },
+      "required": [
+        "regex",
+        "replacement",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.respond": {
+      "additionalProperties": false,
+      "description": "The configuration of a `respond` middleware.",
+      "properties": {
+        "body": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "respond"
+        }
+      },
+      "required": [
+        "status",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.retry": {
+      "additionalProperties": false,
+      "description": "The configuration of a `retry` middleware.",
+      "properties": {
+        "attempts": {
+          "description": "Attempts including the first, 1 to 5. `1` never retries.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initial_interval_ms": {
+          "default": null,
+          "description": "Wait before the first retry, in milliseconds; each further retry waits twice as long.\nDefault `100`, at most `10000`. `0` retries at once.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "methods": {
+          "default": null,
+          "description": "Methods retried after a reused connection died. Default: `GET`, `HEAD`, `OPTIONS`,\n`PUT`, `DELETE`, `TRACE`. A connect failure is retried for any method.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "retry"
+        }
+      },
+      "required": [
+        "attempts",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.strip_prefix": {
+      "additionalProperties": false,
+      "description": "The configuration of a `strip_prefix` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "prefixes": {
+          "description": "Prefixes, each starting with `/`; the first one that matches is removed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "strip_prefix"
+        }
+      },
+      "required": [
+        "prefixes",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.strip_prefix_regex": {
+      "additionalProperties": false,
+      "description": "The configuration of a `strip_prefix_regex` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "regexes": {
+          "description": "Regular expressions (Rust `regex` syntax, unanchored); the first that matches a non-empty\ntext at the start of the path is removed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "strip_prefix_regex"
+        }
+      },
+      "required": [
+        "regexes",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "middleware.wasm": {
+      "additionalProperties": false,
+      "description": "The configuration of a `wasm` middleware.",
+      "properties": {
+        "fuel": {
+          "description": "Instructions the filter may execute per request; running out ends the request with `500`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_memory_bytes": {
+          "description": "Most bytes of linear memory the filter may hold; growing past it ends the request with\n`500`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "wasm"
+        },
+        "wasm_base64": {
+          "description": "The module in the WebAssembly binary format, standard base64.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "wasm_base64",
+        "fuel",
+        "max_memory_bytes",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "service.failover": {
+      "additionalProperties": false,
+      "description": "The configuration of a `failover` service.",
+      "properties": {
+        "fallback": {
+          "description": "The service that takes them otherwise: `name` or `name@revision`.",
+          "type": "string"
+        },
+        "fallback_hold_secs": {
+          "default": null,
+          "description": "How long the fallback keeps serving after the primary was last seen without a healthy\nserver, default 10, at most 3600.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "service": {
+          "description": "The service that takes requests while it has a healthy server: `name` or\n`name@revision`.",
+          "type": "string"
+        },
+        "type": {
+          "const": "failover"
+        }
+      },
+      "required": [
+        "service",
+        "fallback",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "service.loadbalancer": {
+      "additionalProperties": false,
+      "description": "The configuration of a `loadbalancer`.",
+      "properties": {
+        "algorithm": {
+          "default": null,
+          "description": "The balancing algorithm: a name, or an object `{\"type\": name, ...options}`. Absent: `round_robin`.",
+          "oneOf": [
+            {
+              "enum": [
+                "round_robin",
+                "weighted_round_robin",
+                "least_conn",
+                "p2c_ewma",
+                "random",
+                "ip_hash",
+                "uri_hash",
+                "header_hash",
+                "hrw"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "description": "The object form of `algorithm`: the name as `type`, and the options of the algorithms that\nhave any.",
+              "properties": {
+                "header": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "include_query": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "health_check": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "The fields of a `health_check`, as written.",
+          "properties": {
+            "expect_body_regex": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expect_status": {
+              "items": {
+                "anyOf": [
+                  {
+                    "format": "uint16",
+                    "maximum": 65535,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": null,
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "healthy_threshold": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "hostname": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "interval_secs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "port": {
+              "default": null,
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scheme": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_secs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unhealthy_threshold": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "interval_secs",
+            "timeout_secs"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pass_host_header": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "passive": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "The configuration of `passive`, as written.",
+          "properties": {
+            "consecutive_failures": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ejection_secs": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "failure_statuses": {
+              "default": null,
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "latency_ms": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_ejection_percent": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "consecutive_failures",
+            "ejection_secs",
+            "max_ejection_percent"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "servers": {
+          "items": {
+            "additionalProperties": false,
+            "description": "One server as declared.",
+            "properties": {
+              "resolve": {
+                "anyOf": [
+                  {
+                    "description": "How the host of a server's URL is resolved.",
+                    "oneOf": [
+                      {
+                        "const": "a",
+                        "description": "`A` and `AAAA` records: the host is a server name and the URL carries the port.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "srv",
+                        "description": "An `SRV` record: the host is the full owner name (`_web._tcp.shop.service.consul`), the\nURL has no port, and the targets, ports, priorities and weights come from DNS.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`a` (the default) or `srv`."
+              },
+              "url": {
+                "description": "`http://host:port` or `https://host:port`. `host` is an IP address or a DNS name, which\npodgate resolves again on the record's TTL and checks against the upstream address\npolicy on every answer. With `resolve: \"srv\"` it is `http://owner.name` without a port.",
+                "type": "string"
+              },
+              "weight": {
+                "default": null,
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sticky": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "`sticky` as declared.",
+          "properties": {
+            "cookie": {
+              "additionalProperties": false,
+              "description": "`sticky.cookie` as declared.",
+              "properties": {
+                "http_only": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "max_age_secs": {
+                  "default": null,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "same_site": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "secure": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "cookie"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "loadbalancer"
+        }
+      },
+      "required": [
+        "servers",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "service.mirroring": {
+      "additionalProperties": false,
+      "description": "The configuration of a `mirroring` service.",
+      "properties": {
+        "forward_credentials": {
+          "default": null,
+          "description": "Send `Authorization`, `Proxy-Authorization` and `Cookie` to the mirrors (default\n`false`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_body_size": {
+          "default": null,
+          "description": "The most body bytes that are mirrored, default 1 MiB, at most 16 MiB. Larger bodies are\nnot mirrored. Needs `mirror_body`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mirror_body": {
+          "default": null,
+          "description": "Send the request body to the mirrors too (default `false`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mirror_timeout_secs": {
+          "default": null,
+          "description": "How long one copy may take in all, default 10, at most 60.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mirrors": {
+          "description": "Where copies go.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One mirror as declared.",
+            "properties": {
+              "percent": {
+                "description": "The share of requests copied, `0` to `100`, down to four decimals.",
+                "format": "double",
+                "type": "number"
+              },
+              "service": {
+                "description": "A `loadbalancer` of the same app: `name`, or `name@revision`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service",
+              "percent"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "service": {
+          "description": "The service every request goes to: a `loadbalancer` of the revision, else of the app.",
+          "type": "string"
+        },
+        "type": {
+          "const": "mirroring"
+        }
+      },
+      "required": [
+        "service",
+        "mirrors",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "service.static": {
+      "additionalProperties": false,
+      "description": "The configuration of a `static` service.",
+      "properties": {
+        "cache_control": {
+          "additionalProperties": false,
+          "description": "`Cache-Control` values by file extension.",
+          "properties": {
+            "by_extension": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "default": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "index": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_file_bytes": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "precompressed": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "root": {
+          "type": "string"
+        },
+        "status_pages": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "try_files": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "static"
+        }
+      },
+      "required": [
+        "root",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "service.weighted": {
+      "additionalProperties": false,
+      "description": "The configuration of a `weighted` service.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "services": {
+          "description": "The children and their relative weights.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One child as declared.",
+            "properties": {
+              "service": {
+                "description": "A `loadbalancer`, `weighted` or `failover` service of the app: `name`, or\n`name@revision`.",
+                "type": "string"
+              },
+              "weight": {
+                "description": "Relative weight, `0` to `65535`; `0` never receives a request.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "service",
+              "weight"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sticky": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "Pins a client to one child by cookie.",
+          "properties": {
+            "cookie": {
+              "additionalProperties": false,
+              "description": "`sticky.cookie` as declared.",
+              "properties": {
+                "http_only": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "max_age_secs": {
+                  "default": null,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "same_site": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "secure": {
+                  "default": null,
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "cookie"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "weighted"
+        }
+      },
+      "required": [
+        "services",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "tcp.router": {
+      "additionalProperties": false,
+      "description": "The configuration of a TCP router.",
+      "properties": {
+        "chain": {
+          "default": [],
+          "description": "Names of the app's TCP middlewares (`ip_allow_list`, `in_flight_conn`), run in this order\nbefore the connection is routed to a server, the tenant takes a slot or a server is dialled.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entry_points": {
+          "description": "The `tcp` entry points the router listens on; each is reserved to the app's tenant.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "match": {
+          "$ref": "#/$defs/matcher"
+        },
+        "name": {
+          "description": "Unique among the app's TCP routers.",
+          "type": "string"
+        },
+        "service": {
+          "description": "The TCP service that takes the connections.",
+          "type": "string"
+        },
+        "tls": {
+          "additionalProperties": false,
+          "description": "`{\"passthrough\": true}` forwards the TLS stream untouched; `{}` terminates TLS with the\napp's certificates. Absent: the router does not look at TLS (and cannot match `sni`,\n`sni_regexp` or `alpn`).",
+          "properties": {
+            "passthrough": {
+              "default": false,
+              "description": "Forward the encrypted stream to the server untouched; the server completes the\nhandshake. Default `false`: podgate terminates TLS and forwards plain bytes.",
+              "type": "boolean"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "entry_points",
+        "service"
+      ],
+      "title": "RouterConfig",
+      "type": "object"
+    },
+    "tcp_middleware.in_flight_conn": {
+      "additionalProperties": false,
+      "description": "The configuration of an `in_flight_conn` middleware.",
+      "properties": {
+        "amount": {
+          "description": "Connections one source may hold open at once, at least 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_sources": {
+          "default": null,
+          "description": "Sources the table holds, 1 to 1,000,000; default 10,000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "description": "A `source` of `in_flight_conn`: only the address exists at layer 4.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "The peer address, an IPv6 one counted by its first `ipv6_subnet_bits` bits.",
+                  "properties": {
+                    "ip": {
+                      "additionalProperties": false,
+                      "description": "The `ip` source.",
+                      "properties": {
+                        "ipv6_subnet_bits": {
+                          "default": null,
+                          "description": "Prefix length an IPv6 peer is counted by, 1 to 128; default 64.",
+                          "format": "uint8",
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "ip"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What counts as a source. Absent: `{\"ip\": {}}`, the peer address."
+        },
+        "type": {
+          "const": "in_flight_conn"
+        }
+      },
+      "required": [
+        "amount",
+        "name",
+        "type"
+      ],
+      "title": "InFlightConnConfig",
+      "type": "object"
+    },
+    "tcp_middleware.ip_allow_list": {
+      "additionalProperties": false,
+      "description": "The configuration of an `ip_allow_list` middleware on a TCP router.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source_range": {
+          "description": "The blocks, CIDR or single addresses, IPv4 and IPv6, 1 to 4096 of them.",
+          "items": {
+            "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "ip_allow_list"
+        }
+      },
+      "required": [
+        "source_range",
+        "name",
+        "type"
+      ],
+      "title": "IpAllowListConfig",
+      "type": "object"
+    },
+    "tcp_service.loadbalancer": {
+      "additionalProperties": false,
+      "description": "The configuration of a TCP `loadbalancer`.",
+      "properties": {
+        "algorithm": {
+          "default": null,
+          "description": "The balancing algorithm; absent: `round_robin`.",
+          "enum": [
+            "round_robin",
+            "weighted_round_robin",
+            "least_conn",
+            "random",
+            "hrw"
+          ]
+        },
+        "health_check": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "Active probe of each server; absent: none. See `docs/ref/l4-health.md`.",
+          "properties": {
+            "expect": {
+              "default": null,
+              "description": "Base64 of the bytes (1 to 256) the reply must start with. Without `send`, the server\nspeaks first (a banner).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "healthy_threshold": {
+              "default": null,
+              "description": "Consecutive passes that mark a down server up: 1 to 100, default 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "interval_secs": {
+              "description": "Seconds from the end of one probe to the start of the next: 1 to 3600.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "port": {
+              "default": null,
+              "description": "Probe this port of the server's IP instead of the server's own port.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "send": {
+              "default": null,
+              "description": "Base64 of the bytes (1 to 256) written after the connect.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "send_proxy_header": {
+              "default": null,
+              "description": "Write a PROXY protocol v2 `LOCAL` header first.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "timeout_secs": {
+              "description": "A probe that has not finished by then fails: 1 to 300.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tls": {
+              "default": null,
+              "description": "Probe over TLS with the service's transport; the probe passes on a completed handshake\n(and the reply, when `expect` is set). Not with `send_proxy_header`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "unhealthy_interval_secs": {
+              "default": null,
+              "description": "Seconds between probes of a server that is marked down: 1 to 3600. Absent: `interval_secs`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unhealthy_threshold": {
+              "default": null,
+              "description": "Consecutive failures that mark an up server down: 1 to 100, default 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "interval_secs",
+            "timeout_secs"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "idle_timeout_secs": {
+          "default": null,
+          "description": "Seconds without a byte in either direction before the connection is closed: 1 to 86,400,\ndefault 300.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "proxy_protocol": {
+          "additionalProperties": false,
+          "description": "Write a PROXY protocol header, `{\"version\": 1|2}`, first on every connection to a server:\nthe client's real address and the entry point's. Absent: none.",
+          "properties": {
+            "version": {
+              "description": "`1` writes the text line, `2` the binary header.",
+              "format": "uint8",
+              "maximum": 2,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "servers": {
+          "description": "The servers: 1 to 256.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One server as declared.",
+            "properties": {
+              "address": {
+                "description": "`host:port`: an IP literal (`10.0.0.5:5432`, `[2001:db8::5]:5432`) or a DNS name\n(`db.internal:5432`). With `resolve: \"srv\"`, the full SRV owner name without a port\n(`_db._tcp.shop.service.consul`): the records choose the targets and ports.",
+                "type": "string"
+              },
+              "resolve": {
+                "anyOf": [
+                  {
+                    "description": "How a server's `address` is resolved.",
+                    "oneOf": [
+                      {
+                        "const": "a",
+                        "description": "An IP literal, or a name looked up for `A` and `AAAA` records.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "srv",
+                        "description": "A name looked up for `SRV` records.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`a` (the default): `address` is `host:port`. `srv`: `address` is an SRV owner name."
+              },
+              "tls": {
+                "default": null,
+                "description": "Reach the server over TLS, with the service's `transport` (SNI, CA, client certificate).\nDefault `false`: plain TCP.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "weight": {
+                "default": null,
+                "description": "Relative weight, `1` by default; only `weighted_round_robin` and `hrw` take one. Not\nallowed with `resolve: \"srv\"`: the records carry the weights.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "address"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "termination_delay_ms": {
+          "default": null,
+          "description": "Milliseconds the server's side of a connection lives on after the client half-closed, so a\nlate reply is not cut: 0 to 86,400,000, default 100.",
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "description": "The `servers_transport` of the app that reaches the servers with `tls: true`. Only its TLS\nfields and `dial_timeout_secs` apply to a TCP service.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "loadbalancer"
+        }
+      },
+      "required": [
+        "servers",
+        "name",
+        "type"
+      ],
+      "title": "ServiceConfig",
+      "type": "object"
+    },
+    "transport.servers_transport": {
+      "additionalProperties": false,
+      "description": "The fields of a `servers_transport`, but for `client_cert`, which [`client_cert`] reads by\nhand so that no parse error quotes the key.",
+      "properties": {
+        "ca_pem": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_cert": {
+          "additionalProperties": false,
+          "description": "The certificate chain (leaf first) and private key, PEM, presented to a server that asks for one.",
+          "properties": {
+            "cert_pem": {
+              "type": "string"
+            },
+            "key_pem": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cert_pem",
+            "key_pem"
+          ],
+          "type": "object"
+        },
+        "dial_timeout_secs": {
+          "default": null,
+          "description": "TCP connect and TLS handshake, in seconds.",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "http2": {
+          "default": null,
+          "description": "Offer `h2` to an `https://` server by ALPN (default true); false offers only HTTP/1.1.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "idle_timeout_secs": {
+          "default": null,
+          "description": "How long an unused pooled connection is kept, in seconds.",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "insecure_skip_verify": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_idle_per_host": {
+          "default": null,
+          "description": "Always refused with `unsupported_setting`: Pingora's pool has no per-host cap, see the\n`UPSTREAM_POOL_SIZE` setting."
+        },
+        "max_stream_lifetime_secs": {
+          "default": null,
+          "description": "The longest a tunnel lives, in seconds (1..=86400). Default: unlimited.",
+          "format": "uint64",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_tls_version": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "proxy_protocol": {
+          "additionalProperties": false,
+          "description": "A PROXY protocol header on every new connection to the servers: `{\"version\": 1|2}`.",
+          "properties": {
+            "version": {
+              "description": "`1` writes the text line, `2` the binary header.",
+              "format": "uint8",
+              "maximum": 2,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "read_timeout_secs": {
+          "default": null,
+          "description": "Wait for the response head, then for each read of the body, in seconds.",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "server_name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stream_close_delay_secs": {
+          "default": null,
+          "description": "How long a tunnel lives on after its server was removed by a snapshot, in seconds\n(1..=86400). Default: unlimited.",
+          "format": "uint64",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tunnel_idle_timeout_secs": {
+          "default": null,
+          "description": "How long a tunnel may be idle, in seconds (1..=86400). Default: unlimited.",
+          "format": "uint64",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "servers_transport"
+        },
+        "write_timeout_secs": {
+          "default": null,
+          "description": "Each write of the request, in seconds.",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
+    "udp.router": {
+      "additionalProperties": false,
+      "description": "The configuration of a UDP router.",
+      "properties": {
+        "entry_points": {
+          "description": "The `udp` entry points the router listens on; each is reserved to the app's tenant.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_reply_ratio": {
+          "default": null,
+          "description": "Until a client has sent a second datagram, the most bytes returned to it, as a multiple of\nits first datagram's bytes: 1 to 1000. Absent: no limit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_sessions": {
+          "default": null,
+          "description": "Sessions held per entry point: 1 to 65,536, default 4096.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Unique among the app's UDP routers.",
+          "type": "string"
+        },
+        "service": {
+          "description": "The UDP service that answers.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "entry_points",
+        "service"
+      ],
+      "title": "RouterConfig",
+      "type": "object"
+    },
+    "udp_service.loadbalancer": {
+      "additionalProperties": false,
+      "description": "The configuration of a UDP `loadbalancer`.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "servers": {
+          "description": "The servers, as IP literals; 1 to 256.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One server as declared.",
+            "properties": {
+              "address": {
+                "description": "`ip:port`, like `10.0.0.5:53` or `[2001:db8::5]:53`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "session_timeout_secs": {
+          "default": null,
+          "description": "Idle seconds before a session expires: 1 to 3600, default 30.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "loadbalancer"
+        }
+      },
+      "required": [
+        "servers",
+        "name",
+        "type"
+      ],
+      "title": "ServiceConfig",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The complete desired state of one node. Replaces the previous snapshot as a whole.",
+  "kinds": {
+    "matcher": {
+      "all": "#/$defs/matcher.all",
+      "alpn": "#/$defs/matcher.alpn",
+      "any": "#/$defs/matcher.any",
+      "client_ip": "#/$defs/matcher.client_ip",
+      "header": "#/$defs/matcher.header",
+      "header_regexp": "#/$defs/matcher.header_regexp",
+      "host": "#/$defs/matcher.host",
+      "host_regexp": "#/$defs/matcher.host_regexp",
+      "method": "#/$defs/matcher.method",
+      "not": "#/$defs/matcher.not",
+      "path": "#/$defs/matcher.path",
+      "path_prefix": "#/$defs/matcher.path_prefix",
+      "path_regexp": "#/$defs/matcher.path_regexp",
+      "query": "#/$defs/matcher.query",
+      "query_regexp": "#/$defs/matcher.query_regexp",
+      "sni": "#/$defs/matcher.sni",
+      "sni_regexp": "#/$defs/matcher.sni_regexp"
+    },
+    "middleware": {
+      "add_prefix": "#/$defs/middleware.add_prefix",
+      "basic_auth": "#/$defs/middleware.basic_auth",
+      "buffering": "#/$defs/middleware.buffering",
+      "cache": "#/$defs/middleware.cache",
+      "circuit_breaker": "#/$defs/middleware.circuit_breaker",
+      "compress": "#/$defs/middleware.compress",
+      "content_type": "#/$defs/middleware.content_type",
+      "digest_auth": "#/$defs/middleware.digest_auth",
+      "errors": "#/$defs/middleware.errors",
+      "forward_auth": "#/$defs/middleware.forward_auth",
+      "grpc_web": "#/$defs/middleware.grpc_web",
+      "headers": "#/$defs/middleware.headers",
+      "in_flight_req": "#/$defs/middleware.in_flight_req",
+      "ip_allow_list": "#/$defs/middleware.ip_allow_list",
+      "jwt_auth": "#/$defs/middleware.jwt_auth",
+      "oidc": "#/$defs/middleware.oidc",
+      "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
+      "rate_limit": "#/$defs/middleware.rate_limit",
+      "redirect_regex": "#/$defs/middleware.redirect_regex",
+      "redirect_scheme": "#/$defs/middleware.redirect_scheme",
+      "replace_path": "#/$defs/middleware.replace_path",
+      "replace_path_regex": "#/$defs/middleware.replace_path_regex",
+      "respond": "#/$defs/middleware.respond",
+      "retry": "#/$defs/middleware.retry",
+      "strip_prefix": "#/$defs/middleware.strip_prefix",
+      "strip_prefix_regex": "#/$defs/middleware.strip_prefix_regex",
+      "wasm": "#/$defs/middleware.wasm"
+    },
+    "service": {
+      "failover": "#/$defs/service.failover",
+      "loadbalancer": "#/$defs/service.loadbalancer",
+      "mirroring": "#/$defs/service.mirroring",
+      "static": "#/$defs/service.static",
+      "weighted": "#/$defs/service.weighted"
+    },
+    "tcp_middleware": {
+      "in_flight_conn": "#/$defs/tcp_middleware.in_flight_conn",
+      "ip_allow_list": "#/$defs/tcp_middleware.ip_allow_list"
+    },
+    "tcp_service": {
+      "loadbalancer": "#/$defs/tcp_service.loadbalancer"
+    },
+    "transport": {
+      "servers_transport": "#/$defs/transport.servers_transport"
+    },
+    "udp_service": {
+      "loadbalancer": "#/$defs/udp_service.loadbalancer"
+    }
+  },
+  "properties": {
+    "acme": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Acme"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "ACME issuance settings. Absent: no certificate is ordered; only\n`certificates` are served."
+    },
+    "apps": {
+      "description": "Apps served by this node.",
+      "items": {
+        "$ref": "#/$defs/App"
+      },
+      "type": "array"
+    },
+    "certificates": {
+      "default": [],
+      "description": "Certificates served on the TLS listener, chosen by SNI. Change 0014 fills this from ACME.",
+      "items": {
+        "$ref": "#/$defs/Certificate"
+      },
+      "type": "array"
+    },
+    "entry_points": {
+      "default": [],
+      "description": "Request-time policy per entry point. Absent: the defaults of every entry point.",
+      "items": {
+        "$ref": "#/$defs/EntryPointPolicy"
+      },
+      "type": "array"
+    },
+    "observability": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Observability"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Access log, metrics and tracing settings. Absent: the process defaults."
+    },
+    "revert_window_secs": {
+      "default": null,
+      "description": "Seconds after this snapshot goes live during which a 5xx spike in the apps it changed\nrestores the previous snapshot. Absent: 60. `0`: never revert. Capped at 300.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "skew_secret": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SkewSecret"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Key that signs the session cookie pinning a browser to a revision, at least 16\nbytes (a shorter one rejects the snapshot with `422`). Absent: skew protection is off. Never\nlogged."
+    },
+    "tenants": {
+      "description": "Tenants that own apps.",
+      "items": {
+        "$ref": "#/$defs/Tenant"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Strictly increasing; a snapshot not newer than the live one is refused.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "tenants",
+    "apps"
+  ],
+  "title": "podgate snapshot",
+  "type": "object",
+  "unbuilt": {
+    "matcher": [],
+    "middleware": [],
+    "service": [],
+    "tcp_middleware": [],
+    "tcp_service": [],
+    "transport": [],
+    "udp_service": []
+  }
+}

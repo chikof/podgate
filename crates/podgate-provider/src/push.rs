@@ -237,6 +237,24 @@ impl AdminClient {
         })
     }
 
+    /// `GET /v1/schema`: the JSON Schema of a snapshot, as the daemon builds it. Sends no writer
+    /// header.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`] when there is no answer, or the answer is not `200` with a JSON document.
+    pub async fn schema(&self) -> Result<Value, ClientError> {
+        let answer = self.request("GET", "/v1/schema", false, b"").await?;
+        if answer.status != 200 {
+            return Err(ClientError::Protocol(
+                format!("schema was refused: {} {}", answer.status, answer.excerpt()).into(),
+            ));
+        }
+        answer
+            .json()
+            .ok_or_else(|| ClientError::Protocol("the schema is not JSON".into()))
+    }
+
     /// `PUT /v1/snapshot` as [`WRITER`], with `body` already holding the version.
     ///
     /// # Errors

@@ -668,7 +668,7 @@ fn app_json(
 }
 
 /// Unix seconds of an RFC 3339 UTC timestamp such as `2026-11-20T12:30:00Z`.
-fn unix_seconds(text: &str) -> Option<u64> {
+pub(super) fn unix_seconds(text: &str) -> Option<u64> {
     let text = text.strip_suffix('Z')?;
     let (date, time) = text.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);

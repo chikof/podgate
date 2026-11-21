@@ -11,6 +11,7 @@
 //! ingress_class = "podgate"                 # default
 //! default_tenant = "acme"                   # for namespaces not listed below
 //! allow_external_name = false               # default
+//! crds = false                              # true: also read PodgateRoute and PodgateMiddleware
 //!
 //! [source.namespace_tenants]
 //! team-a = "acme"
@@ -22,7 +23,9 @@
 //!   they implement [`client::Resource`] for their kinds and run their own [`client::Watcher`]s.
 //! - [`ingress`]: the Ingress mapping and its annotations.
 //! - [`endpoints`]: Services, EndpointSlices and TLS Secrets.
-//! - [`tenancy`]: the tenant of an Ingress.
+//! - [`crd`]: the `PodgateRoute` and `PodgateMiddleware` custom resources and the generator of
+//!   their CRD manifests.
+//! - [`tenancy`]: the tenant of an Ingress or a route.
 //!
 //! The source keeps one [`client::Store`] per kind and namespace scope. Every change to any of
 //! them, after a short settle time that merges a burst, recomputes the whole state and sends it
@@ -32,9 +35,10 @@
 //! empty state for "cannot reach the cluster". The first state goes out only when every list has
 //! succeeded once, so a half-loaded cache cannot delete routes.
 //!
-//! The reference is `docs/ref/provider-kubernetes.md`.
+//! The references are `docs/ref/provider-kubernetes.md` and `docs/ref/provider-crd.md`.
 
 pub mod client;
+pub mod crd;
 pub mod endpoints;
 pub mod ingress;
 pub mod tenancy;
@@ -85,6 +89,8 @@ struct Settings {
     default_tenant: Option<String>,
     #[serde(default)]
     allow_external_name: bool,
+    #[serde(default)]
+    crds: bool,
 }
 
 /// The Kubernetes source.
@@ -99,6 +105,7 @@ pub struct KubernetesSource {
     class: Box<str>,
     tenancy: Tenancy,
     allow_external_name: bool,
+    crds: bool,
 }
 
 impl KubernetesSource {
@@ -174,6 +181,7 @@ impl KubernetesSource {
             class: class.into(),
             tenancy,
             allow_external_name: settings.allow_external_name,
+            crds: settings.crds,
         })
     }
 
@@ -198,6 +206,7 @@ enum Change {
     Service(Event<Service>),
     Slice(Event<EndpointSlice>),
     Secret(Event<Secret>),
+    Crd(crd::CrdChange),
 }
 
 struct Tagged {
@@ -211,17 +220,19 @@ struct Cache {
     services: Vec<Store<Service>>,
     slices: Vec<Store<EndpointSlice>>,
     secrets: Vec<Store<Secret>>,
+    crd: crd::Cache,
     /// What each watcher last reported as wrong, by kind and scope.
     outages: BTreeMap<(&'static str, usize), Box<str>>,
 }
 
 impl Cache {
-    fn new(scopes: usize) -> Self {
+    fn new(scopes: usize, crds: bool) -> Self {
         Self {
             ingresses: stores(scopes),
             services: stores(scopes),
             slices: stores(scopes),
             secrets: stores(scopes),
+            crd: crd::Cache::new(crds, scopes),
             outages: BTreeMap::new(),
         }
     }
@@ -239,6 +250,7 @@ impl Cache {
             Change::Secret(event) => {
                 track(&mut self.outages, &mut self.secrets[scope], scope, event)
             }
+            Change::Crd(change) => self.crd.apply(&mut self.outages, scope, change),
         }
     }
 
@@ -247,6 +259,7 @@ impl Cache {
             && self.services.iter().all(Store::is_synced)
             && self.slices.iter().all(Store::is_synced)
             && self.secrets.iter().all(Store::is_synced)
+            && self.crd.synced()
     }
 }
 
@@ -313,10 +326,11 @@ impl Source for KubernetesSource {
             // Only TLS Secrets are asked for: the API server never sends the others.
             let secrets = query().with_field_selector(&format!("type={TLS_SECRET_TYPE}"));
             watch::<Secret>(&mut tasks, &client, secrets, scope, &tx, Change::Secret);
+            crd::watch(self.crds, &mut tasks, &client, &query(), scope, &tx);
         }
         drop(tx);
 
-        let mut cluster = Cache::new(self.scopes.len());
+        let mut cluster = Cache::new(self.scopes.len(), self.crds);
         let mut publisher = Publisher::default();
         while let Some(first) = rx.recv().await {
             cluster.apply(first);
@@ -455,6 +469,7 @@ fn build(source: &KubernetesSource, cluster: &Cache) -> Built {
             )),
         }
     }
+    crd::build(&cluster.crd, &context, &mut apps, &mut rejected);
     apps.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     certificates.sort_by(|a, b| a.origin.object.cmp(&b.origin.object));
     Built {
