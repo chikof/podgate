@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use podgate_provider::consul::ConsulSource;
 use podgate_provider::docker::DockerSource;
+use podgate_provider::ecs::EcsSource;
 use podgate_provider::etcd::EtcdSource;
 use podgate_provider::file::FileSource;
 use podgate_provider::kubernetes::KubernetesSource;
@@ -74,6 +75,7 @@ fn register_sources(
         match &*source.kind {
             "consul" => engine.add_source(ConsulSource::from_config(source)?)?,
             "docker" => engine.add_source(DockerSource::from_config(source)?)?,
+            "ecs" => engine.add_source(EcsSource::from_config(source)?)?,
             "etcd" => engine.add_source(EtcdSource::from_config(source, policy)?)?,
             "file" => engine.add_source(FileSource::from_config(source)?)?,
             "kubernetes" => engine.add_source(KubernetesSource::from_config(source, config)?)?,

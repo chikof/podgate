@@ -12,6 +12,7 @@ pub mod consul;
 pub mod daemon;
 pub mod dns_server;
 pub mod docker;
+pub mod ecs;
 pub mod etcd;
 pub mod k8s;
 pub mod k8s_crd;

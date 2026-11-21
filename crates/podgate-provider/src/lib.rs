@@ -16,6 +16,8 @@
 //! - [`mod@file`]: the source that reads YAML, TOML and JSON files and watches them.
 //! - [`docker`]: the source that turns Docker and Podman containers into apps through their
 //!   `podgate.*` labels.
+//! - [`ecs`]: the source that turns running Amazon ECS tasks into apps through the `podgate.*`
+//!   labels of their task definitions.
 //! - [`kubernetes`]: the source that turns Ingresses and EndpointSlices into routers and servers.
 //! - [`traefik`]: the translator of `traefik.*` labels and tags (rules, services, middlewares),
 //!   called by the sources next to their own labels.
@@ -38,6 +40,7 @@ pub mod acme;
 pub mod config;
 pub mod consul;
 pub mod docker;
+pub mod ecs;
 pub mod engine;
 pub mod etcd;
 pub mod file;

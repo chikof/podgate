@@ -2995,6 +2995,7 @@ dependencies = [
  "podgate-rule",
  "rcgen",
  "regex",
+ "ring",
  "rustls",
  "rustls-pki-types",
  "schemars",

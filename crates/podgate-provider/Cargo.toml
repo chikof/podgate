@@ -26,6 +26,7 @@ podgate-model = { version = "0.1.0", path = "../podgate-model", features = ["sch
 podgate-rule = { version = "0.1.0", path = "../podgate-rule" }
 rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }
 regex = "1.13.2"
+ring = "0.17.14"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.16.0"
 schemars = "1.2.3"
@@ -33,7 +34,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time", "signal"] }
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time", "signal"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 tracing = "0.1.44"
