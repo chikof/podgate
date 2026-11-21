@@ -34,8 +34,8 @@ mod resp;
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
@@ -52,11 +52,45 @@ use resp::{Reader, Reply, RespError, encode};
 /// Most calls in flight to one store, whoever makes them.
 pub const MAX_IN_FLIGHT: usize = 256;
 
+/// A Lua script a store runs by `EVALSHA`, loaded with `SCRIPT LOAD` when the store does not
+/// know it. Every script returns an array of integers.
+#[derive(Debug)]
+pub struct Script {
+    source: &'static str,
+    sha: OnceLock<String>,
+}
+
+impl Script {
+    /// A script with this Lua `source`.
+    #[must_use]
+    pub const fn new(source: &'static str) -> Self {
+        Self {
+            source,
+            sha: OnceLock::new(),
+        }
+    }
+
+    /// The digest `EVALSHA` names the script by.
+    fn sha(&self) -> &str {
+        self.sha.get_or_init(|| {
+            Sha1::digest(self.source.as_bytes()).iter().fold(
+                String::with_capacity(40),
+                |mut hex, byte| {
+                    // Writing to a `String` cannot fail.
+                    let _ = write!(hex, "{byte:02x}");
+                    hex
+                },
+            )
+        })
+    }
+}
+
 /// The generic cell rate algorithm on one key. `ARGV[1]` is the time per token and `ARGV[2]`
 /// the time to refill an empty bucket, both in microseconds; the key holds the time at which
 /// the bucket would be full again and expires when it is. Returns `{1, 0}` when a token was
 /// taken and `{0, microseconds until one is there}` when none was.
-const SCRIPT: &str = "\
+static GCRA: Script = Script::new(
+    "\
 if redis.replicate_commands then redis.replicate_commands() end
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
@@ -70,18 +104,8 @@ local wait = next - burst - now
 if wait > 0 then return {0, wait} end
 redis.call('SET', KEYS[1], string.format('%.0f', next), 'PX', math.ceil((next - now) / 1000) + 1)
 return {1, 0}
-";
-
-/// The digest `EVALSHA` names the script by.
-static SCRIPT_SHA: LazyLock<String> = LazyLock::new(|| {
-    Sha1::digest(SCRIPT.as_bytes())
-        .iter()
-        .fold(String::with_capacity(40), |mut hex, byte| {
-            // Writing to a `String` cannot fail.
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
-});
+",
+);
 
 /// The stores that are alive, for the metrics exposition.
 static LIVE: Mutex<Vec<Weak<Store>>> = Mutex::new(Vec::new());
@@ -223,6 +247,10 @@ pub struct Store {
     up: AtomicU8,
     /// Calls that failed, by [`Mode`] of the middleware that made them.
     errors: [AtomicU64; 2],
+    /// Whether a cluster `in_flight_req` has called the store.
+    inflight_used: AtomicBool,
+    /// Requests of cluster `in_flight_req` that met a store error, by [`Mode`].
+    inflight_errors: [AtomicU64; 2],
 }
 
 impl fmt::Debug for Store {
@@ -266,6 +294,8 @@ impl Store {
             share,
             up: AtomicU8::new(UNKNOWN),
             errors: [AtomicU64::new(0), AtomicU64::new(0)],
+            inflight_used: AtomicBool::new(false),
+            inflight_errors: [AtomicU64::new(0), AtomicU64::new(0)],
             spec,
         });
         let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
@@ -295,6 +325,19 @@ impl Store {
     /// Counts a request that met a store error and took the `mode` of its middleware.
     pub fn count_error(&self, mode: Mode) {
         self.errors[mode as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Notes that a cluster `in_flight_req` uses the store, so its series are exposed.
+    pub fn note_inflight_use(&self) {
+        if !self.inflight_used.load(Ordering::Relaxed) {
+            self.inflight_used.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Counts a request of a cluster `in_flight_req` that met a store error and took the `mode`
+    /// of its middleware.
+    pub fn count_inflight_error(&self, mode: Mode) {
+        self.inflight_errors[mode as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether the last call succeeded; `None` before the first call.
@@ -343,12 +386,44 @@ impl Store {
         rate: Gcra,
         timeout: Option<Duration>,
     ) -> Result<Verdict, StoreError> {
+        let interval = rate.interval_us.to_string();
+        let burst = rate.burst_us.to_string();
+        match self
+            .run(tenant, &GCRA, key, &[&interval, &burst], timeout)
+            .await?
+            .as_slice()
+        {
+            [1, _] => Ok(Verdict::Allowed),
+            [0, wait] => Ok(Verdict::Limited {
+                retry_after_us: u64::try_from(*wait).unwrap_or(0),
+            }),
+            _ => Err(StoreError::Unexpected),
+        }
+    }
+
+    /// Runs `script` on the single key `key` with `args` for `tenant`, and returns the integers
+    /// it answers. Every call, whatever its script, goes through the same tenant share, circuit,
+    /// connection pool and deadline: the call ends within `timeout` (the store's own when
+    /// `None`, never more than [`MAX_TIMEOUT_MS`]), whatever the store does.
+    ///
+    /// # Errors
+    ///
+    /// A [`StoreError`] when the script gave no answer; the caller decides what that means for
+    /// the request.
+    pub async fn run(
+        &self,
+        tenant: &str,
+        script: &Script,
+        key: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<i64>, StoreError> {
         let _slot = self.slot(tenant)?;
         let permit = self.circuit.admit().ok_or(StoreError::CircuitOpen)?;
         let deadline = timeout
             .unwrap_or(self.spec.timeout)
             .min(Duration::from_millis(u64::from(MAX_TIMEOUT_MS)));
-        let result = tokio::time::timeout(deadline, self.call(key, rate))
+        let result = tokio::time::timeout(deadline, self.call(script, key, args))
             .await
             .unwrap_or(Err(StoreError::Timeout));
         let ok = result.is_ok();
@@ -357,17 +432,22 @@ impl Store {
             (Change::Opened, Err(err)) => tracing::warn!(
                 store = &*self.name,
                 error = %err,
-                "rate limit store unavailable: calls are refused for {OPEN_FOR:?}, then one probe is made"
+                "store unavailable: calls are refused for {OPEN_FOR:?}, then one probe is made"
             ),
             (Change::Closed, _) => {
-                tracing::info!(store = &*self.name, "rate limit store is back");
+                tracing::info!(store = &*self.name, "store is back");
             }
             _ => {}
         }
         result
     }
 
-    async fn call(&self, key: &str, rate: Gcra) -> Result<Verdict, StoreError> {
+    async fn call(
+        &self,
+        script: &Script,
+        key: &str,
+        args: &[&str],
+    ) -> Result<Vec<i64>, StoreError> {
         let _connection = self
             .pool
             .permits
@@ -381,10 +461,10 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner)
             .pop();
         if let Some(mut conn) = idle {
-            match self.eval(&mut conn, key, rate).await {
-                Ok(verdict) => {
+            match self.eval(&mut conn, script, key, args).await {
+                Ok(answer) => {
                     self.put_back(conn);
-                    return Ok(verdict);
+                    return Ok(answer);
                 }
                 // The store closed an idle connection: use a fresh one.
                 Err(StoreError::Io(_)) => {}
@@ -392,9 +472,9 @@ impl Store {
             }
         }
         let mut conn = self.connect().await?;
-        let verdict = self.eval(&mut conn, key, rate).await?;
+        let answer = self.eval(&mut conn, script, key, args).await?;
         self.put_back(conn);
-        Ok(verdict)
+        Ok(answer)
     }
 
     fn put_back(&self, conn: Conn) {
@@ -434,22 +514,20 @@ impl Store {
         Ok(conn)
     }
 
-    async fn eval(&self, conn: &mut Conn, key: &str, rate: Gcra) -> Result<Verdict, StoreError> {
-        let interval = rate.interval_us.to_string();
-        let burst = rate.burst_us.to_string();
-        let sha = SCRIPT_SHA.as_bytes();
-        let evalsha: [&[u8]; 6] = [
-            b"EVALSHA",
-            sha,
-            b"1",
-            key.as_bytes(),
-            interval.as_bytes(),
-            burst.as_bytes(),
-        ];
+    async fn eval(
+        &self,
+        conn: &mut Conn,
+        script: &Script,
+        key: &str,
+        args: &[&str],
+    ) -> Result<Vec<i64>, StoreError> {
+        let mut evalsha: Vec<&[u8]> =
+            vec![b"EVALSHA", script.sha().as_bytes(), b"1", key.as_bytes()];
+        evalsha.extend(args.iter().map(|arg| arg.as_bytes()));
         let mut reply = conn.roundtrip(&evalsha).await?;
         if matches!(&reply, Reply::Error(text) if text.starts_with("NOSCRIPT")) {
             match conn
-                .roundtrip(&[b"SCRIPT", b"LOAD", SCRIPT.as_bytes()])
+                .roundtrip(&[b"SCRIPT", b"LOAD", script.source.as_bytes()])
                 .await?
             {
                 Reply::Bulk(_) => {}
@@ -459,13 +537,13 @@ impl Store {
             reply = conn.roundtrip(&evalsha).await?;
         }
         match reply {
-            Reply::Array(items) => match items.as_slice() {
-                [Reply::Int(1), Reply::Int(_)] => Ok(Verdict::Allowed),
-                [Reply::Int(0), Reply::Int(wait)] => Ok(Verdict::Limited {
-                    retry_after_us: u64::try_from(*wait).unwrap_or(0),
-                }),
-                _ => Err(StoreError::Unexpected),
-            },
+            Reply::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    Reply::Int(value) => Ok(value),
+                    _ => Err(StoreError::Unexpected),
+                })
+                .collect(),
             Reply::Error(text) => Err(StoreError::Server(text)),
             _ => Err(StoreError::Unexpected),
         }
@@ -557,6 +635,47 @@ pub fn render(out: &mut String) {
             );
         }
     }
+    let used: Vec<&Arc<Store>> = stores
+        .iter()
+        .filter(|store| store.inflight_used.load(Ordering::Relaxed))
+        .collect();
+    let up = "podgate_inflight_store_up";
+    let _ = writeln!(
+        out,
+        "# HELP {up} 1 when the last call to the store of a cluster in_flight_req succeeded, 0 when it failed or its circuit is open; absent before the first call.\n# TYPE {up} gauge"
+    );
+    for store in &used {
+        if let Some(is_up) = store.is_up() {
+            let _ = writeln!(
+                out,
+                "{up}{{store=\"{}\"}} {}",
+                Escaped(&store.name),
+                u8::from(is_up && !store.circuit.is_open())
+            );
+        }
+    }
+    let errors = "podgate_inflight_store_errors_total";
+    let _ = writeln!(
+        out,
+        "# HELP {errors} Requests of a cluster in_flight_req that met a store error, by what their middleware's on_store_error did.\n# TYPE {errors} counter"
+    );
+    for store in &used {
+        for (mode, counter) in [Mode::Allow, Mode::Deny]
+            .into_iter()
+            .zip(&store.inflight_errors)
+        {
+            let _ = writeln!(
+                out,
+                "{errors}{{store=\"{}\",mode=\"{}\"}} {}",
+                Escaped(&store.name),
+                match mode {
+                    Mode::Allow => "allow",
+                    Mode::Deny => "deny",
+                },
+                counter.load(Ordering::Relaxed)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -565,7 +684,8 @@ mod test {
 
     #[test]
     fn the_script_digest_is_forty_hex_digits() {
-        assert_eq!(SCRIPT_SHA.len(), 40);
-        assert!(SCRIPT_SHA.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let sha = GCRA.sha();
+        assert_eq!(sha.len(), 40);
+        assert!(sha.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
