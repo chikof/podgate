@@ -24,6 +24,12 @@
 #   tls-h2    TLS 1.3, HTTP/2, 16 connections x 4 streams
 #   tcp-h1    as h1-c64, plain HTTP/1.1 carried by podgate's `tcp` entry point (PODGATE_TCP=1,
 #   PROXIES=podgate; podgate only, no `direct` run)
+#   udp-echo  64 connections, each sending a 100 B datagram and waiting for its echo, through
+#   podgate's `udp` entry point to examples/load_bench's echo backend (PODGATE_UDP=1,
+#   PROXIES=podgate; `direct` is the generator straight at the echo backend; the
+#   `backend_conns` field of its runs is -1 because a UDP backend has no connections)
+#   h3-c64    as tls-h1 over HTTP/3, 64 connections, through podgate's HTTP/3 front (PODGATE_H3=1,
+#   PROXIES=podgate; examples/load_bench h3, because the toolbox's oha is built without HTTP/3)
 # `direct` (oha straight at the backend) joins the plain scenarios as the ceiling of the rig.
 #
 # Settings, all optional:
@@ -33,14 +39,19 @@
 #   thread per CPU: GOMAXPROCS for the Go proxies, available_parallelism for podgate)
 #   BUSY_MAX 3 (CPUs busy with other work before a run) BUSY_WAIT 60 (seconds to wait for it)
 #   BASE_PORT (first of 8 loopback ports; default: random free)
-#   PODGATE_BIN UPSTREAM_BIN CERT_BIN  (target/release/...)
+#   PODGATE_BIN UPSTREAM_BIN CERT_BIN LOAD_BIN  (target/release/...; LOAD_BIN is examples/load_bench)
 #   SNAPSHOT_TEMPLATE (default bench/podgate-snapshot.json.in; a variant of it, e.g. with forwarding off)
 #   PODGATE_NO_TLS 1 starts podgate with only the `web` HTTP entry point (no PROXY_TLS_ADDR, so no
 #   `websecure` listener or worker pool) and skips its TLS probes; for comparing it with the
 #   two-listener podgate. Refused with a tls-* scenario while podgate is a proxy.
 #   PODGATE_TCP 1 adds a `tcp` entry point to podgate (ENTRY_POINTS instead of PROXY_ADDR and
 #   PROXY_TLS_ADDR; the snapshot reserves it to the tenant and routes every connection to the
-#   backend) and probes it; idle unless the scenario is tcp-h1.
+#   backend and probes it; idle unless the scenario is tcp-h1.
+#   PODGATE_UDP 1 adds a `udp` entry point named `dns` and a UDP echo backend (examples/load_bench),
+#   reserves the entry point to the tenant and routes every datagram to the echo; idle unless the
+#   scenario is udp-echo.
+#   PODGATE_H3 1 serves the `websecure` entry point with `;http3`, so podgate runs its HTTP/3
+#   front; idle unless the scenario is h3-c64. Refused with PODGATE_NO_TLS.
 set -euo pipefail
 
 cd "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
@@ -59,9 +70,12 @@ BUSY_WAIT=${BUSY_WAIT:-60}
 PODGATE_BIN=${PODGATE_BIN:-target/release/podgate}
 UPSTREAM_BIN=${UPSTREAM_BIN:-target/release/examples/fast_upstream}
 CERT_BIN=${CERT_BIN:-target/release/examples/bench_cert}
+LOAD_BIN=${LOAD_BIN:-target/release/examples/load_bench}
 HOST=a.test
 PODGATE_NO_TLS=${PODGATE_NO_TLS:-}
 PODGATE_TCP=${PODGATE_TCP:-}
+PODGATE_UDP=${PODGATE_UDP:-}
+PODGATE_H3=${PODGATE_H3:-}
 CLK_TCK=$(getconf CLK_TCK)
 
 die() {
@@ -93,21 +107,29 @@ if [ -n "$PODGATE_NO_TLS" ] && [[ " $PROXIES " == *" podgate "* ]]; then
     [[ $scenario != tls-* ]] || die "PODGATE_NO_TLS: podgate has no TLS listener for $scenario"
   done
 fi
-if [ -n "$PODGATE_TCP" ]; then
-  [[ " $PROXIES " == *" podgate "* ]] || die "PODGATE_TCP: there is no podgate to give a tcp entry point"
+if [ -n "$PODGATE_TCP$PODGATE_UDP$PODGATE_H3" ]; then
+  [[ " $PROXIES " == *" podgate "* ]] || die "PODGATE_TCP, PODGATE_UDP and PODGATE_H3 need podgate in PROXIES"
+fi
+[ -z "$PODGATE_H3" ] || [ -z "$PODGATE_NO_TLS" ] || die "PODGATE_H3 needs the websecure entry point: not with PODGATE_NO_TLS"
+if [ -n "$PODGATE_UDP$PODGATE_H3" ] || [[ " $SCENARIOS " == *" udp-echo "* || " $SCENARIOS " == *" h3-c64 "* ]]; then
+  [ -x "$LOAD_BIN" ] || die "$LOAD_BIN missing: cargo build --release --example load_bench"
 fi
 for scenario in $SCENARIOS; do
-  if [ "$scenario" = tcp-h1 ]; then
-    [ -n "$PODGATE_TCP" ] || die "scenario tcp-h1 needs PODGATE_TCP=1"
-    [ "$PROXIES" = podgate ] || die "scenario tcp-h1 runs through podgate's tcp entry point only: PROXIES=podgate"
-  fi
+  case "$scenario" in
+  tcp-h1 | udp-echo | h3-c64)
+    [ "$PROXIES" = podgate ] || die "scenario $scenario runs through podgate's own entry point only: PROXIES=podgate"
+    ;;&
+  tcp-h1) [ -n "$PODGATE_TCP" ] || die "scenario tcp-h1 needs PODGATE_TCP=1" ;;
+  udp-echo) [ -n "$PODGATE_UDP" ] || die "scenario udp-echo needs PODGATE_UDP=1" ;;
+  h3-c64) [ -n "$PODGATE_H3" ] || die "scenario h3-c64 needs PODGATE_H3=1" ;;
+  esac
 done
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 BASE_PORT=${BASE_PORT:-$((20000 + RANDOM % 30000))}
 while :; do
   taken=
-  for offset in 0 1 2 3 4 5 6 7; do
+  for offset in 0 1 2 3 4 5 6 7 8 9; do
     if listening $((BASE_PORT + offset)); then taken=1; fi
   done
   [ -z "$taken" ] && break
@@ -123,6 +145,8 @@ HTTP_PORT[traefik]=$((BASE_PORT + 4))
 TLS_PORT[traefik]=$((BASE_PORT + 5))
 BACKEND_PORT=$((BASE_PORT + 6))
 TCP_PORT=$((BASE_PORT + 7))
+UDP_PORT=$((BASE_PORT + 8))
+UDP_BACKEND_PORT=$((BASE_PORT + 9))
 HTTP_PORT[direct]=$BACKEND_PORT
 
 work=$(mktemp -d)
@@ -163,10 +187,23 @@ if [ -n "$PODGATE_TCP" ]; then
       }' "$work/snapshot.json" >"$work/snapshot-tcp.json"
   mv "$work/snapshot-tcp.json" "$work/snapshot.json"
 fi
+if [ -n "$PODGATE_UDP" ]; then
+  jq --arg addr "127.0.0.1:$UDP_BACKEND_PORT" '
+    .entry_points = ((.entry_points // []) + [{name: "dns", tenants: [.tenants[0].id]}])
+    | .apps[0].udp = {
+        routers: [{name: "dns", entry_points: ["dns"], service: "echo"}],
+        services: [{name: "echo", type: "loadbalancer", servers: [{address: $addr}]}]
+      }' "$work/snapshot.json" >"$work/snapshot-udp.json"
+  mv "$work/snapshot-udp.json" "$work/snapshot.json"
+fi
 
 taskset -c "$BACKEND_CPUS" "$UPSTREAM_BIN" "127.0.0.1:$BACKEND_PORT" &
 PID[direct]=$!
 pids+=("${PID[direct]}")
+if [ -n "$PODGATE_UDP" ]; then
+  taskset -c "$BACKEND_CPUS" "$LOAD_BIN" echo "127.0.0.1:$UDP_BACKEND_PORT" &
+  pids+=($!)
+fi
 
 want() { [[ " $PROXIES " == *" $1 "* ]]; }
 
@@ -174,10 +211,15 @@ if want podgate; then
   tls_env=(PROXY_TLS_ADDR="127.0.0.1:${TLS_PORT[podgate]}")
   [ -z "$PODGATE_NO_TLS" ] || tls_env=(-u PROXY_TLS_ADDR)
   addr_env=("${tls_env[@]}" PROXY_ADDR="127.0.0.1:${HTTP_PORT[podgate]}")
-  if [ -n "$PODGATE_TCP" ]; then
+  if [ -n "$PODGATE_TCP$PODGATE_UDP$PODGATE_H3" ]; then
     entry_points="web=127.0.0.1:${HTTP_PORT[podgate]}/http"
-    [ -n "$PODGATE_NO_TLS" ] || entry_points+=",websecure=127.0.0.1:${TLS_PORT[podgate]}/https"
-    addr_env=(-u PROXY_ADDR -u PROXY_TLS_ADDR ENTRY_POINTS="$entry_points,tcp=127.0.0.1:$TCP_PORT/tcp")
+    if [ -z "$PODGATE_NO_TLS" ]; then
+      entry_points+=",websecure=127.0.0.1:${TLS_PORT[podgate]}/https"
+      [ -z "$PODGATE_H3" ] || entry_points+=";http3"
+    fi
+    [ -z "$PODGATE_TCP" ] || entry_points+=",tcp=127.0.0.1:$TCP_PORT/tcp"
+    [ -z "$PODGATE_UDP" ] || entry_points+=",dns=127.0.0.1:$UDP_PORT/udp"
+    addr_env=(-u PROXY_ADDR -u PROXY_TLS_ADDR ENTRY_POINTS="$entry_points")
   fi
   env "${addr_env[@]}" \
     ADMIN_SOCKET="$work/admin.sock" RUST_LOG=warn UPSTREAM_POLICY_FILE="$PWD/bench/upstream-policy.json" \
@@ -235,7 +277,13 @@ recorded() { # scenario proxy run
     'any(.[]; .scenario == $s and .proxy == $p and .run == $r)' "$OUT/runs.jsonl" >/dev/null
 }
 status_kb() { awk -v key="$2" '$1 == key { print $2 }' "/proc/$1/status"; }
-backend_stats() { curl -s "http://127.0.0.1:$BACKEND_PORT/__stats"; } # "connections requests"
+backend_stats() { # "connections requests"; the UDP echo has no connections
+  if [ "$scenario_now" = udp-echo ]; then
+    echo "0 $("$LOAD_BIN" stats "127.0.0.1:$UDP_BACKEND_PORT")"
+  else
+    curl -s "http://127.0.0.1:$BACKEND_PORT/__stats"
+  fi
+}
 
 # Sum of user+nice+system ticks over a taskset CPU list ("all" for every CPU), from /proc/stat.
 cpu_busy() {
@@ -305,6 +353,10 @@ probe() { # proxy: the routed host returns the backend's body, an unknown host a
     curl -sS --max-time 5 -H "Host: $HOST" "http://127.0.0.1:$TCP_PORT/" | cmp -s - "$work/expect-small" ||
       die "podgate: the tcp entry point on $TCP_PORT did not return the backend's 100 byte body"
   fi
+  if [ "$proxy" = podgate ] && [ -n "$PODGATE_UDP" ]; then
+    [[ $("$LOAD_BIN" stats "127.0.0.1:$UDP_PORT" || true) =~ ^[0-9]+$ ]] ||
+      die "podgate: the udp entry point on $UDP_PORT did not carry a datagram to the echo and back"
+  fi
   [ "$proxy" = podgate ] && [ -n "$PODGATE_NO_TLS" ] && return 0
   local tls=${TLS_PORT[$proxy]} version
   for flag in --http1.1 --http2; do
@@ -314,6 +366,11 @@ probe() { # proxy: the routed host returns the backend's body, an unknown host a
   version=$(curl -sS --max-time 5 --http2 --cacert "$work/cert.pem" --resolve "$HOST:$tls:127.0.0.1" \
     -o /dev/null -w '%{http_version}' "https://$HOST:$tls/")
   [ "$version" = 2 ] || die "$proxy: TLS did not negotiate HTTP/2 (got $version)"
+  if [ "$proxy" = podgate ] && [ -n "$PODGATE_H3" ]; then
+    "$LOAD_BIN" h3 "127.0.0.1:$tls" "$HOST" "$work/cert.pem" 1 1 2>/dev/null |
+      jq -e '.statusCodeDistribution["200"] > 0 and (.errorDistribution | length) == 0' >/dev/null ||
+      die "podgate: the HTTP/3 front on $tls did not answer GET / with the backend's 100 byte body"
+  fi
 }
 
 # Echo the podgate counters that say whether its admission control acted: summed over labels.
@@ -331,7 +388,8 @@ scenario_path() { if [ "$1" = h1-16k ]; then echo /16k; else echo /; fi; }
 scenario_tls() { [[ $1 == tls-* ]]; }
 scenario_args() {
   case "$1" in
-  h1-c64 | h1-16k | tls-h1 | tcp-h1) echo "-c 64" ;;
+  h1-c64 | h1-16k | tls-h1 | tcp-h1 | udp-echo) echo "-c 64" ;;
+  h3-c64) echo "-c 64" ;;
   h1-c256) echo "-c 256" ;;
   rate) echo "-c 64 -q $RATE --latency-correction" ;;
   tls-h2) echo "-c 16 -p 4 --http2" ;;
@@ -341,6 +399,16 @@ scenario_args() {
 
 oha_cmd() { # proxy scenario seconds -> prints the command words, one per line
   local proxy=$1 scenario=$2 secs=$3 path url port
+  if [ "$scenario" = udp-echo ]; then
+    port=$UDP_PORT
+    [ "$proxy" != direct ] || port=$UDP_BACKEND_PORT
+    printf '%s\n' "$LOAD_BIN" udp "127.0.0.1:$port" 64 "$secs"
+    return
+  fi
+  if [ "$scenario" = h3-c64 ]; then
+    printf '%s\n' "$LOAD_BIN" h3 "127.0.0.1:${TLS_PORT[$proxy]}" "$HOST" "$work/cert.pem" 64 "$secs"
+    return
+  fi
   path=$(scenario_path "$scenario")
   local words=(oha --no-tui --output-format json -z "${secs}s" -w --disable-compression
     --worker-threads "$LOAD_THREADS")
@@ -362,6 +430,7 @@ oha_cmd() { # proxy scenario seconds -> prints the command words, one per line
 
 measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
   local scenario=$1 proxy=$2 run=$3 words pid_p="" busy load1
+  scenario_now=$scenario
   if recorded "$scenario" "$proxy" "$run"; then
     echo "  $scenario $proxy run $run: already in $OUT/runs.jsonl, skipped"
     return 0
@@ -475,6 +544,7 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
 # ---- context ----------------------------------------------------------------------------------
 
 failed=
+scenario_now=
 echo "== context"
 echo "date $(date -u +%FT%TZ)  kernel $(uname -sr)  nproc $(nproc)  load $(cut -d' ' -f1-3 /proc/loadavg)"
 echo "podgate $(git rev-parse --short HEAD 2>/dev/null || echo unknown)  $(caddy version | cut -d' ' -f1)  traefik $(traefik version | awk '/^Version/ { print $2 }')  $(oha --version)"
@@ -512,7 +582,7 @@ for scenario in $SCENARIOS; do
   fi
   echo "== $scenario ($(scenario_args "$scenario"), ${DURATION} s x $RUNS runs)"
   order=$PROXIES
-  case "$scenario" in h1-c64 | h1-c256 | h1-16k | rate) order="$PROXIES direct" ;; esac
+  case "$scenario" in h1-c64 | h1-c256 | h1-16k | rate | udp-echo) order="$PROXIES direct" ;; esac
   for run in $(seq "$RUNS"); do
     for proxy in $order; do
       measure "$scenario" "$proxy" "$run"
