@@ -92,9 +92,36 @@ pub fn normalize(raw: &str) -> Result<Cow<'_, str>, Refused> {
 ///
 /// [`Refused`] for a path that cannot be normalized without changing what it names.
 pub fn normalize_with(raw: &str, allow_encoded_slash: bool) -> Result<Cow<'_, str>, Refused> {
-    if !raw.starts_with('/') {
+    if !raw.starts_with('/') || is_normal(raw) {
         return Ok(Cow::Borrowed(raw));
     }
+    rebuild(raw, allow_encoded_slash)
+}
+
+/// Whether `raw`, which starts with `/`, is its own normalization: no escape, no empty segment
+/// but a last one, no dot segment. Nearly every request is, and this checks it without
+/// allocating, which [`rebuild`] cannot.
+fn is_normal(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    // Start of the segment being read: just after the `/` before it.
+    let mut start = 1;
+    for (index, &byte) in bytes.iter().enumerate().skip(1) {
+        match byte {
+            b'%' => return false,
+            b'/' => {
+                let segment = &bytes[start..index];
+                if matches!(segment, b"" | b"." | b"..") {
+                    return false;
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    !matches!(&bytes[start..], b"." | b"..")
+}
+
+fn rebuild(raw: &str, allow_encoded_slash: bool) -> Result<Cow<'_, str>, Refused> {
     let mut kept: Vec<Cow<'_, str>> = Vec::new();
     let mut trailing = raw.ends_with('/');
     for segment in raw.split('/') {
@@ -148,6 +175,23 @@ mod test {
     fn clean_paths_are_untouched() {
         for raw in ["/", "/a", "/a/b/", "/a%20b", "/a%3Ab", "*"] {
             assert!(matches!(normalize(raw), Ok(Cow::Borrowed(_))), "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_check_without_allocation_agrees_with_the_rebuild() {
+        for raw in [
+            "/", "/a", "/a/", "/a/b", "/a/b/", "/a b", "/a\\b", "/a:b", "/.a", "/a./b", "/..a",
+            "/a/..b/", "//", "/a//", "//a", "/a//b", "/.", "/..", "/a/.", "/a/..", "/./a", "/../a",
+            "/a/./b", "/a%20b", "/%61", "/a%2fb", "/é", "/a/é/",
+        ] {
+            // The check gives up at any escape, even one the rebuild keeps as it is: it may
+            // say no too often, never yes for a path the rebuild changes.
+            assert_eq!(
+                is_normal(raw),
+                !raw.contains('%') && matches!(rebuild(raw, false), Ok(Cow::Borrowed(_))),
+                "{raw}"
+            );
         }
     }
 
