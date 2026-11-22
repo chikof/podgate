@@ -33,7 +33,7 @@ Median (min-max) of 5 runs per proxy and scenario, 15 s each, steady state, one 
 
 ### Throughput and latency
 
-![Bars of requests per second by scenario for podgate, Caddy, Traefik and the backend alone ("direct"), each bar a median with a min to max whisker over its runs. podgate is ahead of Traefik and Caddy in every scenario except the fixed-rate one, where all three hold the 62k target: 196k against 185k and 125k at h1-c64, 164k against 161k and 102k at h1-16k, and 195k against 112k and 81k at tls-h2. The backend alone reaches 334k to 458k.](benchmarks/throughput.svg)
+![Bars of requests per second by scenario for podgate, Caddy, Traefik and the backend alone ("direct"), each bar a median with a min to max whisker over its runs. podgate is ahead of Traefik and Caddy in h1-c64, h1-c256 and both TLS scenarios: 196k against 185k and 125k at h1-c64, and 195k against 112k and 81k at tls-h2. At h1-16k its median is ahead of Traefik's (164k against 161k) but the run ranges overlap, so that row is not a verdict; in the fixed-rate scenario all three hold the 62k target. The backend alone reaches 334k to 458k.](benchmarks/throughput.svg)
 
 ![Bars of p99 latency in ms by scenario, with a median and a min to max whisker per proxy, and a small panel with the p99.9 of the rate scenario. podgate has the lowest median p99 of the three proxies in every scenario (0.47 to 1.56 ms, against 1.44 to 4.32 for Traefik and 1.92 to 5.49 for Caddy). In the p99.9 panel podgate (2.7 ms, range 2.4 to 5.0) and Traefik (3.6 ms, range 3.4 to 3.7) overlap; Caddy is higher at 7.3 ms.](benchmarks/latency.svg)
 
@@ -109,7 +109,7 @@ Change 0116 later took podgate back to 196 k at `h1-c64` with the same forwardin
 
 ### Where the 250 k went
 
-![Scatter of requests per second against voluntary context switches per 1000 requests, one point per process start. 34 of the 99 starts in the attribution passes have per-thread switch counters and are plotted; the other 65 have none and are left out. Nine starts make 160 to 248 switches per 1000 requests and run at 222k to 252k req/s, among them all six starts of the first measurement's build (206 to 248 switches, 227k to 252k req/s). The other 25 starts, all of the 074ad49 variants, make 361 to 1738 switches and run at 140k to 217k req/s.](benchmarks/attribution.svg)
+![Scatter of requests per second against voluntary context switches per 1000 requests, one point per process start. These are change 0115's starts, before change 0116 put the entry points on one worker pool; since then every start of the shipped build is fast (see "One pool for the HTTP entry points"). 34 of the 99 starts in the attribution passes have per-thread switch counters and are plotted; the other 65 have none and are left out. Nine starts make 160 to 248 switches per 1000 requests and run at 222k to 252k req/s, among them all six starts of the first measurement's build (206 to 248 switches, 227k to 252k req/s). The other 25 starts, all of the 074ad49 variants, make 361 to 1738 switches and run at 140k to 217k req/s.](benchmarks/attribution.svg)
 
 `h1-c64`, forwarding headers off for the app, one fresh process start per measurement. Data: [`attribution.jsonl`](../bench/results/2026-11-22-0115/attribution.jsonl).
 
