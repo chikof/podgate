@@ -1,0 +1,15 @@
+series 2026-11-22T11:57:37Z scenario tcp-h1 starts 7 variants B1:/tmp/0118/podgate-own:1 B2:/tmp/0118/podgate-join:1 loadavg 1.50 1.92 1.82
+B1 start 1 rc 0 loadavg 1.50 1.92 1.82: 461779 req/s 0.48833892431899945 cpu s/100k sw 481 other-before 0.29 other-on-cpus 0.004923682914820285
+B2 start 1 rc 0 loadavg 1.60 1.93 1.84: 491538 req/s 0.4688395869835593 cpu s/100k sw 425 other-before 0.32 other-on-cpus 0.024691358024691357
+B1 start 2 rc 0 loadavg 1.63 1.93 1.84: 468869 req/s 0.48292872486010996 cpu s/100k sw 501 other-before 0.28 other-on-cpus 0.036071487129037544
+B2 start 2 rc 0 loadavg 1.81 2.00 1.87: 463837 req/s 0.48359191815974306 cpu s/100k sw 495 other-before 0.33 other-on-cpus 0.008234519104084322
+B1 start 3 rc 0 loadavg 1.54 1.94 1.86: 462319 req/s 0.4833493748831318 cpu s/100k sw 468 other-before 0.23 other-on-cpus 0.027891714520098445
+B2 start 3 rc 0 loadavg 1.63 1.94 1.87: 476334 req/s 0.47620177975793987 cpu s/100k sw 453 other-before 0.27 other-on-cpus 0.029629629629629627
+B1 start 4 rc 0 loadavg 1.85 2.01 1.90: 485811 req/s 0.4716912582706976 cpu s/100k sw 405 other-before 0.30 other-on-cpus 0.03939592908732764
+B2 start 4 rc 0 loadavg 1.48 1.91 1.87: 486066 req/s 0.46891374706038347 cpu s/100k sw 416 other-before 0.28 other-on-cpus 0.024666995559940796
+B1 start 5 rc 0 loadavg 1.85 2.01 1.91: 474848 req/s 0.4775528735581726 cpu s/100k sw 446 other-before 0.30 other-on-cpus 0.014778325123152709
+B2 start 5 rc 0 loadavg 1.83 2.00 1.91: 483736 req/s 0.4678172007613309 cpu s/100k sw 414 other-before 0.31 other-on-cpus 0.03456221198156682
+B1 start 6 rc 0 loadavg 1.52 1.93 1.89: 466430 req/s 0.47729120674323516 cpu s/100k sw 489 other-before 0.29 other-on-cpus 0.01639344262295082
+B2 start 6 rc 0 loadavg 1.73 1.97 1.91: 476772 req/s 0.4775047282126541 cpu s/100k sw 456 other-before 0.50 other-on-cpus 0.026281208935611037
+B1 start 7 rc 0 loadavg 1.59 1.95 1.91: 474907 req/s 0.4781849313924635 cpu s/100k sw 463 other-before 0.28 other-on-cpus 0.036124794745484405
+B2 start 7 rc 0 loadavg 1.76 1.99 1.93: 480134 req/s 0.4770259832479752 cpu s/100k sw 462 other-before 0.24 other-on-cpus 0.01808615586977968

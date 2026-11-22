@@ -1,0 +1,22 @@
+series 2026-11-22T11:35:41Z scenario h1-c64 starts 7 variants A0:/tmp/0118/podgate-own:0 A1:/tmp/0118/podgate-own:1 A2:/tmp/0118/podgate-join:1 loadavg 0.41 0.95 1.44
+A0 start 1 rc 0 loadavg 0.41 0.95 1.44: 234102 req/s 1.4145078619663036 cpu s/100k sw 230 other-before 0.33 other-on-cpus -0.03783517025826617
+A1 start 1 rc 0 loadavg 1.04 1.10 1.47: 208053 req/s 1.5947855164341476 cpu s/100k sw 485 other-before 0.32 other-on-cpus -0.07552126087670333
+A2 start 1 rc 0 loadavg 1.64 1.33 1.53: 231844 req/s 1.4244939272696238 cpu s/100k sw 224 other-before 0.35 other-on-cpus -0.041138719763040975
+A0 start 2 rc 0 loadavg 1.32 1.34 1.52: 233747 req/s 1.409853677827877 cpu s/100k sw 227 other-before 0.32 other-on-cpus -0.051003619611714374
+A1 start 2 rc 0 loadavg 1.52 1.48 1.56: 203566 req/s 1.6251019983956796 cpu s/100k sw 552 other-before 0.24 other-on-cpus -0.07716302741750122
+A2 start 2 rc 0 loadavg 1.28 1.45 1.55: 233199 req/s 1.4185720584721968 cpu s/100k sw 217 other-before 0.28 other-on-cpus -0.03949967083607637
+A0 start 3 rc 0 loadavg 1.80 1.66 1.62: 233098 req/s 1.4125979842672778 cpu s/100k sw 229 other-before 0.39 other-on-cpus -0.03291097581043278
+A1 start 3 rc 0 loadavg 1.59 1.66 1.62: 206521 req/s 1.6052882456193716 cpu s/100k sw 506 other-before 0.33 other-on-cpus -0.0755336617405583
+A2 start 3 rc 0 loadavg 1.78 1.78 1.67: 231152 req/s 1.4263981890565394 cpu s/100k sw 213 other-before 0.27 other-on-cpus -0.04275612563723072
+A0 start 4 rc 0 loadavg 1.44 1.73 1.66: 231953 req/s 1.4205190647753423 cpu s/100k sw 237 other-before 0.42 other-on-cpus -0.050995229478532654
+A1 start 4 rc 0 loadavg 1.49 1.76 1.68: 204820 req/s 1.6154201647676012 cpu s/100k sw 567 other-before 0.33 other-on-cpus -0.07385524372230429
+A2 start 4 rc 0 loadavg 1.27 1.70 1.67: 230966 req/s 1.4339528976409508 cpu s/100k sw 222 other-before 0.41 other-on-cpus -0.04277722935176045
+A0 start 5 rc 0 loadavg 1.67 1.79 1.70: 232103 req/s 1.4214857792338669 cpu s/100k sw 230 other-before 0.32 other-on-cpus -0.049366463715649164
+A1 start 5 rc 0 loadavg 1.36 1.73 1.69: 200813 req/s 1.6501111313219607 cpu s/100k sw 609 other-before 0.42 other-on-cpus -0.07385524372230429
+A2 start 5 rc 0 loadavg 1.37 1.73 1.70: 232874 req/s 1.4252650541146987 cpu s/100k sw 210 other-before 0.29 other-on-cpus -0.04276315789473684
+A0 start 6 rc 0 loadavg 1.48 1.73 1.70: 234060 req/s 1.4086699006737076 cpu s/100k sw 229 other-before 0.23 other-on-cpus -0.044422507403751234
+A1 start 6 rc 0 loadavg 1.77 1.85 1.75: 205169 req/s 1.6180074126678923 cpu s/100k sw 536 other-before 0.28 other-on-cpus -0.06567066163191594
+A2 start 6 rc 0 loadavg 1.43 1.79 1.74: 233060 req/s 1.4241288827034442 cpu s/100k sw 213 other-before 0.34 other-on-cpus -0.05263157894736842
+A0 start 7 rc 0 loadavg 1.63 1.85 1.77: 233466 req/s 1.4138972651930977 cpu s/100k sw 225 other-before 0.31 other-on-cpus -0.046075366134605895
+A1 start 7 rc 0 loadavg 1.36 1.79 1.76: 204947 req/s 1.6197610794751525 cpu s/100k sw 552 other-before 0.25 other-on-cpus -0.0853298326222514
+A2 start 7 rc 0 loadavg 2.05 2.00 1.84: 234658 req/s 1.41629623824826 cpu s/100k sw 214 other-before 0.24 other-on-cpus -0.05591185660253248
