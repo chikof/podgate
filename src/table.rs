@@ -756,6 +756,15 @@ impl CompiledApp {
                 0
             }
         };
+        // One revision, nearly every app: there is nothing to draw between, so its readiness is
+        // read once and no ticket is taken.
+        if let [only] = &*self.revisions {
+            return if share(0, only) > 0 {
+                self.take(0, router, cx)
+            } else {
+                None
+            };
+        }
         let total: u64 = self
             .revisions
             .iter()
