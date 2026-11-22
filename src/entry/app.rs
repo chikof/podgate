@@ -51,9 +51,16 @@ pub fn policed(
     }
 }
 
+/// The runtime group every HTTP and HTTPS entry point service joins: one pool of
+/// `ServerConf.threads` workers serves all of them. A pool per entry point put `n` times as many
+/// workers as CPUs on the machine, and the idle ones made the busy ones park and wake twice as
+/// often. The name is the workers' thread name, which Linux cuts at 15 characters.
+pub const RUNTIME_GROUP: &str = "entry points";
+
 /// The service for the entry point `gateway` serves; add its listeners to it as to any
-/// `http_proxy_service`. `gate` is the PROXY protocol check of a plaintext entry point with
-/// `;proxy_protocol` (a TLS entry point checks in its pre-TLS hook instead).
+/// `http_proxy_service`. It runs on the [`RUNTIME_GROUP`] pool. `gate` is the PROXY protocol check
+/// of a plaintext entry point with `;proxy_protocol` (a TLS entry point checks in its pre-TLS hook
+/// instead).
 #[must_use]
 pub fn service(
     conf: &Arc<ServerConf>,
@@ -64,7 +71,9 @@ pub fn service(
     gate: Option<Gate>,
 ) -> Service<Fronted<Policed>> {
     let policed = policed(conf, gateway, table, entry_point);
-    Service::new(name.to_owned(), Fronted::new(gate, policed))
+    let mut service = Service::new(name.to_owned(), Fronted::new(gate, policed));
+    service.runtime_group = Some(RUNTIME_GROUP.to_owned());
+    service
 }
 
 /// The prebuilt options for a policy's `h2c` and HTTP/2 idle timeout of `idle` whole seconds;

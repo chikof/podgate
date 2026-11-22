@@ -119,8 +119,10 @@ pub use wake::{Wake, WakeService};
 /// Builds the Pingora server from `config` and runs it until SIGTERM, SIGINT or SIGQUIT.
 ///
 /// Services: one HTTP or HTTPS proxy listener per entry point (`ENTRY_POINTS`, or `PROXY_ADDR` and
-/// `PROXY_TLS_ADDR`), and the admin API on the unix socket. `/readyz` reports the admin API, not
-/// the proxy listeners: Pingora binds them on its own schedule and retries while a port is busy.
+/// `PROXY_TLS_ADDR`), all on one pool of `available_parallelism()` workers
+/// ([`entry::app::RUNTIME_GROUP`]), and the admin API on the unix socket. `/readyz` reports the
+/// admin API, not the proxy listeners: Pingora binds them on its own schedule and retries while a
+/// port is busy.
 /// On SIGTERM `/readyz` turns `503`, the proxy stops accepting, and the process exits after
 /// `REQUEST_TIMEOUT_SECS` so in-flight requests finish.
 ///

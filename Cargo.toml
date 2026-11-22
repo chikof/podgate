@@ -171,5 +171,6 @@ opt-level = 3
 pingora-proxy = { path = "vendor/pingora-proxy" }
 # `pingora-core` differs from the registry crate by `PeerOptions::server_cert_verifier`, a rustls
 # server certificate verifier a peer brings (SPIFFE upstreams are judged by their URI
-# SAN, which no stock verifier checks). Drop it once Pingora has a verifier hook of its own.
+# SAN, which no stock verifier checks), and by `Service::runtime_group`, which lets services share
+# one runtime instead of one pool of workers each. Drop it once Pingora has both.
 pingora-core = { path = "vendor/pingora-core" }

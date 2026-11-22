@@ -331,6 +331,11 @@ pub trait ServiceWithDependents: Send + Sync {
         None
     }
 
+    /// The name of the runtime group this service runs in; see [`Service::runtime_group`].
+    fn runtime_group(&self) -> Option<&str> {
+        None
+    }
+
     /// This is currently called to inform the service about the delay it
     /// experienced from between waiting on its dependencies. Default behavior
     /// is to log the time.
@@ -390,6 +395,10 @@ where
         S::runtime_opts_override(self, global)
     }
 
+    fn runtime_group(&self) -> Option<&str> {
+        S::runtime_group(self)
+    }
+
     fn on_startup_delay(&self, time_waited: Duration) {
         S::on_startup_delay(self, time_waited)
     }
@@ -441,6 +450,15 @@ pub trait Service: Sync + Send {
     /// [`ServerConf`](crate::server::configuration::ServerConf).
     fn runtime_opts_override(&self, global: &RuntimeOpts) -> Option<RuntimeOpts> {
         let _ = global;
+        None
+    }
+
+    /// The name of the runtime group this service runs in.
+    ///
+    /// Services that return the same name share one runtime and its worker threads instead of
+    /// each running its own pool. The group's runtime takes its thread count, name and options
+    /// from the first of its services to start. If `None`, the service gets a runtime of its own.
+    fn runtime_group(&self) -> Option<&str> {
         None
     }
 

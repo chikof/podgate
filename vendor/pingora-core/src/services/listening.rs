@@ -50,6 +50,9 @@ pub struct Service<A> {
     app_logic: Option<A>,
     /// The number of preferred threads. `None` to follow global setting.
     pub threads: Option<usize>,
+    /// The runtime group this service joins; see [`ServiceTrait::runtime_group`]. `None` to run
+    /// on a runtime of its own.
+    pub runtime_group: Option<String>,
     runtime_opts_override: Option<RuntimeOptsOverride>,
     #[cfg(feature = "connection_filter")]
     connection_filter: Arc<dyn ConnectionFilter>,
@@ -63,6 +66,7 @@ impl<A> Service<A> {
             listeners: Listeners::new(),
             app_logic: Some(app_logic),
             threads: None,
+            runtime_group: None,
             runtime_opts_override: None,
             #[cfg(feature = "connection_filter")]
             connection_filter: Arc::new(AcceptAllFilter),
@@ -77,6 +81,7 @@ impl<A> Service<A> {
             listeners,
             app_logic: Some(app_logic),
             threads: None,
+            runtime_group: None,
             runtime_opts_override: None,
             #[cfg(feature = "connection_filter")]
             connection_filter: Arc::new(AcceptAllFilter),
@@ -325,6 +330,10 @@ impl<A: ServerApp + Send + Sync + 'static> ServiceTrait for Service<A> {
 
     fn threads(&self) -> Option<usize> {
         self.threads
+    }
+
+    fn runtime_group(&self) -> Option<&str> {
+        self.runtime_group.as_deref()
     }
 
     fn runtime_opts_override(&self, global: &RuntimeOpts) -> Option<RuntimeOpts> {

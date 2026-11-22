@@ -1,6 +1,6 @@
 # Upstream issues for cloudflare/pingora
 
-podgate carries patched copies of two Pingora 0.9.1 crates, wired by `[patch.crates-io]` in `Cargo.toml`: `pingora-proxy` in `vendor/pingora-proxy/` (sections 1 to 3) and `pingora-core` in `vendor/pingora-core/` (section 4). Each copy can be dropped only when a Pingora release covers every change in it, so file them together (one issue each, linked).
+podgate carries patched copies of two Pingora 0.9.1 crates, wired by `[patch.crates-io]` in `Cargo.toml`: `pingora-proxy` in `vendor/pingora-proxy/` (sections 1 to 3) and `pingora-core` in `vendor/pingora-core/` (sections 4 and 5). Each copy can be dropped only when a Pingora release covers every change in it, so file them together (one issue each, linked).
 
 Reproduce each against the registry crate: `diff -ru ~/.cargo/registry/src/*/pingora-proxy-0.9.1/src vendor/pingora-proxy/src`, and the same for `pingora-core-0.9.1` and `vendor/pingora-core/src`.
 
@@ -86,3 +86,19 @@ pub server_cert_verifier: Option<Arc<dyn rustls::client::danger::ServerCertVerif
 ```
 
 In `connectors/tls/rustls/mod.rs`, after the per-peer config is built: if the peer has a verifier, clone the config (or take the per-peer one) and call `dangerous().set_certificate_verifier(verifier)`. `verify_cert` and `verify_hostname` are then not consulted. Because the connection reuse hash does not cover the verifier, the docs should tell callers to put what the verifier decides on into `group_key` (podgate mixes the trust domain and allowed IDs into it). Default `None` keeps today's behaviour.
+
+---
+
+## 5. Services cannot share a runtime
+
+Added by podgate change 0116 (`vendor/pingora-core`: `server/mod.rs`, `services/mod.rs`, `services/listening.rs`).
+
+`Server::run_forever` builds one tokio runtime per service, with `ServerConf.threads` workers each. A proxy with several listeners that need their own application (podgate: one per entry point, each with its own name, policy and PROXY protocol gate) therefore runs `n` pools of workers. Under load only the pools that have traffic take CPU, but all of them exist, and podgate measured the idle one costing throughput: with an `http` and an `https` entry point on 4 CPUs, 5 of 7 fresh starts made 2 to 3 times as many voluntary context switches per request and ran 12% slower than the same process with the `http` entry point alone (`docs/benchmarks.md`, "One pool for the HTTP entry points").
+
+Proposal: an optional method on `Service` and `ServiceWithDependents`, and a field on `listening::Service`:
+
+```rust
+fn runtime_group(&self) -> Option<&str> { None }
+```
+
+Services that name the same group run on one runtime, built from the first member's thread count, name and options. `Server::run_forever` keeps a map from group name to the runtime it built and builds a runtime only for a service whose group has none yet; `run_service` takes the runtime instead of building it. Default `None` keeps today's behaviour (a runtime per service). The alternative, one service with many listeners, needs the application to find each connection's listener, and `HttpServerApp::h2_options` and `server_options` do not receive the connection.

@@ -385,3 +385,19 @@ async fn router_reachable_nowhere_rejected() {
         ["entry_point_forbidden", "entry_point_forbidden"]
     );
 }
+
+/// the HTTP and HTTPS entry points share one pool of workers, not one pool each.
+#[tokio::test]
+async fn entry_points_share_one_worker_pool() {
+    let podgate = Podgate::start_with_entry_points(&LISTENERS, &[]).await;
+    let workers = std::fs::read_dir(format!("/proc/{}/task", podgate.pid()))
+        .expect("the task directory of the running podgate")
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|name| name.starts_with("entry point"))
+        .count();
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    assert_eq!(
+        workers, cpus,
+        "3 HTTP and HTTPS entry points should run on {cpus} workers"
+    );
+}

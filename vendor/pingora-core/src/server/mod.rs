@@ -386,31 +386,17 @@ impl Server {
             })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn run_service(
         mut service: Box<dyn ServiceWithDependents>,
         #[cfg(unix)] fds: ListenFds,
         shutdown: ShutdownWatch,
-        threads: usize,
-        work_stealing: bool,
         listeners_per_fd: usize,
         ready_notifier: ServiceReadyNotifier,
         dependency_watches: Vec<ServiceReadyWatch>,
-        blocking_opts: BlockingPoolOpts,
-        runtime_opts: RuntimeOpts,
-    ) -> Runtime
-// NOTE: we need to keep the runtime outside async since
-        // otherwise the runtime will be dropped.
-    {
-        let service_runtime = Server::create_runtime(
-            service.name(),
-            threads,
-            work_stealing,
-            blocking_opts,
-            runtime_opts,
-        );
+        runtime: &Runtime,
+    ) {
         let service_name = service.name().to_string();
-        service_runtime.get_handle().spawn(async move {
+        runtime.get_handle().spawn(async move {
             // Wait for all dependencies to be ready
             let mut time_waited_opt: Option<Duration> = None;
             for mut watch in dependency_watches {
@@ -442,7 +428,6 @@ impl Server {
                 .await;
             info!("service '{}' exited.", service_name);
         });
-        service_runtime
     }
 
     /// Create a new [`Server`], using the [`Opt`] and [`ServerConf`] values provided
@@ -686,8 +671,11 @@ impl Server {
         #[cfg(feature = "sentry")]
         self.bootstrap.lock().start_sentry();
 
-        // Holds tuples of runtimes and their service name.
+        // Holds tuples of runtimes and their service name (or runtime group name).
         let mut runtimes: Vec<(Runtime, String)> = Vec::new();
+        // Runtime group name -> index in `runtimes`: services of one group share that runtime.
+        let mut grouped: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         // Set this before the bootstrap service loads inherited fds.
         #[cfg(unix)]
@@ -759,20 +747,38 @@ impl Server {
                 .map(|s| s.ready_watch.clone())
                 .collect::<Vec<_>>();
 
-            let runtime = Server::run_service(
+            let group = wrapper.service.runtime_group().map(str::to_owned);
+            let shared = group.as_ref().and_then(|g| grouped.get(g).copied());
+            let index = match shared {
+                Some(index) => index,
+                None => {
+                    // A group's runtime is built from its first member's thread count and
+                    // options and carries the group's name.
+                    let runtime_name = group.clone().unwrap_or_else(|| name.clone());
+                    let runtime = Server::create_runtime(
+                        &runtime_name,
+                        threads,
+                        conf.work_stealing,
+                        blocking_opts.clone(),
+                        service_runtime_opts,
+                    );
+                    runtimes.push((runtime, runtime_name));
+                    if let Some(group) = group {
+                        grouped.insert(group, runtimes.len() - 1);
+                    }
+                    runtimes.len() - 1
+                }
+            };
+            Server::run_service(
                 wrapper.service,
                 #[cfg(unix)]
                 self.listen_fds(),
                 self.shutdown_recv.clone(),
-                threads,
-                conf.work_stealing,
                 self.configuration.listener_tasks_per_fd,
                 ready_notifier,
                 dependency_watches,
-                blocking_opts.clone(),
-                service_runtime_opts,
+                &runtimes[index].0,
             );
-            runtimes.push((runtime, name));
         }
 
         // blocked on main loop so that it runs forever
