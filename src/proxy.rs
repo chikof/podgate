@@ -1128,7 +1128,9 @@ impl ProxyHttp for Gateway {
         // The servers of a name follow its DNS answers: the one picked may have just left.
         let (mut peer, pool_key, extras) = service
             .with_upstream(selected.upstream, |upstream| {
-                let peer = upstream.http_peer(self.upstream_timeout);
+                // Boxed where it is built: a `HttpPeer` is large, and passing it by value
+                // through the closure, the tuple and the error mapping copies it each time.
+                let peer = Box::new(upstream.http_peer(self.upstream_timeout));
                 let key = upstream.pool_key(&peer);
                 (peer, key, upstream.extras())
             })
@@ -1158,7 +1160,7 @@ impl ProxyHttp for Gateway {
         if session.is_upgrade_req() {
             ctx.tunnel.plan(extras.tunnel);
         }
-        Ok(Box::new(peer))
+        Ok(peer)
     }
 
     fn tunnel(&self, _session: &Session, ctx: &mut Ctx) -> Option<pingora::proxy::Tunnel> {
