@@ -24,7 +24,7 @@ Each row is a failure class that Traefik or Caddy leave open and that podgate cl
 |WASM extensions with fuel and capability limits|Apps attach request filters that cannot hang the proxy or reach sockets or files.|
 |Client certificates per app|An app with a client CA only serves clients holding a certificate from it; hosts without one never ask, and fronting cannot get around it.|
 
-No HTTP/3 yet: Pingora 0.9 has no HTTP/3 server, while Caddy and Traefik ship one.
+HTTP/3 is opt-in per `https` entry point (`;http3`): Pingora 0.9 has no HTTP/3 server, so a separate QUIC front in the same process bridges each request into the same pipeline ([`docs/ref/http3.md`](docs/ref/http3.md)).
 
 Measured against Caddy and Traefik on one machine: [`docs/benchmarks.md`](docs/benchmarks.md).
 
