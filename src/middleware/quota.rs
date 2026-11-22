@@ -103,11 +103,10 @@ pub(super) struct Config {
     /// The calendar window, UTC.
     period: Period,
     source: QuotaSource,
-    /// The name of a store in the operator's `RATE_LIMIT_STORES_FILE`, usable by the app's tenant.
-    store: String,
-    /// What a request does when the store gives no verdict. Required.
-    on_store_error: Mode,
-    /// How long one store call may take, 1 to 200 ms. Default: the store entry's `timeout_ms`.
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    on_store_error: Option<Mode>,
     #[serde(default)]
     store_timeout_ms: Option<u16>,
 }
@@ -249,9 +248,12 @@ impl Kind for Quota {
         if !(1..=MAX_LIMIT).contains(&config.limit) {
             return Err(invalid(format!("`limit` must be 1 to {MAX_LIMIT}")));
         }
-        if config.store.is_empty() {
+        let Some(store) = config.store.filter(|store| !store.is_empty()) else {
             return Err(invalid("`store` must name a store"));
-        }
+        };
+        let Some(mode) = config.on_store_error else {
+            return Err(invalid("`on_store_error` must be `allow` or `deny`"));
+        };
         if let Some(timeout_ms) = config.store_timeout_ms
             && !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms)
         {
@@ -273,7 +275,7 @@ impl Kind for Quota {
         let identity = json!({
             "period": config.period.name(),
             "source": config.source.describe(),
-            "store": config.store,
+            "store": store,
         })
         .to_string();
         let fingerprint = u64::from_be_bytes(
@@ -287,8 +289,8 @@ impl Kind for Quota {
         Ok(Self {
             limit: config.limit,
             period: config.period,
-            store: config.store.into(),
-            mode: config.on_store_error,
+            store: store.into(),
+            mode,
             timeout_ms: config.store_timeout_ms,
             source_config: config.source,
             keyed,

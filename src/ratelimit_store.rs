@@ -171,8 +171,7 @@ impl From<RespError> for StoreError {
     }
 }
 
-/// What a request does when the store gives no verdict: the `on_store_error` of a middleware
-/// that counts in the store.
+/// What a request does when the store gives no verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
