@@ -1,8 +1,8 @@
 # Parity with Traefik and Caddy
 
-Where podgate stands against Traefik (v3) and Caddy (v2), feature by feature. Each row names the spec that builds it (in `the project history`, `done/` once merged), or the decision that it is deferred or declined, with a recommendation. "Built" means merged changes 0001 to 0019; everything else is a todo spec until it moves to `done/`.
+Where podgate stands against Traefik (v3) and Caddy (v2), feature by feature. Each row names the change that builds it, or the decision that it is deferred or declined, with a recommendation. Every spec a row names is merged unless the row says otherwise; the only open spec is 0115 (a throughput regression, `docs/benchmarks.md`), which no row depends on.
 
-Reading the last column: a spec id is the plan; `deferred` and `declined` rows say why and what to do next. Deliberate differences from Traefik's behaviour are in the spec of the feature (Context, "Deliberate differences") and not repeated here.
+Reading the last column: a spec id alone means built by that spec; "built (...)" adds what it covers; `deferred`, `declined` and "not planned" rows say why and what to do next. Deliberate differences from Traefik's behaviour are in the spec of the feature (Context, "Deliberate differences") and not repeated here.
 
 Model, for orientation: podgate is push-only. A control-plane writer (podkit's agent, or `podgate-provider`, never both on one node) pushes one JSON snapshot; podgate compiles it, rejects what it cannot honour, and serves it. Providers, rule strings and dynamic discovery live outside the daemon.
 
