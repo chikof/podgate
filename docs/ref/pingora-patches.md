@@ -12,7 +12,7 @@ Upstream status (2026-11-22, cloudflare/pingora `main` at `3f87e92`). Runnable r
 |2|Filed as [#1139](https://github.com/cloudflare/pingora/issues/1139).|
 |3|Filed as [#1140](https://github.com/cloudflare/pingora/issues/1140).|
 |4|Filed as [#1141](https://github.com/cloudflare/pingora/issues/1141), as the rustls counterpart of `upstream_tls_verify_callback` (`cb16c87`, OpenSSL and BoringSSL only).|
-|5|Not filed yet; not in the reproduction repo yet.|
+|5|Filed as [#1144](https://github.com/cloudflare/pingora/issues/1144); reproduction `tests/runtime_group.rs` in the repo above.|
 
 ---
 
