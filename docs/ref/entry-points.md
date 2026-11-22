@@ -27,7 +27,7 @@ Any invalid value stops startup with `invalid ENTRY_POINTS: entry "<the entry>":
 
 Each `http` or `https` entry point is one Pingora proxy service, built from the same `Gateway` (so the same table, budgets, admission and certificate store), with its name in `Ctx.entry_point`. A request is matched only among routers that listen on that name. An `https` entry point shares the certificate store and the SNI hooks with every other `https` entry point.
 
-Pingora gives every service its own worker pool, so each additional entry point would add one pool of `available_parallelism` threads. podgate puts the service of every `http`, `https` and `tcp` entry point on one shared pool (`entry::app::RUNTIME_GROUP`); `udp` entry points and the HTTP/3 front keep a pool of their own.
+Pingora gives every service its own worker pool, so each additional entry point would add one pool of `available_parallelism` threads. podgate puts the service of every `http`, `https` and `tcp` entry point on one shared pool (`entry::app::RUNTIME_GROUP`); `udp` entry points (one thread) and the HTTP/3 front (`available_parallelism` threads) keep a pool of their own. Change 0121 measured both in `docs/benchmarks.md`: an idle one costs HTTP nothing, so neither joined; sharing would double the UDP rate at 51% more CPU per datagram and make HTTP/3 traffic 10% faster.
 
 ## In the snapshot
 

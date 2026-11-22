@@ -1,0 +1,28 @@
+series 2026-11-22T15:34:10Z scenario h1-c64 starts 7 duration 10 variants A0:/tmp/0121/podgate-own A1:/tmp/0121/podgate-own:PODGATE_UDP=1 A2:/tmp/0121/podgate-join:PODGATE_UDP=1 loadavg 2.22 2.31 2.10
+A0 start 1 rc 0 loadavg 2.22 2.31 2.10: 223559 req/s 1.4177052120633837 cpu s/100k sw 229 p99 0.732405 ms other-before 0.41 other-on-cpus 0.044407894736842105 non-ok 0 errors 0
+A1 start 1 rc 0 loadavg 2.19 2.35 2.14: 231181 req/s 1.4196042345962108 cpu s/100k sw 229 p99 0.41296099999999997 ms other-before 0.40 other-on-cpus -0.03942181340341656 non-ok 0 errors 0
+A2 start 1 rc 0 loadavg 1.73 2.25 2.12: 230826 req/s 1.4227148584185734 cpu s/100k sw 223 p99 0.416246 ms other-before 0.31 other-on-cpus -0.04440059200789344 non-ok 0 errors 0
+A0 start 2 rc 0 loadavg 1.51 2.15 2.09: 231854 req/s 1.4201832374697592 cpu s/100k sw 211 p99 0.422789 ms other-before 0.32 other-on-cpus -0.039473684210526314 non-ok 0 errors 0
+A1 start 2 rc 0 loadavg 1.72 2.14 2.10: 231780 req/s 1.4128566382064074 cpu s/100k sw 221 p99 0.422628 ms other-before 0.39 other-on-cpus -0.03614853762734144 non-ok 0 errors 0
+A0 start 3 rc 0 loadavg 1.32 1.97 2.05: 230759 req/s 1.4274113782148299 cpu s/100k sw 228 p99 0.416277 ms other-before 0.34 other-on-cpus -0.042735042735042736 non-ok 0 errors 0
+A1 start 3 rc 0 loadavg 1.66 2.03 2.06: 230855 req/s 1.4246839860571376 cpu s/100k sw 226 p99 0.420695 ms other-before 0.36 other-on-cpus -0.042735042735042736 non-ok 0 errors 0
+A2 start 3 rc 0 loadavg 1.50 1.98 2.05: 232587 req/s 1.4159451621896253 cpu s/100k sw 211 p99 0.414594 ms other-before 0.61 other-on-cpus -0.041125185063332785 non-ok 0 errors 0
+A0 start 4 rc 0 loadavg 1.46 1.95 2.04: 230447 req/s 1.4305270930744005 cpu s/100k sw 228 p99 0.421737 ms other-before 0.38 other-on-cpus -0.046037487668530094 non-ok 0 errors 0
+A1 start 4 rc 0 loadavg 1.62 1.96 2.04: 230322 req/s 1.4205948298754185 cpu s/100k sw 226 p99 0.428259 ms other-before 0.39 other-on-cpus -0.042749095692206515 non-ok 0 errors 0
+A2 start 4 rc 0 loadavg 1.83 2.04 2.06: 231752 req/s 1.4184458922922787 cpu s/100k sw 216 p99 0.416968 ms other-before 0.34 other-on-cpus -0.041111659266568 non-ok 0 errors 0
+A0 start 5 rc 0 loadavg 1.47 1.95 2.04: 232041 req/s 1.4128920110988508 cpu s/100k sw 231 p99 0.413481 ms other-before 0.29 other-on-cpus -0.03783517025826617 non-ok 0 errors 0
+A1 start 5 rc 0 loadavg 1.68 2.00 2.05: 231416 req/s 1.4205197315239693 cpu s/100k sw 221 p99 0.42301900000000003 ms other-before 0.30 other-on-cpus -0.042735042735042736 non-ok 0 errors 0
+A2 start 5 rc 0 loadavg 1.56 1.97 2.04: 229231 req/s 1.4273592797826056 cpu s/100k sw 227 p99 0.431155 ms other-before 0.34 other-on-cpus -0.0295955277869122 non-ok 0 errors 0
+A0 start 6 rc 0 loadavg 1.67 1.99 2.05: 230422 req/s 1.4206916060208183 cpu s/100k sw 219 p99 0.42699699999999996 ms other-before 0.40 other-on-cpus -0.027951331798750412 non-ok 0 errors 0
+A1 start 6 rc 0 loadavg 1.86 2.03 2.06: 231142 req/s 1.424808806743271 cpu s/100k sw 224 p99 0.419232 ms other-before 0.33 other-on-cpus -0.049301561216105176 non-ok 0 errors 0
+A2 start 6 rc 0 loadavg 1.84 2.07 2.07: 230649 req/s 1.4252329908840453 cpu s/100k sw 228 p99 0.420915 ms other-before 0.35 other-on-cpus -0.05097845749054431 non-ok 0 errors 0
+A0 start 7 rc 0 loadavg 1.87 2.07 2.08: 230462 req/s 1.429008866329667 cpu s/100k sw 233 p99 0.41672699999999996 ms other-before 0.28 other-on-cpus -0.054258467609339035 non-ok 0 errors 0
+A1 start 7 rc 0 loadavg 1.84 2.09 2.08: 230257 req/s 1.4252905544568149 cpu s/100k sw 226 p99 0.41418299999999997 ms other-before 0.36 other-on-cpus -0.041084634346754315 non-ok 0 errors 0
+A2 start 7 rc 0 loadavg 1.83 2.09 2.09: 230745 req/s 1.4203642533711596 cpu s/100k sw 214 p99 0.42376 ms other-before 0.41 other-on-cpus -0.05262292386120704 non-ok 0 errors 0
+done 2026-11-22T15:55:33Z
+
+series 2026-11-22T16:51:22Z scenario h1-c64 starts 1 duration 10 variants A0:/tmp/0121/podgate-own A1:/tmp/0121/podgate-own:PODGATE_UDP=1 A2:/tmp/0121/podgate-join:PODGATE_UDP=1 loadavg 2.03 2.21 2.49
+A0 start 1 rc 0 loadavg 2.03 2.21 2.49: 214834 req/s 1.4913570319408902 cpu s/100k sw 261 p99 0.868672 ms other-before 1.29 other-on-cpus -0.013157894736842105 non-ok 0 errors 0
+A1 start 1 rc 0 loadavg 2.31 2.30 2.51: 191980 req/s 1.525776046670332 cpu s/100k sw 257 p99 1.17442 ms other-before 2.42 other-on-cpus 0.11335633316904879 non-ok 0 errors 0
+A2 start 1 rc 0 loadavg 2.31 2.40 2.53: 209576 req/s 1.4621256685308397 cpu s/100k sw 243 p99 1.121129 ms other-before 0.93 other-on-cpus 0.14959723820483314 non-ok 0 errors 0
+done 2026-11-22T16:54:34Z

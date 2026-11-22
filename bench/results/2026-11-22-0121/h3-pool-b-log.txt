@@ -1,0 +1,20 @@
+series 2026-11-22T16:39:58Z scenario h3-c64 starts 7 duration 10 variants B1:/tmp/0121/podgate-own:PODGATE_H3=1 B2:/tmp/0121/podgate-join:PODGATE_H3=1 loadavg 3.16 3.37 3.04
+B1 start 1 rc 0 loadavg 3.16 3.37 3.04: 112739 req/s 3.112952344801476 cpu s/100k sw 641 p99 0.887 ms other-before 1.06 other-on-cpus -0.03939592908732764 non-ok 0 errors 0
+B1 start 2 rc 0 loadavg 1.23 2.73 2.84: 117784 req/s 3.0029784572482074 cpu s/100k sw 647 p99 0.812 ms other-before 0.33 other-on-cpus -0.06899950714637752 non-ok 0 errors 0
+B2 start 2 rc 0 loadavg 1.10 2.49 2.75: 129869 req/s 2.7230272442942587 cpu s/100k sw 210 p99 0.739 ms other-before 0.52 other-on-cpus -0.024695423114916036 non-ok 0 errors 0
+B1 start 3 rc 0 loadavg 1.36 2.36 2.70: 116146 req/s 3.0203598077595055 cpu s/100k sw 594 p99 0.834 ms other-before 0.29 other-on-cpus -0.05257969109431482 non-ok 0 errors 0
+B2 start 3 rc 0 loadavg 1.31 2.22 2.63: 123963 req/s 2.815110188923505 cpu s/100k sw 218 p99 0.858 ms other-before 0.71 other-on-cpus -0.009876543209876543 non-ok 0 errors 0
+B1 start 4 rc 0 loadavg 1.60 2.20 2.61: 98271 req/s 3.2917711056830825 cpu s/100k sw 663 p99 1.915 ms other-before 0.73 other-on-cpus 0.06072542261611685 non-ok 0 errors 0
+B2 start 4 rc 0 loadavg 2.56 2.40 2.65: 124246 req/s 2.8232113391350055 cpu s/100k sw 218 p99 0.803 ms other-before 0.70 other-on-cpus -0.024679170779861793 non-ok 0 errors 0
+B1 start 5 rc 0 loadavg 2.42 2.44 2.66: 113116 req/s 3.1176061848259318 cpu s/100k sw 638 p99 0.8490000000000001 ms other-before 0.62 other-on-cpus -0.055820062387128555 non-ok 0 errors 0
+B2 start 5 rc 0 loadavg 1.93 2.35 2.62: 124062 req/s 2.8274565441838297 cpu s/100k sw 223 p99 0.8059999999999999 ms other-before 0.66 other-on-cpus -0.01316872427983539 non-ok 0 errors 0
+B1 start 6 rc 0 loadavg 1.84 2.28 2.58: 112041 req/s 3.1411388535062135 cpu s/100k sw 760 p99 0.871 ms other-before 0.50 other-on-cpus -0.05909389363099147 non-ok 0 errors 0
+B2 start 6 rc 0 loadavg 1.52 2.15 2.52: 121488 req/s 2.7902618370134844 cpu s/100k sw 229 p99 1.472 ms other-before 0.34 other-on-cpus 0.047744484688837664 non-ok 0 errors 0
+B1 start 7 rc 0 loadavg 2.28 2.20 2.52: 111609 req/s 3.1504221515726623 cpu s/100k sw 790 p99 1.063 ms other-before 1.24 other-on-cpus -0.0509114797175234 non-ok 0 errors 0
+B2 start 7 rc 0 loadavg 2.20 2.24 2.51: 121157 req/s 2.8742881998978755 cpu s/100k sw 228 p99 1.016 ms other-before 0.68 other-on-cpus -0.01644195988161789 non-ok 0 errors 0
+done 2026-11-22T16:51:19Z
+
+series 2026-11-22T17:17:24Z scenario h3-c64 starts 1 duration 10 variants B1:/tmp/0121/podgate-own:PODGATE_H3=1 B2:/tmp/0121/podgate-join:PODGATE_H3=1 loadavg 3.27 2.85 2.71
+B1 start 1 rc 0 loadavg 3.27 2.85 2.71: 78551 req/s 2.653139342399694 cpu s/100k sw 334 p99 3.179 ms other-before 0.57 other-on-cpus 0.8392182624404664 non-ok 0 errors 0
+B2 start 1 rc 0 loadavg 4.05 3.08 2.79: 97556 req/s 2.6296583779123908 cpu s/100k sw 217 p99 2.453 ms other-before 0.54 other-on-cpus 0.5117656738522297 non-ok 0 errors 0
+done 2026-11-22T17:19:02Z
