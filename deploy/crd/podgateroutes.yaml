@@ -217,16 +217,6 @@ spec:
                         enum:
                         - node
                         - cluster
-                      source:
-                        properties:
-                          ip:
-                            properties:
-                              depth:
-                                maximum: 65535
-                                minimum: 1
-                              ipv6_subnet_bits:
-                                maximum: 255
-                                minimum: 0
                       type:
                         enum:
                         - in_flight_req
@@ -319,6 +309,30 @@ spec:
                     - type
                     - plugin
                   - properties:
+                      limit:
+                        minimum: 0
+                      on_store_error:
+                        enum:
+                        - allow
+                        - deny
+                      period:
+                        enum:
+                        - minute
+                        - hour
+                        - day
+                        - month
+                      store_timeout_ms:
+                        maximum: 65535
+                        minimum: 0
+                      type:
+                        enum:
+                        - quota
+                    required:
+                    - type
+                    - limit
+                    - period
+                    - source
+                  - properties:
                       average:
                         minimum: 0
                       burst:
@@ -335,16 +349,6 @@ spec:
                         enum:
                         - node
                         - cluster
-                      source:
-                        properties:
-                          ip:
-                            properties:
-                              depth:
-                                maximum: 65535
-                                minimum: 1
-                              ipv6_subnet_bits:
-                                maximum: 255
-                                minimum: 0
                       store_timeout_ms:
                         maximum: 65535
                         minimum: 0
@@ -719,6 +723,10 @@ spec:
                       minimum: 0
                       nullable: true
                       type: integer
+                    limit:
+                      description: 'Requests one source may make per window: 1 to 2^40.'
+                      minimum: 0
+                      type: integer
                     local_fallback:
                       x-kubernetes-preserve-unknown-fields: true
                     logout_path:
@@ -837,6 +845,14 @@ spec:
                     pem:
                       description: Send the certificate chain in `X-Forwarded-Tls-Client-Cert`.
                       type: boolean
+                    period:
+                      description: The calendar window, UTC.
+                      enum:
+                      - minute
+                      - hour
+                      - day
+                      - month
+                      type: string
                     period_secs:
                       minimum: 0
                       nullable: true
@@ -1058,40 +1074,7 @@ spec:
                       description: Share entries between the revisions of the app; default `false`.
                       type: boolean
                     source:
-                      description: A `source` as written in a snapshot.
-                      oneOf:
-                      - required:
-                        - ip
-                      - required:
-                        - header
-                      - required:
-                        - host
-                      properties:
-                        header:
-                          type: string
-                        host:
-                          type: boolean
-                        ip:
-                          description: 'A `source.ip` as written in a snapshot: Traefik''s `ipStrategy`, plus the IPv6 prefix.'
-                          properties:
-                            depth:
-                              maximum: 65535
-                              minimum: 1
-                              nullable: true
-                              type: integer
-                            excluded:
-                              items:
-                                description: An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.
-                                type: string
-                              type: array
-                            ipv6_subnet_bits:
-                              description: Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].
-                              maximum: 255
-                              minimum: 0
-                              nullable: true
-                              type: integer
-                          type: object
-                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     source_range:
                       items:
                         description: An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.
@@ -1242,6 +1225,7 @@ spec:
                       - opa
                       - pass_tls_client_cert
                       - plugin
+                      - quota
                       - rate_limit
                       - redirect_regex
                       - redirect_scheme

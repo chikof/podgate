@@ -3354,6 +3354,186 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.quota": {
+      "additionalProperties": false,
+      "description": "The configuration of a `quota` middleware.",
+      "properties": {
+        "limit": {
+          "description": "Requests one source may make per window: 1 to 2^40.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_store_error": {
+          "anyOf": [
+            {
+              "description": "What a request does when the store gives no verdict.",
+              "oneOf": [
+                {
+                  "const": "allow",
+                  "description": "Admit it. A middleware with a local limit applies that one.",
+                  "type": "string"
+                },
+                {
+                  "const": "deny",
+                  "description": "Refuse it with `503`.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "period": {
+          "description": "The calendar window, UTC.",
+          "oneOf": [
+            {
+              "const": "minute",
+              "description": "A calendar minute, UTC.",
+              "type": "string"
+            },
+            {
+              "const": "hour",
+              "description": "A calendar hour, UTC.",
+              "type": "string"
+            },
+            {
+              "const": "day",
+              "description": "A calendar day, UTC.",
+              "type": "string"
+            },
+            {
+              "const": "month",
+              "description": "A calendar month, UTC.",
+              "type": "string"
+            }
+          ]
+        },
+        "source": {
+          "description": "What a quota counts requests by.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "The client address under an `ipStrategy`.",
+              "properties": {
+                "ip": {
+                  "additionalProperties": false,
+                  "description": "A `source.ip` as written in a snapshot: Traefik's `ipStrategy`, plus the IPv6 prefix.",
+                  "properties": {
+                    "depth": {
+                      "default": null,
+                      "format": "uint16",
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "excluded": {
+                      "items": {
+                        "description": "An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "ipv6_subnet_bits": {
+                      "default": null,
+                      "description": "Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].",
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [
+                "ip"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The first value of a request header.",
+              "properties": {
+                "header": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "header"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The host of the request; only `true` is valid.",
+              "properties": {
+                "host": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "host"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A verified claim of a token, copied into a header by a `jwt_auth` earlier in the chain.",
+              "properties": {
+                "jwt_claim": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "jwt_claim"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "store": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store_timeout_ms": {
+          "default": null,
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "quota"
+        }
+      },
+      "required": [
+        "limit",
+        "period",
+        "source",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.rate_limit": {
       "additionalProperties": false,
       "description": "The configuration of a `rate_limit` middleware.",
@@ -5402,6 +5582,7 @@
       "opa": "#/$defs/middleware.opa",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
       "plugin": "#/$defs/middleware.plugin",
+      "quota": "#/$defs/middleware.quota",
       "rate_limit": "#/$defs/middleware.rate_limit",
       "redirect_regex": "#/$defs/middleware.redirect_regex",
       "redirect_scheme": "#/$defs/middleware.redirect_scheme",
