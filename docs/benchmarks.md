@@ -33,6 +33,10 @@ Median (min-max) of 5 runs per proxy and scenario, 15 s each, steady state, one 
 
 ### Throughput and latency
 
+![Bars of requests per second by scenario for podgate, Caddy, Traefik and the backend alone ("direct"), each bar a median with a min to max whisker over its runs. Traefik is ahead of podgate in the three plain HTTP/1.1 scenarios (176k, 174k and 152k against 160k, 158k and 134k req/s) and podgate is ahead in the two TLS scenarios (184k against 168k, and 188k against 105k); Caddy is the slowest proxy in every scenario. All three proxies sustain the 58k req/s of the rate scenario. The backend alone reaches 419k to 453k.](benchmarks/throughput.svg)
+
+![Bars of p99 latency in ms by scenario, with a median and a min to max whisker per proxy, and a small panel with the p99.9 of the rate scenario. podgate has the lowest median p99 of the three proxies in every scenario (0.52 to 2.16 ms, against 1.59 to 5.01 for Traefik and 2.15 to 7.09 for Caddy). In the p99.9 panel podgate (4.0 ms, range 3.6 to 15.7) and Traefik (4.1 ms, range 3.4 to 4.8) overlap; Caddy is higher at 7.1 ms.](benchmarks/latency.svg)
+
 |Scenario|Proxy|req/s|p50 ms|p99 ms|p99.9 ms|
 |---|---|---|---|---|---|
 |h1-c64|podgate|195795 (194418-197271)|0.32 (0.32-0.33)|0.47 (0.47-0.51)|1.07 (0.91-1.39)|
@@ -63,6 +67,10 @@ In `h1-c64` podgate's p50 (0.32 ms) is below Caddy's (0.37) and above Traefik's 
 The rate of the `rate` scenario is 62000 req/s: half the slowest proxy's `h1-c64` median (Caddy), rounded down to 1000. It was 58000 in the 0115 run, 62000 in the `9c075cc` run and 56000 in the first measurement because Caddy's number differed.
 
 ### CPU and memory
+
+![Bars of proxy CPU seconds per 100k requests by scenario, with a median and a min to max whisker per proxy. podgate costs 1.8 to 2.5 s, Traefik 1.9 to 3.3 s and Caddy 2.9 to 4.4 s. podgate is above Traefik in the plain HTTP scenarios (2.1 to 2.5 against 1.9 to 2.2 s) and below it in the TLS scenarios (1.8 against 2.0 and 3.3 s).](benchmarks/cpu.svg)
+
+![Left, idle resident memory of one start per proxy: podgate 16 MiB, Caddy 47 MiB, Traefik 89 MiB. Right, peak resident memory per scenario with a median and a min to max whisker: Traefik is the highest in every scenario (118 to 171 MiB); podgate is below Caddy in the plain HTTP scenarios (31 to 64 MiB against 66 to 95) and above it in the two TLS scenarios (79 and 77 against 74 and 71).](benchmarks/memory.svg)
 
 CPU is cores of the proxy process (`utime + stime` of the whole process over the steady-state window, so 4.0 is all four pinned CPUs). "CPU s/100k" is that CPU time divided by the requests served in the window. Peak RSS is `VmHWM` after resetting it once warm-up ended. "Other cores max" is the largest foreign load on the proxy CPUs in any of the 5 runs (a negative value is the accounting difference between the per-process and per-CPU counters, about 0.1 core, not load), and "disturbed" counts runs with more than 0.3 foreign cores.
 
@@ -100,6 +108,8 @@ Why podgate went from 232 k to 160 k req/s at `h1-c64` while Caddy and Traefik w
 Change 0116 later took podgate back to 196 k at `h1-c64` with the same forwarding headers, and it is now ahead of Traefik (185 k) in that scenario; see "One pool for the HTTP entry points".
 
 ### Where the 250 k went
+
+![Scatter of requests per second against voluntary context switches per 1000 requests, one point per process start. 34 of the 99 starts in the attribution passes have per-thread switch counters and are plotted; the other 65 have none and are left out. Nine starts make 160 to 248 switches per 1000 requests and run at 222k to 252k req/s, among them all six starts of the first measurement's build (206 to 248 switches, 227k to 252k req/s). The other 25 starts, all of the 074ad49 variants, make 361 to 1738 switches and run at 140k to 217k req/s.](benchmarks/attribution.svg)
 
 `h1-c64`, forwarding headers off for the app, one fresh process start per measurement. Data: [`attribution.jsonl`](../bench/results/2026-11-22-0115/attribution.jsonl).
 
@@ -243,3 +253,5 @@ flock ~/.cache/podgate-cargo.lock scripts/bench-proxies.sh
 ```
 
 Takes about 36 minutes. `SCENARIOS`, `RUNS`, `DURATION`, `PROXIES`, `PROXY_CPUS`, `LOAD_CPUS`, `BACKEND_CPUS`, `PODGATE_BIN`, `SNAPSHOT_TEMPLATE` and `PODGATE_NO_TLS` change the run (see the header of the script); `OUT=<dir>` resumes a stopped run. The results here are in `bench/results/2026-11-22-0116/`: `runs.jsonl` (every reported run, with per-thread CPU and context-switch counters of the proxy), `run-log.txt` (the console output), `pool-ab.jsonl` and `pool-ab-after.jsonl` (the 14 starts each of the change 0116 passes before and after the change, labelled by variant and start) and `pool-fwd-on.jsonl` (6 fresh starts with forwarding headers on). The 2026-11-22 run of change 0115 is in `bench/results/2026-11-22-0115/` (`attribution.jsonl` holds every run of its attribution passes), the run at `9c075cc` in `bench/results/2026-11-22/` and the first measurement's files in `bench/results/2026-11-20/`. The attribution and pool passes need a fresh process start per measurement: `PROXIES=podgate SCENARIOS=h1-c64 RUNS=1 DURATION=10 PODGATE_BIN=<binary> SNAPSHOT_TEMPLATE=bench/podgate-snapshot-noforward.json.in scripts/bench-proxies.sh`, repeated per start, with `PODGATE_NO_TLS=1` for the variant that has no `websecure` entry point.
+
+The charts in `docs/benchmarks/` come from the same result files. `scripts/bench-charts.sh` redraws them from the newest `bench/results/<date>/runs.jsonl` (and the `attribution.jsonl` next to it, or the newest one there is), `scripts/bench-charts.sh <results dir>` from another run, and `scripts/bench-charts.sh --check` (part of `check`) fails when a chart no longer matches its results.

@@ -20,4 +20,6 @@ cargo test --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo deny check
 shellcheck scripts/*.sh
+# The charts in docs/benchmarks/ must match the newest bench/results/ run.
+scripts/bench-charts.sh --check
 typos
