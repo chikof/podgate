@@ -60,7 +60,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Failover service | `failover` | `lb_try_duration` partly | built (fallback while the main service has no healthy server, `fallback_hold_secs` against flapping, a main service with no server wakes the app instead; see `docs/ref/svc-weighted-failover.md`) |
 | Mirroring | `mirroring` | none in core | built (copies of a percentage to loadbalancers of the same app, `name@revision` for the successor release, body copy capped at `max_body_size` and charged to the tenant before it exists, shed first and never queued, marker `x-podgate-mirrored`, credentials off by default; see `docs/ref/svc-mirroring.md`) |
 | Pass host header | `passHostHeader` | `header_up Host` | model (`pass_host_header`), 0022 |
-| Revision-aware rollout, canary, skew pinning | weighted services by hand | none | built |
+| Revision-aware rollout, canary, skew pinning | weighted services by hand | none | built (0011 skew pinning; 0012 SLO-driven canary: the canary's share grows only while it stays healthy, drops to 0 on a regression and emits `canary_regressed` to the control plane, which decides whether to revert the config) |
 | Scale to zero with wake | none | none | built |
 | Request shadow and replay of failures | none | none | built |
 | DNS names as servers | yes (dialer) | yes, plus dynamic upstreams | built (A and AAAA, TTL, policy on every answer; SRV in 0096), see docs/ref/dns-resolver.md |
