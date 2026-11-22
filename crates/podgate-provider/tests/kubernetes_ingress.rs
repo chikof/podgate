@@ -295,6 +295,11 @@ async fn ingress_host_path_to_routers() {
     assert_eq!(shop.tenant.mapped.as_deref(), Some("acme"));
     assert_eq!(shop.tenant.label, None);
     assert_eq!(
+        serde_json::to_value(&shop.app.tls).expect("tls")["mode"],
+        "acme",
+        "no Secret and no TLS annotation: ordered when the snapshot is pushed"
+    );
+    assert_eq!(
         routers(&state, "team-a.shop"),
         json!([
             { "name": "r0p0", "match": { "all": [{ "host": "shop.acme.test" }, { "path_prefix": "/api" }] },
@@ -1657,7 +1662,7 @@ async fn supported_annotations_shape_the_routers() {
         "podgate.io/priority": "7",
         "podgate.io/middleware.strip": r#"{"type": "strip_prefix", "prefix": "/re"}"#,
         "podgate.io/chain": "strip",
-        "podgate.io/tls": "acme",
+        "podgate.io/tls": "on_demand",
     });
     api.put("ingresses", ingress);
     let mut run = Run::start(&config(&api, &dir, ""));
@@ -1678,7 +1683,30 @@ async fn supported_annotations_shape_the_routers() {
     );
     assert_eq!(
         serde_json::to_value(&shaped.app.tls).expect("tls")["mode"],
-        "acme"
+        "on_demand",
+        "the annotation opts out of the acme default"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_ingress_without_secret_stays_on_demand() {
+    let api = FakeApi::start().await;
+    let dir = Dir::new("wildcard-tls");
+    backend(
+        &api,
+        "team-a",
+        "web",
+        80,
+        8080,
+        &[("10.0.0.1", true, false)],
+    );
+    api.put("ingresses", shop("*.acme.test"));
+    let mut run = Run::start(&config(&api, &dir, ""));
+    let state = run.wait_ids(&["team-a.shop"]).await;
+    assert_eq!(
+        serde_json::to_value(&app(&state, "team-a.shop").app.tls).expect("tls")["mode"],
+        "on_demand",
+        "HTTP-01 cannot prove a wildcard, so an acme default would be refused as wildcard_needs_dns01"
     );
 }
 

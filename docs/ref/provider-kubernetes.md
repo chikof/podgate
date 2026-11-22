@@ -51,7 +51,7 @@ One Ingress is one app, id `<namespace>.<name>` (the core prefixes the source na
 | `defaultBackend` | a host-less `{"path_prefix": "/"}` router named `default` at the lowest priority (`i32::MIN`), so every rule of the tenant goes first |
 | rule without `host` | the path matcher alone |
 | `backend.service {name, port}` with a port number or a port name | a `loadbalancer` service `<service>.<port>` whose servers are the ready addresses below |
-| `tls[].secretName` | a certificate (below); the app's `tls.mode` is `on_demand`, or the annotation's |
+| `tls[].secretName` | a certificate (below); the app's `tls.mode` is `acme`, or the annotation's |
 
 A router is named `r<rule>p<path>`. A second rule and path that would produce an identical matcher is skipped (the first wins, as in Kubernetes; a duplicate would be an ambiguity podgate refuses).
 
@@ -71,7 +71,9 @@ The only source of an address is the EndpointSlices of the backend Service, in t
 
 The source asks the API server only for Secrets of type `kubernetes.io/tls` (`fieldSelector=type=kubernetes.io/tls`), so no other Secret of the cluster ever reaches the provider's memory. A Secret that is missing, of another type, or without `tls.crt` or `tls.key` rejects only the Ingress that names it; the report says `no Secret <ns>/<name> of type kubernetes.io/tls (it is missing, or has another type)`. Secret values are never put in a log line, a message or a `Debug` output.
 
-Without a Secret nothing is ordered at start: the app's mode is `on_demand`, which orders only when a handshake asks and the ACME broker approves (`docs/ref/provider-acme.md`), unless `podgate.io/tls: acme` says the hosts should be ordered up front.
+Without a Secret the hosts are ordered when the snapshot is pushed: the app's mode is `acme`, as Traefik's certresolver and Caddy's automatic HTTPS do, so the first visitor never waits on issuance. `podgate.io/tls: on_demand` orders a host only when a handshake asks and the ACME broker approves it (`docs/ref/provider-acme.md`), for hosts that may never get traffic, such as previews, so they never spend the CA's rate limits.
+
+The exception is a wildcard rule host (`*.example.com`) that no Secret of the Ingress names: the mode stays `on_demand`, because HTTP-01 cannot prove a wildcard and the daemon refuses an `acme` app claiming one (`wildcard_needs_dns01`, `docs/ref/acme-dns01.md`). Each name under the wildcard is then ordered on its first handshake. The Ingress source cannot choose the DNS-01 challenge, so a wildcard certificate for an Ingress comes only from a Secret.
 
 ## Annotations
 

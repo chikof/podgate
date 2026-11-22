@@ -635,9 +635,23 @@ fn tls(
             .map_err(|err: serde_json::Error| err.to_string())?,
         });
     }
-    // Without a Secret nothing orders a certificate until a handshake asks and the broker
-    // approves it (`on_demand`), unless the Ingress says `acme`.
-    Ok((annotations.tls.unwrap_or(TlsMode::OnDemand), certificates))
+    // Without a Secret the hosts are ordered when the snapshot is pushed (`acme`), as Traefik's
+    // certresolver and Caddy's automatic HTTPS do; `podgate.io/tls: on_demand` orders a host
+    // only when a handshake asks and the broker approves it. A wildcard host no certificate of
+    // this Ingress names stays `on_demand`: HTTP-01 cannot prove a wildcard, and the daemon
+    // refuses such an `acme` app (`wildcard_needs_dns01`).
+    let uncovered_wildcard = rule_hosts.iter().any(|host| {
+        host.starts_with("*.")
+            && !certificates
+                .iter()
+                .any(|cert| cert.certificate.hosts.contains(host))
+    });
+    let default = if uncovered_wildcard {
+        TlsMode::OnDemand
+    } else {
+        TlsMode::Acme
+    };
+    Ok((annotations.tls.unwrap_or(default), certificates))
 }
 
 fn app_json(
