@@ -166,6 +166,7 @@ opt-level = 3
 # hook for tunnel idle, lifetime and removal timers and the
 # `ProxyHttp::response_body_before_trailers` hook for held bodies before HTTP/2 trailers.
 # Drop it once Pingora ships all three.
+# The upstream issues for both vendored crates are drafted in docs/ref/pingora-patches.md.
 [patch.crates-io]
 pingora-proxy = { path = "vendor/pingora-proxy" }
 # `pingora-core` differs from the registry crate by `PeerOptions::server_cert_verifier`, a rustls
