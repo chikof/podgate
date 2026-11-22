@@ -396,8 +396,10 @@ async fn entry_points_share_one_worker_pool() {
         .filter(|name| name.starts_with("entry point"))
         .count();
     let cpus = std::thread::available_parallelism().map_or(1, usize::from);
-    assert_eq!(
-        workers, cpus,
-        "3 HTTP and HTTPS entry points should run on {cpus} workers"
+    // Tokio names its blocking-pool threads like the workers, so a `spawn_blocking` before this
+    // count adds a few. One pool per entry point would give 3 * cpus.
+    assert!(
+        (cpus..2 * cpus).contains(&workers),
+        "3 HTTP and HTTPS entry points should share one pool of {cpus} workers, found {workers} threads"
     );
 }
