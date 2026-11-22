@@ -10,6 +10,7 @@
 //! snapshot could never change them. `Policed` asks the table of the moment and delegates
 //! everything else to the inner proxy.
 
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -106,18 +107,26 @@ fn options_for(h2c: bool, idle: Option<u32>) -> Option<&'static HttpServerOption
 
 #[async_trait]
 impl HttpServerApp for Policed {
-    async fn process_new_http(
-        self: &Arc<Self>,
+    // Not an `async fn`: `async_trait` boxes a future per request, and all this does is a lookup
+    // before the inner future starts, so the inner future is returned as it is.
+    fn process_new_http<'life0, 'life1, 'async_trait>(
+        self: &'life0 Arc<Self>,
         mut session: ServerSession,
-        shutdown: &ShutdownWatch,
-    ) -> Option<ReusedHttpStream> {
+        shutdown: &'life1 ShutdownWatch,
+    ) -> Pin<Box<dyn Future<Output = Option<ReusedHttpStream>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
         // Before the first byte of this request is read: on HTTP/1 the keep-alive timeout is
         // the wait for the request (a no-op for HTTP/2, whose idle timeout is `server_options`).
         let table = self.table.load();
         if let Some(idle) = table.entry_policy(&self.entry_point).idle_secs() {
             session.set_keepalive(Some(u64::from(idle)));
         }
-        self.inner.process_new_http(session, shutdown).await
+        drop(table);
+        self.inner.process_new_http(session, shutdown)
     }
 
     fn h2_options(&self) -> Option<H2Options> {

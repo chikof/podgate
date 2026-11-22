@@ -20,6 +20,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -234,16 +235,10 @@ impl<A> Fronted<A> {
     }
 }
 
-#[async_trait]
-impl<A: ServerApp + Send + Sync + 'static> ServerApp for Fronted<A> {
-    async fn process_new(
-        self: &Arc<Self>,
-        stream: Stream,
-        shutdown: &ShutdownWatch,
-    ) -> Option<Stream> {
-        let Some(gate) = &self.gate else {
-            return self.inner.process_new(stream, shutdown).await;
-        };
+impl<A: ServerApp + Send + Sync + 'static> Fronted<A> {
+    /// The connection of an entry point with a gate: the header is read once, then the
+    /// connection is served.
+    async fn gated(&self, gate: &Gate, stream: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         // A plaintext listener hands over the accepted socket itself. Anything else is not a
         // connection the gate can read a header from, so it is dropped.
         let Ok(l4) = stream.into_any().downcast::<L4Stream>() else {
@@ -262,6 +257,27 @@ impl<A: ServerApp + Send + Sync + 'static> ServerApp for Fronted<A> {
             next = self.inner.process_new(stream, shutdown).await;
         }
         None
+    }
+}
+
+#[async_trait]
+impl<A: ServerApp + Send + Sync + 'static> ServerApp for Fronted<A> {
+    // Not an `async fn` for the common case: without a gate this only hands the connection on,
+    // and `async_trait` would box one more future per request for it.
+    fn process_new<'life0, 'life1, 'async_trait>(
+        self: &'life0 Arc<Self>,
+        stream: Stream,
+        shutdown: &'life1 ShutdownWatch,
+    ) -> Pin<Box<dyn Future<Output = Option<Stream>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        match &self.gate {
+            None => self.inner.process_new(stream, shutdown),
+            Some(gate) => Box::pin(self.gated(gate, stream, shutdown)),
+        }
     }
 
     async fn cleanup(&self) {
