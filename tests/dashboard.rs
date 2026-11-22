@@ -128,14 +128,29 @@ async fn reachable(addr: SocketAddr) {
     panic!("nothing listens on {addr}");
 }
 
+/// Podgate with its dashboard on a free address. The address is picked again on each attempt, as
+/// the harness picks its ports: a parallel test can take a probed port before podgate binds it,
+/// and podgate then exits at start.
 async fn start(extra: &[(&str, &str)]) -> (Podgate, SocketAddr) {
-    let addr = free_addr();
-    let address = addr.to_string();
-    let mut env = vec![("DASHBOARD_ADDR", address.as_str())];
-    env.extend_from_slice(extra);
-    let podgate = Podgate::start_with_env(&env).await;
-    reachable(addr).await;
-    (podgate, addr)
+    let mut failures = Vec::new();
+    for attempt in 1..=5 {
+        let addr = free_addr();
+        let address = addr.to_string();
+        let mut env = vec![("DASHBOARD_ADDR", address.as_str())];
+        env.extend_from_slice(extra);
+        let ports = common::free_ports(2);
+        match Podgate::try_start(&env, (ports[0], ports[1]), &[], false).await {
+            Ok(podgate) => {
+                reachable(addr).await;
+                return (podgate, addr);
+            }
+            Err(reason) => failures.push(format!("attempt {attempt}: {reason}")),
+        }
+    }
+    panic!(
+        "podgate with a dashboard did not start:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A dashboard that asks for `alice:s3cret`, with its htpasswd file in a temp dir that lives as
