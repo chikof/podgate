@@ -237,6 +237,42 @@ Sharing the pool is faster and cheaper for the HTTP/3 traffic: the ranges are ap
 
 Decision: neither service joins the group. The rule of change 0121 needs both facts, an idle pool that costs HTTP throughput (A) and own traffic that loses nothing in the shared pool (B). A fails for both: an idle UDP pool (1 thread) and an idle HTTP/3 pool (4 threads) leave HTTP at the baseline, with ranges that overlap and every start in the fast band. B passes for HTTP/3 (faster, cheaper) and is mixed for UDP (twice the rate, 51% more CPU per datagram). Nothing changed in the code. Joining would still help the HTTP/3 traffic and the UDP rate; whether to do it for those reasons is left open.
 
+### Cost per request, counted and trimmed
+
+Change 0115 found the fast-state cost per request creeping from 1.28 to about 1.40 CPU s/100k with no single culprit. Machine load does not change an instruction count, so this section counts instructions instead of timing them. `scripts/bench-callgrind.sh` runs one podgate under `valgrind --tool=callgrind` (release profile plus `line-tables-only` symbols), sends 5000 warm-up requests, zeroes the counters, sends 20000 requests of the `h1-c64` shape with `oha -c 8`, forwarding headers off, and divides the guest instruction total by 20000. It counts user-space instructions only; the kernel part of a request (about 40% of the CPU in these runs, see below) is not in it. The first build is `4b3834a` with its own snapshot format (`bench/podgate-snapshot-4b3834a.json.in`).
+
+|Build|Instructions per request (runs)|Against `4b3834a`|
+|---|---|---|
+|`4b3834a`|75167, 74639|reference|
+|`ec6a8a4`, before the fixes|83705, 83799|+11.9% to +12.3%|
+|after fix 1, wrappers hand the inner future through (`54509a5`)|83009|+11.2%|
+|after fix 2, one byte pass for a normal path (`5b2dd6e`)|82265|+10.2%|
+|after fix 3, pool scope hashed once per table (`aa02f17`)|81643|+9.4%|
+|after fix 4, skew secret before `Cache-Control`, refusal text on refusal only (`f00e863`)|81054|+8.6%|
+|after fix 5, upstream peer built in its box (`65504f0`)|80757|+8.2%|
+|after fix 6, one revision read once (`4caca61`)|80480|+7.8%|
+
+Two runs of the same build agree within 0.7% (`4b3834a`) and 0.11% (before). The six fixes remove 3272 instructions per request (3.9% of the before build) and keep behaviour: the full suite passes unchanged (2856 tests, 2 skipped). The fixes are the places where the request path did work it did not need. Two wrapper futures were boxed per request. The path was normalized twice and rebuilt even when it was already normal. The pool partition hashed three strings and parsed two header names per request. A response parsed `Cache-Control` before looking for a skew secret that nearly every snapshot lacks. The upstream peer was moved by value through a closure, a tuple and an error mapping. Readiness of a single revision was evaluated twice.
+
+What is left, 5841 instructions per request (7.8%) above `4b3834a`, is features and safety checks that build lacked, kept on purpose (the full list with costs is in the commit history). The largest are the per-tenant fair queue and budget at admission (about 723), route selection through the path router and the service graph (about 1000), upstream pool isolation and the address policy (about 1050: no connection crosses tenant, app, revision or transport; a connection that carried NTLM or Negotiate is pinned; every dialled address is checked), the two extra layers around the Pingora app for the entry point policy and the PROXY protocol gate (about 800), stripping forged `X-Forwarded-*` headers (316, on even with forwarding off), logging and response head work (about 960) and larger moves and allocator work (about 1400). The number of allocation calls per request is the same as `4b3834a`'s (85.4 against 85.0).
+
+Timing, to see whether the count shows up in CPU. `h1-c64`, 10 s runs after a 2 s warm-up, one fresh process start per run, `PODGATE_NO_TLS=1`, interleaved O B N F, O B N F, ... for 8 rounds. O is `4b3834a`, B the before build (`ec6a8a4`), N the build after the fixes (`4caca61`), all with forwarding off; F is N with forwarding on. All release builds with the shipped profile. Loadavg 1.3 to 3.7 and 0.23 to 1.09 foreign cores before each start (other work on the same machine, which the interleaving shares among the variants); 0 non-2xx and 0 errors in the 31 starts. F started 7 times, because its 8th start did not get its port. Data: [`series-2.jsonl`](../bench/results/2026-11-22-0120/series-2.jsonl); an earlier series of 7 rounds without B (O, N, F) is in `series-1.jsonl` and agrees.
+
+|Variant|Starts|req/s, median (range)|CPU s/100k req, median (range)|Voluntary switches per 1000 req, median|
+|---|---|---|---|---|
+|O: `4b3834a`, forwarding off|8|238.4 k (184.4 k to 250.5 k)|1.322 (1.299 to 1.601)|244|
+|B: before the fixes, forwarding off|8|226.6 k (207.4 k to 230.3 k)|1.454 (1.426 to 1.565)|238|
+|N: after the fixes, forwarding off|8|234.2 k (227.6 k to 240.5 k)|1.398 (1.364 to 1.428)|223|
+|F: after the fixes, forwarding on|7|196.3 k (142.7 k to 200.0 k)|1.692 (1.669 to 1.824)|424|
+
+Between B and N the median CPU per request falls 3.8% (1.454 to 1.398) and the median throughput rises 3.4% (226.6 k to 234.2 k). Counting pairs of starts, B's CPU per request is below N's in 1 of 64 pairs and B's throughput below N's in 61 of 64 (exact rank-sum probability about 0.0003 and 0.001, two-sided). But the ranges overlap (B's lowest CPU is 1.426, N's highest 1.428) and N's own starts span 4.6%. By this page's rule, a difference counts as a verdict only when the ranges are apart, so the gain is small and probably real, not a verdict. N stays 5.7% above O in CPU per request (1.398 against 1.322) and 1.8% below it in throughput (234.2 k against 238.4 k); O's range is wide because 2 of its 8 starts ran at 184.4 k and 224 k. Against the instruction counts, the gap to O closes from 12.2% to 7.8% and in CPU from 10.0% to 5.7%.
+
+The count and the clock do not move one for one. The 4 proxy CPUs spend about 56% in user space, 25% in system and 14.5% in softirq in B and N, so 3.9% fewer user instructions is at most about 2.2% of the CPU if everything else stayed the same. The measured fall is larger, 3.8%. [INFERENCE] The removed work (allocations, copies of large structures) costs more per instruction than the average, or the 8 starts per variant are noisier than their ranges say. Not resolved. The limiter in all four variants is the proxy CPUs (3.3 of 4 cores busy, 2% idle), as in "What limited each result".
+
+Forwarding on costs 21% more CPU per request in this series (1.692 against 1.398) and 16% of the throughput (196.3 k against 234.2 k); change 0115 measured 20 to 25% at its tip. The 8th start of F failed because its port was taken, and its range includes one slow start at 142.7 k.
+
+The full `scripts/bench-proxies.sh` run of change 0116 was not repeated. The verdict tables above describe a build close to the B variant, and N is 3.4% faster at `h1-c64` by the medians here. That changes no verdict except possibly `h1-16k` against Traefik, where the page says "inconclusive" and a few percent could make it "faster".
+
 ## What limited each result
 
 Why not double? Each number has a limiter, measured and not assumed.
@@ -328,3 +364,5 @@ Takes about 36 minutes. `SCENARIOS`, `RUNS`, `DURATION`, `PROXIES`, `PROXY_CPUS`
 Change 0121's passes are in `bench/results/2026-11-22-0121/`: `udp-pool-a.jsonl`, `udp-pool-b.jsonl`, `h3-pool-a.jsonl`, `h3-pool-b.jsonl` and `udp-pool-a-fwd-on.jsonl` (every run of every start, labelled by variant and start, with the console summary of each series in the `-log.txt` next to it). They are produced like the others, one start per invocation: `PROXIES=podgate SCENARIOS=h1-c64 RUNS=1 DURATION=10 PODGATE_BIN=<binary> SNAPSHOT_TEMPLATE=bench/podgate-snapshot-noforward.json.in PODGATE_UDP=1 scripts/bench-proxies.sh` (or `PODGATE_H3=1`, or `SCENARIOS=udp-echo`, `SCENARIOS=h3-c64`), after `cargo build --release --bin podgate --example fast_upstream --example bench_cert --example load_bench`.
 
 The charts in `docs/benchmarks/` come from the same result files. `scripts/bench-charts.sh` redraws them from the newest `bench/results/<date>/runs.jsonl` (and the `attribution.jsonl` next to it, or the newest one there is), `scripts/bench-charts.sh <results dir>` from another run, and `scripts/bench-charts.sh --check` (part of `check`) fails when a chart no longer matches its results.
+
+Instructions per request, which machine load does not disturb: build with symbols in a target directory of its own (`CARGO_TARGET_DIR=target/cg CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --bin podgate --example fast_upstream`), then `PODGATE_BIN=target/cg/release/podgate UPSTREAM_BIN=target/cg/release/examples/fast_upstream flock ~/.cache/podgate-cargo.lock scripts/bench-callgrind.sh` inside `devenv shell`. It prints the instructions per request and writes the dump and the `callgrind_annotate` listings to `OUT`; the data of the 0120 timing series is in `bench/results/2026-11-22-0120/` (`series-1.jsonl` and `series-2.jsonl`, one line per fresh start, labelled `variant` and `start`; neither file is named `runs.jsonl`, so the charts ignore them).
