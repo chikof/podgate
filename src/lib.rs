@@ -128,7 +128,8 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `FASTCGI_FILE`, `RATE_LIMIT_STORES_FILE` or
+/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `FASTCGI_FILE`, `BACKEND_LIMITER_FILE`,
+/// `RATE_LIMIT_STORES_FILE` or
 /// `DASHBOARD_AUTH_FILE` is invalid, a non-loopback `DASHBOARD_ADDR` has no
 /// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
 /// bound, a TLS listener
@@ -140,6 +141,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let resolver = service::resolve::Resolver::new(config.dns.clone(), upstream_policy.clone());
     let static_roots = config.static_roots()?;
     let fastcgi = config.fastcgi()?;
+    let backend_limiter = config.backend_limiter()?;
     let rate_limit_stores = config.rate_limit_stores()?;
     let spiffe = config.spiffe()?;
     let plugins = config.plugins()?;
@@ -173,7 +175,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         config.node_name.clone(),
         config.acme_ca_file.clone(),
     );
-    let backends = Backends::new();
+    let backends = Backends::with_settings(backend_limiter);
     let staples = tls::ocsp::Staples::default();
     let access_log = AccessLog::new();
     let access_sink: Box<dyn observe::access_log::LineSink> = match &config.access_log_file {

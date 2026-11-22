@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::acme;
 use crate::entry::{self, EntryPoint};
+use crate::fairq::Settings as BackendLimiterSettings;
 use crate::h3;
 use crate::middleware::basic_auth::Htpasswd;
 use crate::middleware::plugin::Plugins;
@@ -107,6 +108,7 @@ const _: () =
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
 /// | `FASTCGI_FILE` | unset | JSON file with the PHP-FPM (or other FastCGI) applications `fastcgi` services may run, `{"<tenant id>": {"<name>": {"address": "unix:/run/php/acme.sock" or "127.0.0.1:9000", "root": "/absolute/dir", "max_connections": 16, "dial_timeout_secs": 3, "read_timeout_secs": 30}}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names an entry of its own tenant and never supplies an address or a root. Unset: no tenant has a FastCGI upstream. Reference: `docs/ref/svc-fastcgi.md`. |
+/// | `BACKEND_LIMITER_FILE` | unset | JSON file with the operator's settings for the per-backend adaptive limiter and fair queue, `{"default": {"max_limit": 512}, "backends": {"10.0.0.0/8": {"queue_wait_ms": 1000}, "10.1.2.3:8080": {"enabled": false}}}`, read once at startup; a bad field stops startup. Fields: `enabled`, `initial_limit`, `min_limit`, `max_limit`, `window_samples`, `tolerance`, `min_gradient`, `smoothing`, `baseline_drift`, `queue_size`, `queue_wait_ms`. An entry is an exact `ip:port`, a CIDR or a bare address, and the most specific one wins field by field. `enabled: false` means no adaptive limit and no queue; the tenant's `max_inflight` still applies. Never part of a snapshot. Unset: every backend runs with the built-in values. Reference: `docs/ref/backend-limiter.md`. |
 /// | `RATE_LIMIT_STORES_FILE` | unset | JSON file with the Redis-compatible stores cluster-scope `rate_limit` middlewares may use, `{"<store>": {"url": "redis[s]://host[:port]", "username": "...", "password_file": "...", "tls_ca_file": "...", "tenants": ["<tenant id>"], "max_connections": 16, "timeout_ms": 20}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names a store and only for the tenants its entry lists. `rediss://` needs `tls_ca_file`. Unset: no cluster-scope limit can compile. Reference: `docs/ref/ratelimit-cluster.md`. |
 /// | `PLUGINS_FILE` | unset | JSON file with the out-of-process plugins `plugin` middlewares may use, `{"<plugin>": {"socket": "/run/podgate/plugins/x.sock", "tenants": ["<tenant id>"], "managed": true, "command": "/opt/x", "args": [], "env": {}, "user": "x", "group": "x", "limits": {"memory_max_bytes": 268435456, "pids_max": 64, "cpu_percent": 100}, "max_concurrent": 256}}`, read once at startup; a bad entry stops startup, as does a plugin that does not answer `Describe` within 5 seconds. Never part of a snapshot, which names a plugin and only for the tenants its entry lists. A managed plugin is started and restarted by podgate; an unmanaged one is run by the operator. Unset: no `plugin` middleware can compile. Reference: `docs/ref/mw-plugin.md`. |
 /// | `PLUGINS_CGROUP_ROOT` | unset | A delegated cgroup v2 directory in which podgate creates one cgroup per managed plugin to write its `memory.max`, `pids.max` and `cpu.max` into. Unset: a plugin entry that declares `limits` stops startup. Needs `PLUGINS_FILE`. |
@@ -197,6 +199,9 @@ pub struct Config {
     /// File with the FastCGI applications and code roots of `fastcgi` services, per tenant.
     /// Absent: none. Read once at startup by [`Config::fastcgi`].
     pub fastcgi_file: Option<PathBuf>,
+    /// File with the operator's settings of the per-backend limiter. Absent: the built-in
+    /// values. Read once at startup by [`Config::backend_limiter`].
+    pub backend_limiter_file: Option<PathBuf>,
     /// File with the stores of cluster-scope `rate_limit` middlewares. Absent: none. Read once at
     /// startup by [`Config::rate_limit_stores`].
     pub rate_limit_stores_file: Option<PathBuf>,
@@ -251,6 +256,7 @@ impl Default for Config {
             otel: ExportConfig::default(),
             static_roots_file: None,
             fastcgi_file: None,
+            backend_limiter_file: None,
             rate_limit_stores_file: None,
             plugins_file: None,
             plugins_cgroup_root: None,
@@ -366,6 +372,23 @@ impl Config {
             Some(path) => FastcgiRoots::load(path).map_err(|err| ConfigError {
                 var: "FASTCGI_FILE",
                 reason: err.to_string().into(),
+            }),
+        }
+    }
+
+    /// Loads the backend limiter settings: the file named by `BACKEND_LIMITER_FILE`, or the
+    /// built-in values when it is unset.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `BACKEND_LIMITER_FILE` when the file cannot be read or is invalid;
+    /// the reason names the file and the field that is wrong.
+    pub fn backend_limiter(&self) -> Result<BackendLimiterSettings, ConfigError> {
+        match &self.backend_limiter_file {
+            None => Ok(BackendLimiterSettings::default()),
+            Some(path) => BackendLimiterSettings::load(path).map_err(|err| ConfigError {
+                var: "BACKEND_LIMITER_FILE",
+                reason: format!("{}: {err}", path.display()).into(),
             }),
         }
     }
@@ -716,6 +739,7 @@ impl Config {
         config.otel = ExportConfig::from_lookup(&lookup)?;
         config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
         config.fastcgi_file = non_empty("FASTCGI_FILE")?.map(PathBuf::from);
+        config.backend_limiter_file = non_empty("BACKEND_LIMITER_FILE")?.map(PathBuf::from);
         config.rate_limit_stores_file = non_empty("RATE_LIMIT_STORES_FILE")?.map(PathBuf::from);
         config.plugins_file = non_empty("PLUGINS_FILE")?.map(PathBuf::from);
         config.plugins_cgroup_root = non_empty("PLUGINS_CGROUP_ROOT")?.map(PathBuf::from);
@@ -780,6 +804,7 @@ mod test {
             ("DNS_MAX_QUERIES_PER_SEC", "7"),
             ("STATIC_ROOTS_FILE", "/etc/podgate/static-roots.json"),
             ("FASTCGI_FILE", "/etc/podgate/fastcgi.json"),
+            ("BACKEND_LIMITER_FILE", "/etc/podgate/backend-limiter.json"),
             ("RATE_LIMIT_STORES_FILE", "/etc/podgate/limit-stores.json"),
             ("PLUGINS_FILE", "/etc/podgate/plugins.json"),
             ("PLUGINS_CGROUP_ROOT", "/sys/fs/cgroup/podgate"),
@@ -838,6 +863,7 @@ mod test {
                 },
                 static_roots_file: Some(PathBuf::from("/etc/podgate/static-roots.json")),
                 fastcgi_file: Some(PathBuf::from("/etc/podgate/fastcgi.json")),
+                backend_limiter_file: Some(PathBuf::from("/etc/podgate/backend-limiter.json")),
                 rate_limit_stores_file: Some(PathBuf::from("/etc/podgate/limit-stores.json")),
                 plugins_file: Some(PathBuf::from("/etc/podgate/plugins.json")),
                 plugins_cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/podgate")),
@@ -908,6 +934,7 @@ mod test {
             ("UPSTREAM_POOL_SIZE", "many"),
             ("STATIC_ROOTS_FILE", " "),
             ("FASTCGI_FILE", " "),
+            ("BACKEND_LIMITER_FILE", " "),
             ("RATE_LIMIT_STORES_FILE", " "),
             ("PLUGINS_FILE", " "),
             ("PLUGINS_CGROUP_ROOT", " "),
@@ -1012,5 +1039,34 @@ mod test {
             let err = config(&[("TLS_MIN_VERSION", bad)]).expect_err(bad);
             assert_eq!(err.var, "TLS_MIN_VERSION", "{bad:?}");
         }
+    }
+
+    #[test]
+    fn backend_limiter_file_names_the_variable_the_file_and_the_field() {
+        assert!(
+            Config::default().backend_limiter().is_ok(),
+            "no file: the built-in settings"
+        );
+        let dir = std::env::temp_dir().join(format!("podgate-limiter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file = dir.join("backend-limiter.json");
+        let mut config = Config {
+            backend_limiter_file: Some(file.clone()),
+            ..Config::default()
+        };
+        std::fs::write(&file, r#"{"default": {"max_limit": 99}}"#).expect("write");
+        assert!(config.backend_limiter().is_ok());
+        std::fs::write(&file, r#"{"default": {"max_limit": -1}}"#).expect("write");
+        let err = config.backend_limiter().expect_err("a negative limit");
+        assert_eq!(err.var, "BACKEND_LIMITER_FILE");
+        let text = err.to_string();
+        assert!(
+            text.contains(&file.display().to_string()) && text.contains("default.max_limit"),
+            "{text}"
+        );
+        config.backend_limiter_file = Some(dir.join("missing.json"));
+        let err = config.backend_limiter().expect_err("no such file");
+        assert!(err.to_string().contains("missing.json"), "{err}");
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

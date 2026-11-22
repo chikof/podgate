@@ -154,6 +154,18 @@ impl Cidr {
         }
     }
 
+    /// The first address of the range.
+    #[must_use]
+    pub fn network(&self) -> IpAddr {
+        self.network
+    }
+
+    /// The number of leading bits the range fixes.
+    #[must_use]
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+
     /// Whether `ip` is inside the range. An address of the other family never is.
     #[must_use]
     pub fn contains(&self, ip: IpAddr) -> bool {
@@ -259,7 +271,7 @@ struct EntryFile {
 
 /// A JSON object read as a list of pairs, so a repeated key is an error instead of the last
 /// one winning.
-struct Pairs<T>(Vec<(String, T)>);
+pub(crate) struct Pairs<T>(pub(crate) Vec<(String, T)>);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Pairs<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -277,9 +289,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Pairs<T> {
                 let mut pairs = Vec::new();
                 while let Some((key, value)) = map.next_entry::<String, T>()? {
                     if !seen.insert(key.clone()) {
-                        return Err(serde::de::Error::custom(format!(
-                            "tenant {key:?} appears twice"
-                        )));
+                        return Err(serde::de::Error::custom(format!("{key:?} appears twice")));
                     }
                     pairs.push((key, value));
                 }

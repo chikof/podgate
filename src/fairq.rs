@@ -54,6 +54,16 @@
 //! to a waiter, and when a waiter gives up. Latency samples are summed in atomics; the thread
 //! that completes a window updates the estimate under `try_lock`, so no request ever blocks on
 //! it.
+//!
+//! # Operator settings
+//!
+//! Every constant below is a default. The operator can change it for all backends or for chosen
+//! upstream addresses with `BACKEND_LIMITER_FILE` ([`Settings`], `docs/ref/backend-limiter.md`),
+//! or turn the limiter off for an address: its limit is then [`UNLIMITED`], it is never updated
+//! and nothing queues, while the tenant's `max_inflight` still applies. The settings of an
+//! address are resolved when its limiter is created; a snapshot cannot change them.
+
+mod settings;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{self, Write as _};
@@ -69,8 +79,14 @@ use crate::error::AppError;
 use crate::route::Selected;
 use crate::table::{CompiledApp, RoutingTable};
 
+use settings::{Gradient, Tunables};
+pub use settings::{Settings, SettingsError};
+
+/// The limit of a backend whose limiter is turned off: every request is admitted at once.
+pub const UNLIMITED: u32 = u32::MAX;
+
 /// Limit a new backend starts with.
-const INITIAL_LIMIT: f64 = 32.0;
+const INITIAL_LIMIT: u32 = 32;
 /// The limit never falls below this, so a backend with a bad window still gets traffic to
 /// measure.
 pub const MIN_LIMIT: u32 = 4;
@@ -98,15 +114,22 @@ const MAX_WEIGHT: u32 = 65_535;
 /// The gradient estimate. Pure, so tests feed it latencies directly.
 #[derive(Debug)]
 struct Estimator {
+    gradient: Gradient,
     limit: f64,
     /// Baseline latency in nanoseconds; `0` until the first window.
     min_rtt: f64,
 }
 
 impl Estimator {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with(Gradient::default())
+    }
+
+    fn with(gradient: Gradient) -> Self {
         Self {
-            limit: INITIAL_LIMIT,
+            gradient,
+            limit: f64::from(gradient.initial_limit),
             min_rtt: 0.0,
         }
     }
@@ -114,33 +137,42 @@ impl Estimator {
     /// Folds in one window: its mean latency in nanoseconds and the peak in-flight count seen in
     /// it. Returns the new limit.
     fn update(&mut self, short_rtt: f64, peak_inflight: u32) -> u32 {
+        let Gradient {
+            min_limit,
+            max_limit,
+            tolerance,
+            min_gradient,
+            smoothing,
+            baseline_drift,
+            ..
+        } = self.gradient;
         if short_rtt > 0.0 {
             // At the floor the backend has almost no concurrency to queue behind, so its latency
             // is its own: adopt it. Above the floor the baseline only creeps up, so queueing
             // caused by too high a limit is not mistaken for the normal latency.
-            let at_floor = self.current() <= MIN_LIMIT;
+            let at_floor = self.current() <= min_limit;
             self.min_rtt = if self.min_rtt > 0.0 && !at_floor {
-                short_rtt.min(self.min_rtt * BASELINE_DRIFT)
+                short_rtt.min(self.min_rtt * baseline_drift)
             } else {
                 short_rtt
             };
-            let gradient = (TOLERANCE * self.min_rtt / short_rtt).clamp(MIN_GRADIENT, 1.0);
+            let gradient = (tolerance * self.min_rtt / short_rtt).clamp(min_gradient, 1.0);
             let target = self.limit.mul_add(gradient, self.limit.sqrt());
             let under_used = f64::from(peak_inflight) < self.limit / 2.0;
             if !(target > self.limit && under_used) {
-                self.limit = self.limit.mul_add(1.0 - SMOOTHING, target * SMOOTHING);
+                self.limit = self.limit.mul_add(1.0 - smoothing, target * smoothing);
             }
-            self.limit = self.limit.clamp(f64::from(MIN_LIMIT), f64::from(MAX_LIMIT));
+            self.limit = self.limit.clamp(f64::from(min_limit), f64::from(max_limit));
         }
         self.current()
     }
 
     fn current(&self) -> u32 {
-        // The limit is clamped to [MIN_LIMIT, MAX_LIMIT] and finite, so the cast is exact.
+        // The limit is clamped to [min_limit, max_limit] and finite, so the cast is exact.
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "limit is clamped to [MIN_LIMIT, MAX_LIMIT]"
+            reason = "limit is clamped to [min_limit, max_limit]"
         )]
         let limit = self.limit.round() as u32;
         limit
@@ -164,14 +196,30 @@ struct TenantQueue {
 }
 
 /// Per-tenant FIFO queues served in weighted-fair order. Holds no empty queue.
-#[derive(Default)]
 struct Queues {
+    /// Most requests one tenant may have waiting.
+    cap: usize,
     virtual_time: u64,
     next_ticket: u64,
     tenants: Vec<TenantQueue>,
 }
 
+impl Default for Queues {
+    fn default() -> Self {
+        Self::with_cap(QUEUE_CAP)
+    }
+}
+
 impl Queues {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            cap,
+            virtual_time: 0,
+            next_ticket: 0,
+            tenants: Vec::new(),
+        }
+    }
+
     fn has_waiters(&self) -> bool {
         !self.tenants.is_empty()
     }
@@ -179,6 +227,11 @@ impl Queues {
     /// Queues a request of `tenant` and returns its ticket, or `None` when the tenant's queue is
     /// full.
     fn push(&mut self, tenant: &str, weight: u32, grant: oneshot::Sender<Permit>) -> Option<u64> {
+        let cap = self.cap;
+        if cap == 0 {
+            // No queue: not even an empty one is left behind.
+            return None;
+        }
         let index = match self.tenants.iter().position(|queue| &*queue.id == tenant) {
             Some(index) => index,
             None => {
@@ -191,7 +244,7 @@ impl Queues {
             }
         };
         let queue = self.tenants.get_mut(index)?;
-        if queue.waiters.len() >= QUEUE_CAP {
+        if queue.waiters.len() >= cap {
             return None;
         }
         let start = self.virtual_time.max(queue.last_finish);
@@ -273,7 +326,18 @@ pub struct Limiter {
     queues: Mutex<Queues>,
     waited: AtomicU64,
     refused: AtomicU64,
+    /// Latency samples per estimate update.
+    window: u32,
+    /// Longest a request waits for a slot.
+    queue_wait: Duration,
+    /// `false`: the limit is [`UNLIMITED`], never updated, and nothing ever queues.
+    adaptive: bool,
 }
+
+// 200: the atomics (44 bytes), the estimator and the queues behind their mutexes (72 and 56), the
+// resolved settings (queue wait 16, window 4) and the `adaptive` flag. One per backend address.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<Limiter>() == 200);
 
 impl fmt::Debug for Limiter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -286,22 +350,41 @@ impl fmt::Debug for Limiter {
 }
 
 impl Limiter {
-    /// A limiter at the initial limit.
+    /// A limiter at the initial limit, with the built-in settings.
     #[must_use]
     pub fn new() -> Arc<Self> {
-        let estimator = Estimator::new();
+        Self::with(&Tunables::default())
+    }
+
+    /// A limiter running with `tunables`.
+    pub(crate) fn with(tunables: &Tunables) -> Arc<Self> {
+        let estimator = Estimator::with(tunables.gradient);
+        let limit = if tunables.enabled {
+            estimator.current()
+        } else {
+            UNLIMITED
+        };
         Arc::new(Self {
-            limit: AtomicU32::new(estimator.current()),
+            limit: AtomicU32::new(limit),
             inflight: AtomicU32::new(0),
             queued: AtomicU32::new(0),
             window_samples: AtomicU32::new(0),
             window_nanos: AtomicU64::new(0),
             window_peak: AtomicU32::new(0),
             estimator: Mutex::new(estimator),
-            queues: Mutex::new(Queues::default()),
+            queues: Mutex::new(Queues::with_cap(tunables.queue_size)),
             waited: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            window: tunables.window_samples,
+            queue_wait: tunables.queue_wait,
+            adaptive: tunables.enabled,
         })
+    }
+
+    /// The longest a request waits here for a slot.
+    #[must_use]
+    pub fn queue_wait(&self) -> Duration {
+        self.queue_wait
     }
 
     /// The current concurrency limit.
@@ -426,14 +509,18 @@ impl Limiter {
         drop(spare);
     }
 
-    /// Records the upstream latency of one response. Every `WINDOW` samples the estimate is
-    /// updated and, when the limit rose, waiters are served.
+    /// Records the upstream latency of one response. Every `window_samples` samples the estimate
+    /// is updated and, when the limit rose, waiters are served. Does nothing when the limiter is
+    /// not adaptive.
     pub fn record(self: &Arc<Self>, rtt: Duration) {
+        if !self.adaptive {
+            return;
+        }
         let nanos = u64::try_from(rtt.as_nanos()).unwrap_or(u64::MAX);
         self.window_peak
             .fetch_max(self.inflight.load(Ordering::Relaxed), Ordering::Relaxed);
         self.window_nanos.fetch_add(nanos, Ordering::Relaxed);
-        if self.window_samples.fetch_add(1, Ordering::Relaxed) + 1 < WINDOW {
+        if self.window_samples.fetch_add(1, Ordering::Relaxed) + 1 < self.window {
             return;
         }
         let mut estimator = match self.estimator.try_lock() {
@@ -545,7 +632,8 @@ struct Shared {
     limiters: ArcSwap<Registry>,
     /// Serializes registry changes.
     writer: Mutex<()>,
-    max_wait: Duration,
+    /// The operator's settings, resolved per address when its limiter is created.
+    settings: Settings,
 }
 
 /// The limiters of every backend. Cheap to clone; every clone is the same registry.
@@ -561,20 +649,21 @@ impl Default for Backends {
 }
 
 impl Backends {
-    /// An empty registry; requests wait at most [`MAX_WAIT`].
+    /// An empty registry whose limiters run with the built-in settings.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_max_wait(MAX_WAIT)
+        Self::with_settings(Settings::default())
     }
 
-    /// An empty registry whose waiting requests give up after `max_wait`.
+    /// An empty registry whose limiters run with `settings`: each address gets the values
+    /// [`Settings`] resolves for it when its limiter is created.
     #[must_use]
-    pub fn with_max_wait(max_wait: Duration) -> Self {
+    pub fn with_settings(settings: Settings) -> Self {
         Self {
             shared: Arc::new(Shared {
                 limiters: ArcSwap::from_pointee(Registry::new()),
                 writer: Mutex::new(()),
-                max_wait,
+                settings,
             }),
         }
     }
@@ -606,7 +695,7 @@ impl Backends {
             })
             .map(|(known, limiter)| (*known, Arc::clone(limiter)))
             .collect();
-        let limiter = Limiter::new();
+        let limiter = Limiter::with(&self.shared.settings.resolve(addr));
         next.insert(addr, Arc::clone(&limiter));
         self.shared.limiters.store(Arc::new(next));
         limiter
@@ -637,7 +726,7 @@ impl Backends {
         };
         let weight = table.tenant_weight(tenant).unwrap_or(1);
         let limiter = self.limiter(table, selected.upstream);
-        match limiter.admit(tenant, weight, self.shared.max_wait).await {
+        match limiter.admit(tenant, weight, limiter.queue_wait()).await {
             Ok(permit) => Ok(Slot {
                 permit: Some(permit),
                 connected_at: None,
@@ -954,5 +1043,276 @@ mod test {
         assert_eq!(limiter.queued(), 0, "an aborted request leaves the queue");
         drop(held);
         assert_eq!(limiter.inflight(), 0);
+    }
+
+    fn backends_with(json: &str) -> Backends {
+        Backends::with_settings(Settings::parse(json).expect("settings"))
+    }
+
+    fn limiter_of(backends: &Backends, addr: &str) -> Arc<Limiter> {
+        backends.limiter(&RoutingTable::default(), addr.parse().expect("address"))
+    }
+
+    /// A limiter for `json`'s default block, with every slot held.
+    fn full(json: &str) -> (Arc<Limiter>, Vec<Permit>) {
+        let limiter = limiter_of(&backends_with(json), "10.0.0.1:80");
+        let held = (0..limiter.limit())
+            .map(|_| limiter.try_acquire().expect("slot"))
+            .collect();
+        (limiter, held)
+    }
+
+    /// The limit after one fast window and `windows` slower ones, with the backend fully used.
+    fn limit_after_slowdown(json: &str, windows: u32) -> u32 {
+        let (limiter, held) = full(json);
+        let window = limiter.window;
+        for _ in 0..window {
+            limiter.record(Duration::from_millis(10));
+        }
+        for _ in 0..window * windows {
+            limiter.record(Duration::from_millis(40));
+        }
+        drop(held);
+        limiter.limit()
+    }
+
+    #[test]
+    fn settings_default_limiter_is_the_built_in_one() {
+        let limiter = limiter_of(&Backends::new(), "10.0.0.1:80");
+        assert_eq!(limiter.limit(), 32);
+        assert_eq!(limiter.queue_wait(), MAX_WAIT);
+        assert_eq!(limiter.window, WINDOW);
+        assert!(limiter.adaptive);
+        let from_empty_file = limiter_of(&backends_with("{}"), "10.0.0.1:80");
+        assert_eq!(from_empty_file.limit(), 32);
+        assert_eq!(from_empty_file.queue_wait(), MAX_WAIT);
+    }
+
+    #[tokio::test]
+    async fn settings_disabled_backend_never_queues_or_refuses() {
+        let backends = backends_with(r#"{"backends": {"10.0.0.0/8": {"enabled": false}}}"#);
+        let table = RoutingTable::default();
+        let free: SocketAddr = "10.1.1.1:80".parse().expect("address");
+        let bound: SocketAddr = "192.168.0.1:80".parse().expect("address");
+
+        let permits: Vec<_> = (0..500)
+            .map(|_| backends.try_admit(&table, free).expect("a slot, always"))
+            .collect();
+        let limiter = limiter_of(&backends, "10.1.1.1:80");
+        assert_eq!(limiter.inflight(), 500);
+        assert_eq!(limiter.queued(), 0);
+        assert!(
+            limiter
+                .admit("a", 1, Duration::from_millis(20))
+                .await
+                .is_ok(),
+            "admitted at once"
+        );
+        for _ in 0..1000 {
+            limiter.record(Duration::from_secs(10));
+        }
+        assert_eq!(limiter.limit(), UNLIMITED, "latency never changes it");
+
+        // The same requests on a backend the file does not turn off: the limit holds them back.
+        let held: Vec<_> = (0..32)
+            .map(|_| backends.try_admit(&table, bound).expect("a slot"))
+            .collect();
+        assert!(backends.try_admit(&table, bound).is_none(), "at the limit");
+        let limited = limiter_of(&backends, "192.168.0.1:80");
+        assert_eq!(
+            limited.admit("a", 1, Duration::from_millis(20)).await.err(),
+            Some(Refusal::Timeout)
+        );
+        drop((permits, held));
+
+        let metrics = backends.render();
+        assert!(
+            metrics.contains("podgate_backend_limit{backend=\"10.1.1.1:80\"} 4294967295\n"),
+            "{metrics}"
+        );
+        for family in ["inflight", "queued", "waited_total", "refused_total"] {
+            assert!(
+                metrics.contains(&format!(
+                    "podgate_backend_{family}{{backend=\"10.1.1.1:80\"}} "
+                )),
+                "{family}: {metrics}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_initial_limit_per_entry() {
+        let backends = backends_with(
+            r#"{"default": {"initial_limit": 12},
+                "backends": {"10.0.0.0/8": {"initial_limit": 20}, "10.1.2.3:80": {"initial_limit": 30}}}"#,
+        );
+        assert_eq!(limiter_of(&backends, "192.168.0.1:80").limit(), 12);
+        assert_eq!(limiter_of(&backends, "10.9.9.9:80").limit(), 20);
+        assert_eq!(limiter_of(&backends, "10.1.2.3:80").limit(), 30);
+        assert_eq!(limiter_of(&backends, "10.1.2.3:81").limit(), 20);
+    }
+
+    /// Feeds `windows` windows of constant latency, taking slots up to the limit before each so
+    /// the backend counts as fully used. Returns the lowest and the last limit.
+    fn drive(limiter: &Arc<Limiter>, rtt: Duration, windows: u32) -> (u32, u32) {
+        let mut held = Vec::new();
+        let mut lowest = limiter.limit();
+        for _ in 0..windows {
+            while let Some(permit) = limiter.try_acquire() {
+                held.push(permit);
+            }
+            for _ in 0..limiter.window {
+                limiter.record(rtt);
+            }
+            lowest = lowest.min(limiter.limit());
+        }
+        (lowest, limiter.limit())
+    }
+
+    #[test]
+    fn settings_max_limit_caps_growth() {
+        let capped = limiter_of(
+            &backends_with(r#"{"default": {"initial_limit": 4, "max_limit": 8}}"#),
+            "10.0.0.1:80",
+        );
+        let (_, last) = drive(&capped, Duration::from_millis(1), 200);
+        assert_eq!(last, 8, "grew to the cap and not past it");
+        let free = limiter_of(
+            &backends_with(r#"{"default": {"initial_limit": 4}}"#),
+            "10.0.0.1:80",
+        );
+        let (_, last) = drive(&free, Duration::from_millis(1), 200);
+        assert!(last > 8, "the built-in cap is far higher: {last}");
+    }
+
+    #[test]
+    fn settings_min_limit_floors_the_shrink() {
+        let floored = limiter_of(
+            &backends_with(r#"{"default": {"min_limit": 20, "initial_limit": 30}}"#),
+            "10.0.0.1:80",
+        );
+        let (lowest, _) = drive(&floored, Duration::from_millis(10), 1);
+        assert_eq!(lowest, 30, "a first window never shrinks");
+        let (lowest, _) = drive(&floored, Duration::from_millis(100), 200);
+        assert_eq!(lowest, 20);
+        let built_in = limiter_of(
+            &backends_with(r#"{"default": {"initial_limit": 30}}"#),
+            "10.0.0.1:80",
+        );
+        drive(&built_in, Duration::from_millis(10), 1);
+        let (lowest, _) = drive(&built_in, Duration::from_millis(100), 200);
+        assert_eq!(lowest, MIN_LIMIT);
+    }
+
+    #[test]
+    fn settings_window_samples_sets_how_often_the_limit_moves() {
+        let moves = |window: &str| {
+            let json =
+                format!(r#"{{"default": {{"initial_limit": 4, "max_limit": 100{window}}}}}"#);
+            let (limiter, held) = full(&json);
+            for _ in 0..16 {
+                limiter.record(Duration::from_millis(1));
+            }
+            drop(held);
+            limiter.limit()
+        };
+        assert!(moves(r#", "window_samples": 2"#) > 4, "8 windows grow it");
+        assert_eq!(moves(""), 4, "one window of 16 moves it by less than 1");
+    }
+
+    #[test]
+    fn settings_gradient_parameters_reach_the_estimate() {
+        let start = r#""initial_limit": 64"#;
+        let built_in = limit_after_slowdown(&format!(r#"{{"default": {{{start}}}}}"#), 10);
+        assert!(built_in < 64, "4x latency shrinks the limit: {built_in}");
+        for (name, extra) in [
+            ("tolerance", r#""tolerance": 10"#),
+            ("min_gradient", r#""min_gradient": 1.0"#),
+            ("baseline_drift", r#""baseline_drift": 2.0"#),
+        ] {
+            let json = format!(r#"{{"default": {{{start}, {extra}}}}}"#);
+            let limit = limit_after_slowdown(&json, 10);
+            assert!(limit >= 64, "{name}: the limit does not shrink: {limit}");
+        }
+        let abrupt = limit_after_slowdown(
+            &format!(r#"{{"default": {{{start}, "smoothing": 1.0}}}}"#),
+            1,
+        );
+        let gentle = limit_after_slowdown(&format!(r#"{{"default": {{{start}}}}}"#), 1);
+        assert!(
+            abrupt < gentle,
+            "smoothing 1.0 moves further: {abrupt} against {gentle}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_queue_size_bounds_each_tenant_queue() {
+        let (limiter, held) = full(r#"{"default": {"initial_limit": 4, "queue_size": 1}}"#);
+        let waiting = {
+            let limiter = Arc::clone(&limiter);
+            tokio::spawn(async move { limiter.admit("a", 1, Duration::from_secs(10)).await })
+        };
+        while limiter.queued() < 1 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            limiter.admit("a", 1, Duration::from_secs(10)).await.err(),
+            Some(Refusal::QueueFull),
+            "the second request of tenant a"
+        );
+        let other = {
+            let limiter = Arc::clone(&limiter);
+            tokio::spawn(async move { limiter.admit("b", 1, Duration::from_secs(10)).await })
+        };
+        while limiter.queued() < 2 {
+            tokio::task::yield_now().await;
+        }
+        drop(held);
+        assert!(waiting.await.expect("task").is_ok());
+        assert!(other.await.expect("task").is_ok());
+    }
+
+    #[tokio::test]
+    async fn settings_queue_size_zero_means_no_queue() {
+        let (limiter, held) = full(r#"{"default": {"initial_limit": 4, "queue_size": 0}}"#);
+        assert_eq!(
+            limiter.admit("a", 1, Duration::from_secs(10)).await.err(),
+            Some(Refusal::QueueFull)
+        );
+        assert_eq!(limiter.queued(), 0);
+        assert!(
+            !limiter.lock_queues().has_waiters(),
+            "no empty queue is left"
+        );
+        drop(held);
+        assert!(
+            limiter
+                .admit("a", 1, Duration::from_millis(20))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_queue_wait_is_the_limiters_own() {
+        let backends = backends_with(
+            r#"{"default": {"initial_limit": 4, "queue_wait_ms": 40},
+                "backends": {"10.9.0.0/16": {"queue_wait_ms": 90}}}"#,
+        );
+        let limiter = limiter_of(&backends, "10.0.0.1:80");
+        assert_eq!(limiter.queue_wait(), Duration::from_millis(40));
+        assert_eq!(
+            limiter_of(&backends, "10.9.0.1:80").queue_wait(),
+            Duration::from_millis(90)
+        );
+        let held: Vec<_> = (0..limiter.limit())
+            .map(|_| limiter.try_acquire().expect("slot"))
+            .collect();
+        let started = Instant::now();
+        let refused = limiter.admit("a", 1, limiter.queue_wait()).await;
+        assert_eq!(refused.err(), Some(Refusal::Timeout));
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(held);
     }
 }
