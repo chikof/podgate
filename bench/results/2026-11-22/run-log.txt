@@ -1,0 +1,298 @@
+== context
+date 2026-11-22T00:51:51Z  kernel Linux 6.18.63  nproc 16  load 0.68 1.26 1.64
+podgate 6920481  v2.11.9  traefik 3.7.16  oha 1.16.0
+cpus: proxy 0-3 (4)  oha 4-5 (2)  backend 6-7
+ports: base 38706  out bench/results/2026-11-22
+podgate pid 2270317 threads 21  idle RSS 16 MiB
+caddy pid 2270318 threads 9  idle RSS 46 MiB
+traefik pid 2270319 threads 9  idle RSS 87 MiB
+probe passed for: podgate caddy traefik
+== h1-c64 (-c 64, 15 s x 5 runs)
+  h1-c64 podgate run 1: 167621 req/s p50 379 us p99 561 us proxy 335% oha 69% backend 41% other-on-proxy-cpus -10% busy-before 0.51 non-2xx 0 errors 0
+  h1-c64 caddy run 1: 127319 req/s p50 370 us p99 1854 us proxy 344% oha 52% backend 31% other-on-proxy-cpus -1% busy-before 0.31 non-2xx 0 errors 0
+  h1-c64 traefik run 1: 187076 req/s p50 287 us p99 1416 us proxy 345% oha 75% backend 46% other-on-proxy-cpus 0% busy-before 0.34 non-2xx 0 errors 0
+  h1-c64 direct run 1: 374071 req/s p50 113 us p99 3119 us proxy 0% oha 102% backend 70% other-on-proxy-cpus 9% busy-before 0.28 non-2xx 0 errors 0
+  h1-c64 podgate run 2: 166913 req/s p50 380 us p99 565 us proxy 335% oha 69% backend 41% other-on-proxy-cpus -10% busy-before 0.30 non-2xx 0 errors 0
+  h1-c64 caddy run 2: 125578 req/s p50 371 us p99 1956 us proxy 342% oha 52% backend 31% other-on-proxy-cpus -1% busy-before 0.28 non-2xx 0 errors 0
+  h1-c64 traefik run 2: 185593 req/s p50 287 us p99 1447 us proxy 343% oha 74% backend 46% other-on-proxy-cpus 0% busy-before 0.30 non-2xx 0 errors 0
+  h1-c64 direct run 2: 451998 req/s p50 112 us p99 186 us proxy 0% oha 131% backend 86% other-on-proxy-cpus 10% busy-before 0.32 non-2xx 0 errors 0
+  h1-c64 podgate run 3: 166061 req/s p50 382 us p99 568 us proxy 335% oha 68% backend 41% other-on-proxy-cpus -10% busy-before 0.30 non-2xx 0 errors 0
+  h1-c64 caddy run 3: 125173 req/s p50 373 us p99 1924 us proxy 342% oha 52% backend 31% other-on-proxy-cpus -1% busy-before 0.32 non-2xx 0 errors 0
+  h1-c64 traefik run 3: 185486 req/s p50 287 us p99 1441 us proxy 345% oha 75% backend 46% other-on-proxy-cpus -1% busy-before 0.29 non-2xx 0 errors 0
+  h1-c64 direct run 3: 396587 req/s p50 115 us p99 259 us proxy 0% oha 114% backend 72% other-on-proxy-cpus 9% busy-before 0.32 non-2xx 0 errors 0
+  h1-c64 podgate run 4: 164452 req/s p50 386 us p99 572 us proxy 335% oha 68% backend 40% other-on-proxy-cpus -12% busy-before 0.30 non-2xx 0 errors 0
+  h1-c64 caddy run 4: 125124 req/s p50 373 us p99 1929 us proxy 345% oha 53% backend 32% other-on-proxy-cpus 0% busy-before 0.30 non-2xx 0 errors 0
+  h1-c64 traefik run 4: 185825 req/s p50 287 us p99 1440 us proxy 345% oha 75% backend 46% other-on-proxy-cpus 0% busy-before 0.24 non-2xx 0 errors 0
+  h1-c64 direct run 4: 444894 req/s p50 112 us p99 191 us proxy 0% oha 128% backend 84% other-on-proxy-cpus 8% busy-before 0.31 non-2xx 0 errors 0
+  h1-c64 podgate run 5: 165985 req/s p50 382 us p99 571 us proxy 336% oha 69% backend 41% other-on-proxy-cpus -10% busy-before 0.29 non-2xx 0 errors 0
+  h1-c64 caddy run 5: 125793 req/s p50 373 us p99 1886 us proxy 344% oha 52% backend 32% other-on-proxy-cpus -1% busy-before 0.28 non-2xx 0 errors 0
+  h1-c64 traefik run 5: 184517 req/s p50 287 us p99 1468 us proxy 345% oha 75% backend 47% other-on-proxy-cpus 0% busy-before 0.34 non-2xx 0 errors 0
+  h1-c64 direct run 5: 421589 req/s p50 112 us p99 227 us proxy 0% oha 122% backend 82% other-on-proxy-cpus 11% busy-before 0.34 non-2xx 0 errors 0
+rate = 62000 requests/s (half the slowest median h1-c64, rounded down to 1000)
+== rate (-c 64 -q 62000 --latency-correction, 15 s x 5 runs)
+  rate podgate run 1: 61992 req/s p50 354 us p99 796 us proxy 130% oha 27% backend 15% other-on-proxy-cpus -10% busy-before 0.29 non-2xx 0 errors 0
+  rate caddy run 1: 61987 req/s p50 446 us p99 2321 us proxy 176% oha 27% backend 15% other-on-proxy-cpus 21% busy-before 0.32 non-2xx 0 errors 0
+  rate traefik run 1: 61991 req/s p50 287 us p99 1677 us proxy 120% oha 26% backend 15% other-on-proxy-cpus -1% busy-before 0.28 non-2xx 0 errors 0
+  rate direct run 1: 61991 req/s p50 148 us p99 345 us proxy 0% oha 26% backend 14% other-on-proxy-cpus 10% busy-before 0.29 non-2xx 0 errors 0
+  rate podgate run 2: 61991 req/s p50 360 us p99 815 us proxy 130% oha 27% backend 15% other-on-proxy-cpus -9% busy-before 0.29 non-2xx 0 errors 0
+  rate caddy run 2: 61993 req/s p50 449 us p99 2379 us proxy 176% oha 27% backend 15% other-on-proxy-cpus 4% busy-before 0.30 non-2xx 0 errors 0
+  rate traefik run 2: 61992 req/s p50 291 us p99 1768 us proxy 121% oha 26% backend 15% other-on-proxy-cpus 1% busy-before 0.32 non-2xx 0 errors 0
+  rate direct run 2: 61992 req/s p50 150 us p99 372 us proxy 0% oha 26% backend 14% other-on-proxy-cpus 9% busy-before 0.28 non-2xx 0 errors 0
+  rate podgate run 3: 61988 req/s p50 365 us p99 807 us proxy 131% oha 27% backend 15% other-on-proxy-cpus -10% busy-before 0.31 non-2xx 0 errors 0
+  rate caddy run 3: 61992 req/s p50 448 us p99 2402 us proxy 176% oha 27% backend 15% other-on-proxy-cpus 22% busy-before 0.32 non-2xx 0 errors 0
+  rate traefik run 3: 61991 req/s p50 288 us p99 1672 us proxy 119% oha 26% backend 15% other-on-proxy-cpus 31% busy-before 0.42 non-2xx 0 errors 0
+  rate direct run 3: 61991 req/s p50 148 us p99 341 us proxy 0% oha 25% backend 14% other-on-proxy-cpus 18% busy-before 0.43 non-2xx 0 errors 0
+  rate podgate run 4: 61993 req/s p50 357 us p99 801 us proxy 129% oha 27% backend 15% other-on-proxy-cpus 21% busy-before 0.30 non-2xx 0 errors 0
+  rate caddy run 4: 61988 req/s p50 471 us p99 2501 us proxy 175% oha 27% backend 15% other-on-proxy-cpus 13% busy-before 0.32 non-2xx 0 errors 0
+  rate traefik run 4: 61993 req/s p50 289 us p99 1734 us proxy 120% oha 26% backend 15% other-on-proxy-cpus -5% busy-before 0.30 non-2xx 0 errors 0
+  rate direct run 4: 61992 req/s p50 149 us p99 344 us proxy 0% oha 25% backend 14% other-on-proxy-cpus 15% busy-before 0.30 non-2xx 0 errors 0
+  rate podgate run 5: 61993 req/s p50 359 us p99 822 us proxy 131% oha 27% backend 15% other-on-proxy-cpus -4% busy-before 0.30 non-2xx 0 errors 0
+  rate caddy run 5: 61991 req/s p50 449 us p99 2284 us proxy 176% oha 27% backend 15% other-on-proxy-cpus 1% busy-before 0.29 non-2xx 0 errors 0
+  rate traefik run 5: 61991 req/s p50 288 us p99 1749 us proxy 120% oha 26% backend 15% other-on-proxy-cpus -3% busy-before 0.32 non-2xx 0 errors 0
+  rate direct run 5: 61994 req/s p50 149 us p99 358 us proxy 0% oha 26% backend 14% other-on-proxy-cpus 14% busy-before 0.30 non-2xx 0 errors 0
+== h1-c256 (-c 256, 15 s x 5 runs)
+  h1-c256 podgate run 1: 163250 req/s p50 1560 us p99 1822 us proxy 333% oha 68% backend 40% other-on-proxy-cpus -12% busy-before 0.39 non-2xx 0 errors 0
+  h1-c256 caddy run 1: 128937 req/s p50 1742 us p99 5220 us proxy 351% oha 55% backend 32% other-on-proxy-cpus -1% busy-before 0.33 non-2xx 0 errors 0
+  h1-c256 traefik run 1: 185180 req/s p50 1245 us p99 4326 us proxy 345% oha 77% backend 47% other-on-proxy-cpus -1% busy-before 0.29 non-2xx 0 errors 0
+  h1-c256 direct run 1: 479502 req/s p50 471 us p99 4335 us proxy 0% oha 147% backend 91% other-on-proxy-cpus 14% busy-before 0.36 non-2xx 0 errors 0
+  h1-c256 podgate run 2: 162506 req/s p50 1567 us p99 1798 us proxy 333% oha 68% backend 40% other-on-proxy-cpus -11% busy-before 0.32 non-2xx 0 errors 0
+  h1-c256 caddy run 2: 127139 req/s p50 1746 us p99 5708 us proxy 346% oha 54% backend 32% other-on-proxy-cpus 0% busy-before 0.32 non-2xx 0 errors 0
+  h1-c256 traefik run 2: 184956 req/s p50 1248 us p99 4270 us proxy 347% oha 77% backend 47% other-on-proxy-cpus 0% busy-before 0.48 non-2xx 0 errors 0
+  h1-c256 direct run 2: 481483 req/s p50 473 us p99 2051 us proxy 0% oha 147% backend 95% other-on-proxy-cpus 9% busy-before 0.31 non-2xx 0 errors 0
+  h1-c256 podgate run 3: 162629 req/s p50 1566 us p99 1809 us proxy 333% oha 68% backend 40% other-on-proxy-cpus -10% busy-before 0.32 non-2xx 0 errors 0
+  h1-c256 caddy run 3: 127083 req/s p50 1753 us p99 5575 us proxy 348% oha 55% backend 32% other-on-proxy-cpus 0% busy-before 0.34 non-2xx 0 errors 0
+  h1-c256 traefik run 3: 183443 req/s p50 1250 us p99 4500 us proxy 343% oha 76% backend 47% other-on-proxy-cpus 0% busy-before 0.37 non-2xx 0 errors 0
+  h1-c256 direct run 3: 448209 req/s p50 472 us p99 4482 us proxy 0% oha 136% backend 87% other-on-proxy-cpus 13% busy-before 0.34 non-2xx 0 errors 0
+  h1-c256 podgate run 4: 162558 req/s p50 1566 us p99 1821 us proxy 333% oha 68% backend 40% other-on-proxy-cpus -12% busy-before 0.32 non-2xx 0 errors 0
+  h1-c256 caddy run 4: 127144 req/s p50 1757 us p99 5444 us proxy 348% oha 54% backend 32% other-on-proxy-cpus -1% busy-before 0.48 non-2xx 0 errors 0
+  h1-c256 traefik run 4: 185038 req/s p50 1246 us p99 4356 us proxy 344% oha 76% backend 47% other-on-proxy-cpus 0% busy-before 0.32 non-2xx 0 errors 0
+  h1-c256 direct run 4: 423881 req/s p50 473 us p99 4547 us proxy 0% oha 129% backend 81% other-on-proxy-cpus 11% busy-before 0.30 non-2xx 0 errors 0
+  h1-c256 podgate run 5: 162336 req/s p50 1567 us p99 1853 us proxy 333% oha 68% backend 40% other-on-proxy-cpus -12% busy-before 0.33 non-2xx 0 errors 0
+  h1-c256 caddy run 5: 127018 req/s p50 1748 us p99 5622 us proxy 348% oha 54% backend 32% other-on-proxy-cpus -1% busy-before 0.29 non-2xx 0 errors 0
+  h1-c256 traefik run 5: 185847 req/s p50 1243 us p99 4262 us proxy 345% oha 77% backend 47% other-on-proxy-cpus 0% busy-before 0.29 non-2xx 0 errors 0
+  h1-c256 direct run 5: 444241 req/s p50 473 us p99 4491 us proxy 0% oha 132% backend 83% other-on-proxy-cpus 7% busy-before 0.33 non-2xx 0 errors 0
+== h1-16k (-c 64, 15 s x 5 runs)
+  h1-16k podgate run 1: 137500 req/s p50 462 us p99 691 us proxy 329% oha 78% backend 41% other-on-proxy-cpus -8% busy-before 0.28 non-2xx 0 errors 0
+  h1-16k caddy run 1: 105165 req/s p50 470 us p99 2347 us proxy 323% oha 79% backend 32% other-on-proxy-cpus -1% busy-before 0.29 non-2xx 0 errors 0
+  h1-16k traefik run 1: 163129 req/s p50 340 us p99 1409 us proxy 335% oha 92% backend 50% other-on-proxy-cpus -1% busy-before 0.32 non-2xx 0 errors 0
+  h1-16k direct run 1: 418233 req/s p50 127 us p99 210 us proxy 0% oha 137% backend 99% other-on-proxy-cpus 8% busy-before 0.29 non-2xx 0 errors 0
+  h1-16k podgate run 2: 137092 req/s p50 463 us p99 679 us proxy 328% oha 78% backend 41% other-on-proxy-cpus -8% busy-before 0.29 non-2xx 0 errors 0
+  h1-16k caddy run 2: 101244 req/s p50 482 us p99 2346 us proxy 319% oha 76% backend 31% other-on-proxy-cpus 0% busy-before 0.32 non-2xx 0 errors 0
+  h1-16k traefik run 2: 159800 req/s p50 337 us p99 1574 us proxy 334% oha 89% backend 48% other-on-proxy-cpus 0% busy-before 0.30 non-2xx 0 errors 0
+  h1-16k direct run 2: 357138 req/s p50 128 us p99 849 us proxy 0% oha 116% backend 85% other-on-proxy-cpus 8% busy-before 0.30 non-2xx 0 errors 0
+  h1-16k podgate run 3: 138003 req/s p50 460 us p99 677 us proxy 330% oha 79% backend 41% other-on-proxy-cpus -9% busy-before 0.32 non-2xx 0 errors 0
+  h1-16k caddy run 3: 101217 req/s p50 481 us p99 2375 us proxy 319% oha 76% backend 31% other-on-proxy-cpus 0% busy-before 0.29 non-2xx 0 errors 0
+  h1-16k traefik run 3: 159989 req/s p50 337 us p99 1584 us proxy 334% oha 89% backend 48% other-on-proxy-cpus 0% busy-before 0.32 non-2xx 0 errors 0
+  h1-16k direct run 3: 462050 req/s p50 123 us p99 195 us proxy 0% oha 146% backend 105% other-on-proxy-cpus 11% busy-before 0.30 non-2xx 0 errors 0
+  h1-16k podgate run 4: 137976 req/s p50 461 us p99 680 us proxy 330% oha 78% backend 41% other-on-proxy-cpus -9% busy-before 0.32 non-2xx 0 errors 0
+  h1-16k caddy run 4: 102002 req/s p50 481 us p99 2299 us proxy 321% oha 76% backend 31% other-on-proxy-cpus -1% busy-before 0.43 non-2xx 0 errors 0
+  h1-16k traefik run 4: 156992 req/s p50 339 us p99 1661 us proxy 329% oha 88% backend 48% other-on-proxy-cpus -1% busy-before 0.27 non-2xx 0 errors 0
+  h1-16k direct run 4: 433981 req/s p50 127 us p99 203 us proxy 0% oha 146% backend 105% other-on-proxy-cpus 6% busy-before 0.28 non-2xx 0 errors 0
+  h1-16k podgate run 5: 137301 req/s p50 463 us p99 682 us proxy 330% oha 78% backend 41% other-on-proxy-cpus -10% busy-before 0.41 non-2xx 0 errors 0
+  h1-16k caddy run 5: 100397 req/s p50 484 us p99 2388 us proxy 317% oha 75% backend 31% other-on-proxy-cpus 0% busy-before 0.33 non-2xx 0 errors 0
+  h1-16k traefik run 5: 159992 req/s p50 338 us p99 1570 us proxy 335% oha 89% backend 49% other-on-proxy-cpus -1% busy-before 0.33 non-2xx 0 errors 0
+  h1-16k direct run 5: 350277 req/s p50 129 us p99 1597 us proxy 0% oha 117% backend 86% other-on-proxy-cpus 13% busy-before 0.32 non-2xx 0 errors 0
+== tls-h1 (-c 64, 15 s x 5 runs)
+  tls-h1 podgate run 1: 189239 req/s p50 335 us p99 476 us proxy 338% oha 87% backend 46% other-on-proxy-cpus -7% busy-before 0.29 non-2xx 0 errors 0
+  tls-h1 caddy run 1: 125821 req/s p50 376 us p99 1963 us proxy 348% oha 57% backend 32% other-on-proxy-cpus -1% busy-before 0.29 non-2xx 0 errors 0
+  tls-h1 traefik run 1: 177730 req/s p50 299 us p99 1494 us proxy 346% oha 78% backend 45% other-on-proxy-cpus -1% busy-before 0.28 non-2xx 0 errors 0
+  tls-h1 podgate run 2: 189263 req/s p50 335 us p99 474 us proxy 337% oha 86% backend 46% other-on-proxy-cpus -5% busy-before 0.28 non-2xx 0 errors 0
+  tls-h1 caddy run 2: 123386 req/s p50 383 us p99 1974 us proxy 345% oha 56% backend 31% other-on-proxy-cpus -1% busy-before 0.30 non-2xx 0 errors 0
+  tls-h1 traefik run 2: 177122 req/s p50 298 us p99 1527 us proxy 343% oha 78% backend 45% other-on-proxy-cpus -1% busy-before 0.30 non-2xx 0 errors 0
+  tls-h1 podgate run 3: 190033 req/s p50 333 us p99 479 us proxy 338% oha 86% backend 47% other-on-proxy-cpus -7% busy-before 0.38 non-2xx 0 errors 0
+  tls-h1 caddy run 3: 122973 req/s p50 382 us p99 2016 us proxy 346% oha 56% backend 31% other-on-proxy-cpus -2% busy-before 0.35 non-2xx 0 errors 0
+  tls-h1 traefik run 3: 177392 req/s p50 298 us p99 1509 us proxy 345% oha 78% backend 45% other-on-proxy-cpus -1% busy-before 0.36 non-2xx 0 errors 0
+  tls-h1 podgate run 4: 188398 req/s p50 336 us p99 485 us proxy 337% oha 86% backend 46% other-on-proxy-cpus -6% busy-before 0.32 non-2xx 0 errors 0
+  tls-h1 caddy run 4: 123070 req/s p50 382 us p99 2016 us proxy 344% oha 56% backend 31% other-on-proxy-cpus -1% busy-before 0.33 non-2xx 0 errors 0
+  tls-h1 traefik run 4: 177569 req/s p50 298 us p99 1503 us proxy 345% oha 78% backend 45% other-on-proxy-cpus -1% busy-before 0.33 non-2xx 0 errors 0
+  tls-h1 podgate run 5: 190179 req/s p50 334 us p99 484 us proxy 338% oha 86% backend 47% other-on-proxy-cpus -6% busy-before 0.30 non-2xx 0 errors 0
+  tls-h1 caddy run 5: 123899 req/s p50 379 us p99 1979 us proxy 347% oha 56% backend 31% other-on-proxy-cpus -2% busy-before 0.33 non-2xx 0 errors 0
+  tls-h1 traefik run 5: 176883 req/s p50 298 us p99 1533 us proxy 343% oha 78% backend 45% other-on-proxy-cpus 0% busy-before 0.28 non-2xx 0 errors 0
+== tls-h2 (-c 16 -p 4 --http2, 15 s x 5 runs)
+  tls-h2 podgate run 1: 193989 req/s p50 327 us p99 496 us proxy 341% oha 86% backend 48% other-on-proxy-cpus -8% busy-before 0.28 non-2xx 0 errors 0
+  tls-h2 caddy run 1: 80064 req/s p50 650 us p99 3005 us proxy 340% oha 59% backend 20% other-on-proxy-cpus -2% busy-before 0.31 non-2xx 0 errors 0
+  tls-h2 traefik run 1: 111164 req/s p50 511 us p99 1879 us proxy 347% oha 80% backend 29% other-on-proxy-cpus -1% busy-before 0.30 non-2xx 0 errors 0
+  tls-h2 podgate run 2: 194997 req/s p50 326 us p99 490 us proxy 341% oha 86% backend 48% other-on-proxy-cpus -8% busy-before 0.32 non-2xx 0 errors 0
+  tls-h2 caddy run 2: 79382 req/s p50 650 us p99 3238 us proxy 340% oha 59% backend 20% other-on-proxy-cpus -1% busy-before 0.32 non-2xx 0 errors 0
+  tls-h2 traefik run 2: 111613 req/s p50 509 us p99 1849 us proxy 349% oha 80% backend 29% other-on-proxy-cpus -2% busy-before 0.32 non-2xx 0 errors 0
+  tls-h2 podgate run 3: 194243 req/s p50 327 us p99 495 us proxy 341% oha 86% backend 48% other-on-proxy-cpus -7% busy-before 0.32 non-2xx 0 errors 0
+  tls-h2 caddy run 3: 79212 req/s p50 653 us p99 3229 us proxy 337% oha 59% backend 20% other-on-proxy-cpus 0% busy-before 0.29 non-2xx 0 errors 0
+  tls-h2 traefik run 3: 110244 req/s p50 512 us p99 1930 us proxy 344% oha 79% backend 28% other-on-proxy-cpus -1% busy-before 0.26 non-2xx 0 errors 0
+  tls-h2 podgate run 4: 194456 req/s p50 327 us p99 491 us proxy 341% oha 86% backend 48% other-on-proxy-cpus -6% busy-before 0.30 non-2xx 0 errors 0
+  tls-h2 caddy run 4: 79155 req/s p50 656 us p99 3073 us proxy 341% oha 58% backend 20% other-on-proxy-cpus -1% busy-before 0.35 non-2xx 0 errors 0
+  tls-h2 traefik run 4: 110909 req/s p50 511 us p99 1880 us proxy 346% oha 80% backend 28% other-on-proxy-cpus -1% busy-before 0.33 non-2xx 0 errors 0
+  tls-h2 podgate run 5: 193975 req/s p50 328 us p99 491 us proxy 341% oha 85% backend 48% other-on-proxy-cpus -6% busy-before 0.30 non-2xx 0 errors 0
+  tls-h2 caddy run 5: 79960 req/s p50 652 us p99 2970 us proxy 340% oha 59% backend 20% other-on-proxy-cpus -2% busy-before 0.33 non-2xx 0 errors 0
+  tls-h2 traefik run 5: 110725 req/s p50 511 us p99 1901 us proxy 347% oha 80% backend 29% other-on-proxy-cpus -1% busy-before 0.32 non-2xx 0 errors 0
+== results (median [min-max] of 5 runs; latencies in ms; CPU in cores of the proxy process)
+| scenario | proxy | req/s | p50 ms | p99 ms | p99.9 ms | proxy cores | oha cores | backend cores | CPU s/100k req | peak RSS MiB | non-2xx | errors | other cores on proxy CPUs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| h1-16k | caddy | 101245 [100398-105165] | 0.482 [0.47-0.485] | 2.347 [2.3-2.388] | 4.514 [4.085-4.634] | 3.2 [3.17-3.24] | 0.76 [0.76-0.79] | 0.31 [0.31-0.33] | 3.151 [3.08-3.16] | 71 [71-74] | 0 | 0 | 0 [-0-0.01] |
+| h1-16k | direct | 418234 [350278-462051] | 0.128 [0.123-0.129] | 0.211 [0.195-1.597] | 4.137 [0.616-4.188] | 0 [0-0] | 1.37 [1.17-1.47] | 0.99 [0.85-1.06] | - | - | 0 | 0 | 0.09 [0.06-0.13] |
+| h1-16k | podgate | 137501 [137093-138003] | 0.463 [0.46-0.464] | 0.68 [0.678-0.691] | 1.193 [0.908-1.242] | 3.3 [3.28-3.3] | 0.79 [0.79-0.79] | 0.41 [0.41-0.42] | 2.394 [2.392-2.405] | 67 [61-67] | 0 | 0 | -0.08 [-0.09--0.07] |
+| h1-16k | traefik | 159989 [156993-163129] | 0.338 [0.337-0.34] | 1.575 [1.41-1.662] | 2.842 [2.783-3.546] | 3.34 [3.3-3.36] | 0.9 [0.88-0.92] | 0.49 [0.48-0.5] | 2.09 [2.058-2.1] | 123 [122-156] | 0 | 0 | -0 [-0-0.01] |
+| h1-c256 | caddy | 127139 [127018-128938] | 1.749 [1.743-1.757] | 5.575 [5.221-5.708] | 8.221 [7.704-9.561] | 3.48 [3.46-3.52] | 0.55 [0.54-0.55] | 0.33 [0.32-0.33] | 2.74 [2.725-2.743] | 93 [93-96] | 0 | 0 | -0.01 [-0.01-0.01] |
+| h1-c256 | direct | 448210 [423881-481483] | 0.473 [0.471-0.474] | 4.482 [2.052-4.548] | 5.501 [5.403-5.613] | 0 [0-0] | 1.37 [1.29-1.48] | 0.88 [0.82-0.96] | - | - | 0 | 0 | 0.12 [0.08-0.14] |
+| h1-c256 | podgate | 162559 [162336-163250] | 1.567 [1.561-1.568] | 1.821 [1.799-1.853] | 3.117 [2.775-3.62] | 3.34 [3.33-3.34] | 0.69 [0.69-0.69] | 0.41 [0.41-0.41] | 2.053 [2.044-2.054] | 66 [54-68] | 0 | 0 | -0.11 [-0.12--0.1] |
+| h1-c256 | traefik | 185039 [183443-185847] | 1.246 [1.244-1.251] | 4.326 [4.262-4.501] | 6.47 [6.371-6.762] | 3.45 [3.44-3.47] | 0.77 [0.77-0.77] | 0.47 [0.47-0.48] | 1.866 [1.859-1.877] | 169 [169-171] | 0 | 0 | 0 [-0-0.01] |
+| h1-c64 | caddy | 125579 [125124-127320] | 0.373 [0.37-0.374] | 1.924 [1.854-1.956] | 4.107 [3.581-4.226] | 3.44 [3.42-3.46] | 0.53 [0.52-0.53] | 0.32 [0.32-0.32] | 2.735 [2.708-2.761] | 68 [67-70] | 0 | 0 | -0 [-0.01-0] |
+| h1-c64 | direct | 421589 [374072-451999] | 0.113 [0.112-0.115] | 0.228 [0.187-3.119] | 4.172 [4.158-4.709] | 0 [0-0] | 1.22 [1.03-1.31] | 0.82 [0.7-0.86] | - | - | 0 | 0 | 0.1 [0.09-0.11] |
+| h1-c64 | podgate | 166061 [164453-167622] | 0.383 [0.379-0.386] | 0.568 [0.562-0.573] | 1.069 [1.044-1.086] | 3.36 [3.35-3.36] | 0.69 [0.68-0.7] | 0.41 [0.41-0.41] | 2.019 [2.002-2.039] | 31 [30-32] | 0 | 0 | -0.1 [-0.11--0.09] |
+| h1-c64 | traefik | 185593 [184518-187076] | 0.287 [0.287-0.288] | 1.442 [1.417-1.468] | 2.332 [2.255-2.638] | 3.45 [3.43-3.46] | 0.75 [0.75-0.76] | 0.47 [0.47-0.47] | 1.86 [1.845-1.874] | 119 [118-120] | 0 | 0 | 0 [-0-0.01] |
+| rate | caddy | 61991 [61988-61994] | 0.449 [0.447-0.472] | 2.379 [2.285-2.502] | 5.558 [5.323-6.186] | 1.77 [1.76-1.77] | 0.28 [0.27-0.28] | 0.16 [0.16-0.16] | 2.849 [2.836-2.851] | 66 [65-68] | 0 | 0 | 0.13 [0.01-0.22] |
+| rate | direct | 61992 [61991-61994] | 0.149 [0.148-0.15] | 0.346 [0.342-0.373] | 1.62 [1.139-1.708] | 0 [0-0] | 0.26 [0.26-0.26] | 0.15 [0.14-0.15] | - | - | 0 | 0 | 0.15 [0.1-0.18] |
+| rate | podgate | 61993 [61988-61993] | 0.36 [0.355-0.366] | 0.808 [0.796-0.823] | 3.1 [2.918-3.321] | 1.31 [1.3-1.31] | 0.27 [0.27-0.28] | 0.15 [0.15-0.15] | 2.111 [2.095-2.117] | 33 [32-34] | 0 | 0 | -0.08 [-0.1-0.21] |
+| rate | traefik | 61992 [61991-61993] | 0.289 [0.287-0.291] | 1.734 [1.673-1.768] | 3.659 [3.465-4.818] | 1.2 [1.2-1.21] | 0.27 [0.27-0.27] | 0.16 [0.15-0.16] | 1.943 [1.934-1.954] | 116 [116-117] | 0 | 0 | -0 [-0.05-0.32] |
+| tls-h1 | caddy | 123387 [122974-125822] | 0.382 [0.377-0.383] | 1.98 [1.964-2.017] | 4.166 [3.749-4.266] | 3.46 [3.45-3.48] | 0.57 [0.56-0.58] | 0.32 [0.32-0.32] | 2.801 [2.768-2.814] | 72 [71-74] | 0 | 0 | -0.01 [-0.01--0] |
+| tls-h1 | podgate | 189264 [188398-190180] | 0.335 [0.334-0.336] | 0.48 [0.475-0.486] | 1.045 [1.026-1.252] | 3.38 [3.38-3.39] | 0.87 [0.87-0.87] | 0.47 [0.47-0.47] | 1.785 [1.779-1.793] | 74 [72-74] | 0 | 0 | -0.06 [-0.06--0.05] |
+| tls-h1 | traefik | 177393 [176884-177731] | 0.299 [0.298-0.299] | 1.51 [1.494-1.533] | 3.227 [2.941-3.434] | 3.45 [3.44-3.46] | 0.78 [0.78-0.79] | 0.45 [0.45-0.45] | 1.944 [1.941-1.947] | 127 [125-130] | 0 | 0 | -0 [-0-0] |
+| tls-h2 | caddy | 79383 [79155-80064] | 0.653 [0.651-0.657] | 3.073 [2.971-3.238] | 5.423 [5.271-5.447] | 3.41 [3.38-3.41] | 0.59 [0.59-0.6] | 0.21 [0.21-0.21] | 4.266 [4.258-4.311] | 71 [69-72] | 0 | 0 | -0.01 [-0.01-0] |
+| tls-h2 | podgate | 194244 [193975-194998] | 0.328 [0.327-0.328] | 0.492 [0.49-0.496] | 1.013 [0.964-1.076] | 3.41 [3.41-3.42] | 0.86 [0.86-0.87] | 0.48 [0.48-0.49] | 1.758 [1.751-1.761] | 72 [71-72] | 0 | 0 | -0.07 [-0.07--0.06] |
+| tls-h2 | traefik | 110910 [110244-111614] | 0.512 [0.51-0.512] | 1.88 [1.849-1.93] | 4.041 [3.926-4.186] | 3.47 [3.45-3.5] | 0.81 [0.8-0.81] | 0.29 [0.29-0.29] | 3.129 [3.127-3.135] | 124 [124-125] | 0 | 0 | -0.01 [-0.01--0] |
+== idle RSS (MiB, before any request)
+podgate	16.7
+caddy	46.7
+traefik	87.9
+== podgate admission counters per run (waited, refused, tenant rejected, highest backend limit)
+h1-c64 run 1: waited 2495673 refused 0 rejected 0 limit 27
+h1-c64 run 2: waited 2486745 refused 0 rejected 0 limit 27
+h1-c64 run 3: waited 2476923 refused 0 rejected 0 limit 23
+h1-c64 run 4: waited 2449311 refused 0 rejected 0 limit 25
+h1-c64 run 5: waited 2475068 refused 0 rejected 0 limit 28
+rate run 1: waited 749715 refused 0 rejected 0 limit 16
+rate run 2: waited 765717 refused 0 rejected 0 limit 8
+rate run 3: waited 762648 refused 0 rejected 0 limit 17
+rate run 4: waited 746704 refused 0 rejected 0 limit 13
+rate run 5: waited 746936 refused 0 rejected 0 limit 19
+h1-c256 run 1: waited 2448354 refused 0 rejected 0 limit 20
+h1-c256 run 2: waited 2437149 refused 0 rejected 0 limit 20
+h1-c256 run 3: waited 2439689 refused 0 rejected 0 limit 22
+h1-c256 run 4: waited 2438274 refused 0 rejected 0 limit 19
+h1-c256 run 5: waited 2435606 refused 0 rejected 0 limit 21
+h1-16k run 1: waited 2047661 refused 0 rejected 0 limit 9
+h1-16k run 2: waited 2047604 refused 0 rejected 0 limit 25
+h1-16k run 3: waited 2055791 refused 0 rejected 0 limit 25
+h1-16k run 4: waited 2053065 refused 0 rejected 0 limit 25
+h1-16k run 5: waited 2050089 refused 0 rejected 0 limit 25
+tls-h1 run 1: waited 2823571 refused 0 rejected 0 limit 19
+tls-h1 run 2: waited 2821604 refused 0 rejected 0 limit 19
+tls-h1 run 3: waited 2833688 refused 0 rejected 0 limit 24
+tls-h1 run 4: waited 2801650 refused 0 rejected 0 limit 25
+tls-h1 run 5: waited 2833121 refused 0 rejected 0 limit 24
+tls-h2 run 1: waited 2801921 refused 0 rejected 0 limit 25
+tls-h2 run 2: waited 2838044 refused 0 rejected 0 limit 25
+tls-h2 run 3: waited 2812070 refused 0 rejected 0 limit 23
+tls-h2 run 4: waited 2817246 refused 0 rejected 0 limit 23
+tls-h2 run 5: waited 2827398 refused 0 rejected 0 limit 22
+== upstream connections opened per run (keep-alive proof: far fewer than requests; the stats query itself is not counted)
+h1-c64 podgate run 1: 3 connections for 2515030 requests
+h1-c64 caddy run 1: 0 connections for 1910075 requests
+h1-c64 traefik run 1: 0 connections for 2806821 requests
+h1-c64 direct run 1: 64 connections for 5613650 requests
+h1-c64 podgate run 2: 3 connections for 2504479 requests
+h1-c64 caddy run 2: 0 connections for 1884023 requests
+h1-c64 traefik run 2: 0 connections for 2785094 requests
+h1-c64 direct run 2: 64 connections for 6782104 requests
+h1-c64 podgate run 3: 0 connections for 2491674 requests
+h1-c64 caddy run 3: 0 connections for 1877873 requests
+h1-c64 traefik run 3: 0 connections for 2783012 requests
+h1-c64 direct run 3: 64 connections for 5952050 requests
+h1-c64 podgate run 4: 0 connections for 2467669 requests
+h1-c64 caddy run 4: 0 connections for 1877119 requests
+h1-c64 traefik run 4: 0 connections for 2788434 requests
+h1-c64 direct run 4: 64 connections for 6674689 requests
+h1-c64 podgate run 5: 0 connections for 2490587 requests
+h1-c64 caddy run 5: 0 connections for 1887195 requests
+h1-c64 traefik run 5: 0 connections for 2768541 requests
+h1-c64 direct run 5: 64 connections for 6328464 requests
+rate podgate run 1: 0 connections for 929969 requests
+rate caddy run 1: 0 connections for 929900 requests
+rate traefik run 1: 0 connections for 929902 requests
+rate direct run 1: 64 connections for 929942 requests
+rate podgate run 2: 0 connections for 929966 requests
+rate caddy run 2: 0 connections for 929950 requests
+rate traefik run 2: 0 connections for 929964 requests
+rate direct run 2: 64 connections for 929973 requests
+rate podgate run 3: 0 connections for 929907 requests
+rate caddy run 3: 0 connections for 929968 requests
+rate traefik run 3: 0 connections for 929905 requests
+rate direct run 3: 64 connections for 929882 requests
+rate podgate run 4: 0 connections for 929965 requests
+rate caddy run 4: 0 connections for 929905 requests
+rate traefik run 4: 0 connections for 929963 requests
+rate direct run 4: 64 connections for 929940 requests
+rate podgate run 5: 0 connections for 929967 requests
+rate caddy run 5: 0 connections for 929966 requests
+rate traefik run 5: 0 connections for 929963 requests
+rate direct run 5: 64 connections for 929942 requests
+h1-c256 podgate run 1: 0 connections for 2449865 requests
+h1-c256 caddy run 1: 47 connections for 1934551 requests
+h1-c256 traefik run 1: 11 connections for 2778603 requests
+h1-c256 direct run 1: 256 connections for 7194743 requests
+h1-c256 podgate run 2: 0 connections for 2438696 requests
+h1-c256 caddy run 2: 0 connections for 1907508 requests
+h1-c256 traefik run 2: 0 connections for 2775342 requests
+h1-c256 direct run 2: 256 connections for 7224648 requests
+h1-c256 podgate run 3: 0 connections for 2440519 requests
+h1-c256 caddy run 3: 0 connections for 1906819 requests
+h1-c256 traefik run 3: 0 connections for 2752849 requests
+h1-c256 direct run 3: 256 connections for 6725387 requests
+h1-c256 podgate run 4: 0 connections for 2439615 requests
+h1-c256 caddy run 4: 0 connections for 1907776 requests
+h1-c256 traefik run 4: 0 connections for 2776509 requests
+h1-c256 direct run 4: 256 connections for 6361073 requests
+h1-c256 podgate run 5: 0 connections for 2436122 requests
+h1-c256 caddy run 5: 0 connections for 1905671 requests
+h1-c256 traefik run 5: 0 connections for 2789291 requests
+h1-c256 direct run 5: 256 connections for 6666990 requests
+h1-16k podgate run 1: 0 connections for 2062715 requests
+h1-16k caddy run 1: 0 connections for 1577770 requests
+h1-16k traefik run 1: 0 connections for 2447785 requests
+h1-16k direct run 1: 64 connections for 6275711 requests
+h1-16k podgate run 2: 0 connections for 2056651 requests
+h1-16k caddy run 2: 0 connections for 1518956 requests
+h1-16k traefik run 2: 0 connections for 2397933 requests
+h1-16k direct run 2: 64 connections for 5359307 requests
+h1-16k podgate run 3: 0 connections for 2070472 requests
+h1-16k caddy run 3: 0 connections for 1518566 requests
+h1-16k traefik run 3: 0 connections for 2400663 requests
+h1-16k direct run 3: 64 connections for 6932427 requests
+h1-16k podgate run 4: 0 connections for 2069930 requests
+h1-16k caddy run 4: 0 connections for 1530439 requests
+h1-16k traefik run 4: 0 connections for 2355588 requests
+h1-16k direct run 4: 64 connections for 6511199 requests
+h1-16k podgate run 5: 0 connections for 2059885 requests
+h1-16k caddy run 5: 0 connections for 1506301 requests
+h1-16k traefik run 5: 0 connections for 2400610 requests
+h1-16k direct run 5: 64 connections for 5255995 requests
+tls-h1 podgate run 1: 0 connections for 2839230 requests
+tls-h1 caddy run 1: 0 connections for 1887659 requests
+tls-h1 traefik run 1: 0 connections for 2666818 requests
+tls-h1 podgate run 2: 0 connections for 2839598 requests
+tls-h1 caddy run 2: 0 connections for 1851133 requests
+tls-h1 traefik run 2: 0 connections for 2657641 requests
+tls-h1 podgate run 3: 0 connections for 2851258 requests
+tls-h1 caddy run 3: 0 connections for 1844928 requests
+tls-h1 traefik run 3: 0 connections for 2661614 requests
+tls-h1 podgate run 4: 0 connections for 2826869 requests
+tls-h1 caddy run 4: 0 connections for 1846338 requests
+tls-h1 traefik run 4: 0 connections for 2664329 requests
+tls-h1 podgate run 5: 0 connections for 2853353 requests
+tls-h1 caddy run 5: 0 connections for 1858858 requests
+tls-h1 traefik run 5: 0 connections for 2654046 requests
+tls-h2 podgate run 1: 0 connections for 2910786 requests
+tls-h2 caddy run 1: 0 connections for 1201218 requests
+tls-h2 traefik run 1: 0 connections for 1667711 requests
+tls-h2 podgate run 2: 0 connections for 2925742 requests
+tls-h2 caddy run 2: 0 connections for 1191023 requests
+tls-h2 traefik run 2: 0 connections for 1674498 requests
+tls-h2 podgate run 3: 0 connections for 2914363 requests
+tls-h2 caddy run 3: 0 connections for 1188449 requests
+tls-h2 traefik run 3: 0 connections for 1653975 requests
+tls-h2 podgate run 4: 0 connections for 2917524 requests
+tls-h2 caddy run 4: 0 connections for 1187634 requests
+tls-h2 traefik run 4: 0 connections for 1663937 requests
+tls-h2 podgate run 5: 0 connections for 2910602 requests
+tls-h2 caddy run 5: 0 connections for 1199682 requests
+tls-h2 traefik run 5: 0 connections for 1661118 requests
+results in bench/results/2026-11-22 (runs.jsonl, oha-*.json); set KEEP_WORK=1 to keep configs and logs

@@ -136,7 +136,7 @@ want() { [[ " $PROXIES " == *" $1 "* ]]; }
 
 if want podgate; then
   PROXY_ADDR="127.0.0.1:${HTTP_PORT[podgate]}" PROXY_TLS_ADDR="127.0.0.1:${TLS_PORT[podgate]}" \
-    ADMIN_SOCKET="$work/admin.sock" RUST_LOG=warn \
+    ADMIN_SOCKET="$work/admin.sock" RUST_LOG=warn UPSTREAM_POLICY_FILE="$PWD/bench/upstream-policy.json" \
     taskset -c "$PROXY_CPUS" "$PODGATE_BIN" 2>"$work/podgate.log" &
   PID[podgate]=$!
   pids+=("${PID[podgate]}")
