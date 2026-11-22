@@ -8,20 +8,20 @@ Measured twice. The first measurement (2026-11-20, podgate at commit `a22f5d2` p
 
 ## Verdicts
 
-Each verdict is the median of 5 interleaved runs of 15 s, on one process start per proxy. A verdict says "faster" only when the run ranges do not overlap. The last two columns give the first measurement for comparison. The `h1-*` rows against Traefik are the exception: podgate's throughput moves by +-15% between fresh process starts (see "Start-to-start spread"), which the 5 runs of one start do not capture, so those rows give the direction over 10 starts instead of a firm verdict.
+Each verdict is the median of 5 interleaved runs of 15 s, on one process start per proxy. A verdict says "faster" only when the run ranges do not overlap. The last two columns give the first measurement for comparison. The `h1-*` rows against Traefik are the exception: podgate's throughput moves by +-15% between fresh process starts (see "Start-to-start spread"), which the 5 runs of one start do not capture. `h1-c64` gives the direction over 10 starts; `h1-c256` and `h1-16k` rest on one start each, and their gap to Traefik is no larger than that spread.
 
 |Scenario|podgate vs Caddy|podgate vs Traefik|Limiter|Before: vs Caddy|Before: vs Traefik|
 |---|---|---|---|---|---|
 |`h1-c64`: HTTP/1.1, 64 connections, 100 B body, max rate|faster (1.32x)|**probably slower**: Traefik 1.12x faster on the verdict start; podgate slower at 8 of 10 starts (median 166 k against 186 k), but its range over starts (142 k to 198 k) overlaps Traefik's one start; see "Start-to-start spread"|proxy CPUs|2.1x|1.4x|
-|`h1-c256`: as above, 256 connections|faster (1.28x)|**probably slower** (Traefik 1.14x faster on the verdict start; one start only, see above)|proxy CPUs|2.0x|1.5x|
-|`h1-16k`: as `h1-c64`, 16 KiB body|faster (1.36x)|**probably slower** (Traefik 1.16x faster on the verdict start; one start only, see above)|proxy CPUs|1.9x|1.25x|
+|`h1-c256`: as above, 256 connections|faster (1.28x)|**inconclusive**: Traefik 1.14x faster on one podgate start; the spread between starts (+-15% on `h1-c64`) is as large as the gap|proxy CPUs|2.0x|1.5x|
+|`h1-16k`: as `h1-c64`, 16 KiB body|faster (1.36x)|**inconclusive**: Traefik 1.16x faster on one podgate start; the spread between starts (+-15% on `h1-c64`) is as large as the gap|proxy CPUs|1.9x|1.25x|
 |`rate`: 62000 req/s fixed, 64 connections|same throughput (all three sustain it); p50 lower by 20%; p99 and p99.9 lower|same throughput; **p50 higher (0.36 ms against 0.29)**; p99 lower; p99.9 lower, ranges 0.14 ms apart|offered rate|p50 and p99 lower|p50 and p99 lower|
 |`tls-h1`: TLS 1.3, HTTP/1.1, 64 connections|faster (1.53x)|faster (1.07x)|proxy CPUs|2.3x|1.4x|
 |`tls-h2`: TLS 1.3, HTTP/2, 16 connections x 4 streams|faster (2.45x)|faster (1.75x)|proxy CPUs|3.4x|2.2x|
 |CPU seconds per 100k requests|lower (1.8 to 2.4 against 2.7 to 4.3)|**higher in plain HTTP (2.0 to 2.4 against 1.9 to 2.1), lower in TLS (1.8 against 1.9 and 3.1)**|not applicable|lower|lower|
 |Peak and idle memory|idle lower (17 MiB against 47 and 88); peak lower except `tls-h1` and `tls-h2`, where there is no measurable difference (72 to 74 MiB against 69 to 74)|lower (31 to 74 MiB against 116 to 169)|not applicable|lower|lower|
 
-The three verdicts that were "faster" against Traefik are now "probably slower": plain HTTP at maximum rate, slower at 8 of 10 podgate starts but within its start-to-start spread. The regression against podgate's own earlier build is firmer and not a rig artifact: a podgate built from the first measurement's commit, run on the same rig today beside the same Traefik, is still 1.35x faster (250 k against 186 k req/s, 3 process starts, all above the best current start). The cause is podgate's own cost per request, see below; change 0115 bisects it.
+The three plain-HTTP verdicts that were "faster" against Traefik are no longer: `h1-c64` is "probably slower" (slower at 8 of 10 podgate starts, but within its start-to-start spread), and `h1-c256` and `h1-16k` are inconclusive on one start each. The regression against podgate's own earlier build is firmer and not a rig artifact: a podgate built from the first measurement's commit, run on the same rig today beside the same Traefik, is still 1.35x faster (250 k against 186 k req/s, 3 process starts, all above the best current start). The cause is podgate's own cost per request, see below; change 0115 bisects it.
 
 No scenario produced a non-2xx response or an error for any proxy (110 recorded runs, 0 non-2xx, 0 errors, backend request count equal to `oha`'s count within 1 request; the 42 runs of the attribution pass below also had no non-2xx response and no error).
 
