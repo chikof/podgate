@@ -33,6 +33,9 @@
 #   BASE_PORT (first of 8 loopback ports; default: random free)
 #   PODGATE_BIN UPSTREAM_BIN CERT_BIN  (target/release/...)
 #   SNAPSHOT_TEMPLATE (default bench/podgate-snapshot.json.in; a variant of it, e.g. with forwarding off)
+#   PODGATE_NO_TLS 1 starts podgate with only the `web` HTTP entry point (no PROXY_TLS_ADDR, so no
+#   `websecure` listener or worker pool) and skips its TLS probes; for comparing it with the
+#   two-listener podgate. Refused with a tls-* scenario while podgate is a proxy.
 set -euo pipefail
 
 cd "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
@@ -52,6 +55,7 @@ PODGATE_BIN=${PODGATE_BIN:-target/release/podgate}
 UPSTREAM_BIN=${UPSTREAM_BIN:-target/release/examples/fast_upstream}
 CERT_BIN=${CERT_BIN:-target/release/examples/bench_cert}
 HOST=a.test
+PODGATE_NO_TLS=${PODGATE_NO_TLS:-}
 CLK_TCK=$(getconf CLK_TCK)
 
 die() {
@@ -77,6 +81,12 @@ cpu_count() {
 }
 PROXY_THREADS=$(cpu_count "$PROXY_CPUS")
 LOAD_THREADS=$(cpu_count "$LOAD_CPUS")
+
+if [ -n "$PODGATE_NO_TLS" ] && [[ " $PROXIES " == *" podgate "* ]]; then
+  for scenario in $SCENARIOS; do
+    [[ $scenario != tls-* ]] || die "PODGATE_NO_TLS: podgate has no TLS listener for $scenario"
+  done
+fi
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 BASE_PORT=${BASE_PORT:-$((20000 + RANDOM % 30000))}
@@ -136,7 +146,9 @@ pids+=("${PID[direct]}")
 want() { [[ " $PROXIES " == *" $1 "* ]]; }
 
 if want podgate; then
-  PROXY_ADDR="127.0.0.1:${HTTP_PORT[podgate]}" PROXY_TLS_ADDR="127.0.0.1:${TLS_PORT[podgate]}" \
+  tls_env=(PROXY_TLS_ADDR="127.0.0.1:${TLS_PORT[podgate]}")
+  [ -z "$PODGATE_NO_TLS" ] || tls_env=(-u PROXY_TLS_ADDR)
+  env "${tls_env[@]}" PROXY_ADDR="127.0.0.1:${HTTP_PORT[podgate]}" \
     ADMIN_SOCKET="$work/admin.sock" RUST_LOG=warn UPSTREAM_POLICY_FILE="$PWD/bench/upstream-policy.json" \
     taskset -c "$PROXY_CPUS" "$PODGATE_BIN" 2>"$work/podgate.log" &
   PID[podgate]=$!
@@ -258,6 +270,7 @@ probe() { # proxy: the routed host returns the backend's body, an unknown host a
   [ "$proxy" = direct ] && return 0
   code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Host: unknown.test' "http://127.0.0.1:$port/")
   [ "$code" = 404 ] || die "$proxy: unknown Host answered $code, not 404"
+  [ "$proxy" = podgate ] && [ -n "$PODGATE_NO_TLS" ] && return 0
   local tls=${TLS_PORT[$proxy]} version
   for flag in --http1.1 --http2; do
     curl -sS --max-time 5 "$flag" --cacert "$work/cert.pem" --resolve "$HOST:$tls:127.0.0.1" \
