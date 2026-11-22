@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tenants": [
+    {
+      "id": "bench",
+      "weight": 1,
+      "budget": { "max_inflight": 1000000, "max_buffer_bytes": 1073741824 }
+    }
+  ],
+  "apps": [
+    {
+      "id": "a",
+      "tenant": "bench",
+      "declared_by": "bench/podgate-snapshot-noforward.json.in",
+      "forwarded": { "x_forwarded": false, "real_ip": false },
+      "tls": { "mode": "acme" },
+      "routers": [
+        { "name": "default", "match": { "host": "a.test" }, "service": "web" }
+      ],
+      "revisions": [
+        {
+          "id": "r1", "weight": 100, "state": "serving",
+          "services": [
+            {
+              "name": "web", "type": "loadbalancer",
+              "servers": [{ "url": "http://127.0.0.1:@BACKEND_PORT@" }]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

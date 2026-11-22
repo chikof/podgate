@@ -32,6 +32,7 @@
 #   BUSY_MAX 3 (CPUs busy with other work before a run) BUSY_WAIT 60 (seconds to wait for it)
 #   BASE_PORT (first of 8 loopback ports; default: random free)
 #   PODGATE_BIN UPSTREAM_BIN CERT_BIN  (target/release/...)
+#   SNAPSHOT_TEMPLATE (default bench/podgate-snapshot.json.in; a variant of it, e.g. with forwarding off)
 set -euo pipefail
 
 cd "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
@@ -124,7 +125,7 @@ render() { # template
 render bench/Caddyfile.in >"$work/Caddyfile"
 render bench/traefik.yml.in >"$work/traefik.yml"
 render bench/traefik-dynamic.yml.in >"$work/traefik-dynamic.yml"
-render bench/podgate-snapshot.json.in |
+render "${SNAPSHOT_TEMPLATE:-bench/podgate-snapshot.json.in}" |
   jq --rawfile cert "$work/cert.pem" --rawfile key "$work/key.pem" --arg host "$HOST" \
     '.certificates = [{hosts: [$host], cert_pem: $cert, key_pem: $key}]' >"$work/snapshot.json"
 
@@ -177,6 +178,13 @@ fi
 ticks() {
   [ -r "/proc/$1/stat" ] || die "process $1 ($(cat "/proc/$1/comm" 2>/dev/null)) vanished during a run"
   awk '{ print $14 + $15 }' "/proc/$1/stat"
+}
+# Per-thread counters of a process, one line per thread: tid, name, CPU ticks, minor faults, voluntary and involuntary context switches.
+thread_ticks() {
+  local t
+  for t in /proc/"$1"/task/*; do
+    [ -r "$t/stat" ] && echo "${t##*/} $(tr ' ' '_' <"$t/comm") $(sed 's/.*) //' "$t/stat" | awk '{ printf "%d %d", $12 + $13, $8 }') $(awk '/^(non)?voluntary_ctxt_switches/ { printf "%s ", $2 }' "$t/status")"
+  done
 }
 # Resume: OUT=<an earlier output dir> skips the runs it already holds (after a crash or Ctrl-C).
 recorded() { # scenario proxy run
@@ -326,9 +334,10 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
   local oha_pid=$!
   # Steady-state window: skip the first and last 2 seconds of the run.
   sleep 2
-  local w0 w1 p0=0 p1=0 b0 b1 o0 o1 cpu_p0 cpu_p1 cpu_l0 cpu_l1 cpu_all0 cpu_all1 split0 split1
+  local threads0="" threads1="" w0 w1 p0=0 p1=0 b0 b1 o0 o1 cpu_p0 cpu_p1 cpu_l0 cpu_l1 cpu_all0 cpu_all1 split0 split1
   w0=$(date +%s.%N)
   [ -z "$pid_p" ] || p0=$(ticks "$pid_p")
+  [ -z "$pid_p" ] || threads0=$(thread_ticks "$pid_p")
   b0=$(ticks "${PID[direct]}")
   o0=$(ticks "$oha_pid")
   cpu_p0=$(cpu_busy "$PROXY_CPUS")
@@ -338,6 +347,7 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
   sleep $((DURATION - 4))
   w1=$(date +%s.%N)
   [ -z "$pid_p" ] || p1=$(ticks "$pid_p")
+  [ -z "$pid_p" ] || threads1=$(thread_ticks "$pid_p")
   b1=$(ticks "${PID[direct]}")
   o1=$(ticks "$oha_pid")
   cpu_p1=$(cpu_busy "$PROXY_CPUS")
@@ -360,6 +370,7 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
     --argjson w "$(awk -v a="$w0" -v b="$w1" 'BEGIN { printf "%.3f", b - a }')" \
     --argjson p "$((p1 - p0))" --argjson b "$((b1 - b0))" --argjson o "$((o1 - o0))" \
     --argjson cpu_p "$((cpu_p1 - cpu_p0))" --argjson cpu_l "$((cpu_l1 - cpu_l0))" \
+    --arg threads0 "$threads0" --arg threads1 "$threads1" \
     --arg split0 "$split0" --arg split1 "$split1" \
     --argjson cpu_all "$((cpu_all1 - cpu_all0))" '
     def nums: split(" ") | map(tonumber);
@@ -388,6 +399,19 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
           ($split1 | nums) as $t1 | ($split0 | nums) as $t0
           | ([range(0; 4)] | map($t1[.] - $t0[.])) as $d | ($d | add) as $sum
           | { user: ($d[0] * 100 / $sum), system: ($d[1] * 100 / $sum), irq: ($d[2] * 100 / $sum), idle: ($d[3] * 100 / $sum) }),
+        proxy_threads: (if $threads1 == "" then null else (
+          (($o_.summary.requestsPerSec * $w) / 1000) as $k
+          | ($threads0 | split("\n") | map(select(length > 0) | split(" ") | {key: .[0], value: .}) | from_entries) as $a
+          | [$threads1 | split("\n")[] | select(length > 0) | split(" ") | . as $t | ($a[$t[0]] // $t) as $z
+             | {name: $t[1], cores: ((($t[2] | tonumber) - ($z[2] | tonumber)) / $hz / $w), switches_per_1k_req: ((($t[4] | tonumber) - ($z[4] | tonumber)) / $k)}]
+          | map(select(.cores > 0.02 or .switches_per_1k_req > 1)) | sort_by(-.cores)
+          | map(.cores |= (. * 100 | round / 100) | .switches_per_1k_req |= (. * 10 | round / 10))
+          ) end),
+        proxy_per_1k_req: (if $threads1 == "" then null else (
+          def sum($s; $col): [$s | split("\n")[] | select(length > 0) | split(" ") | .[$col] | tonumber] | add;
+          (($o_.summary.requestsPerSec * $w) / 1000) as $k
+          | { minflt: ((sum($threads1; 3) - sum($threads0; 3)) / $k), voluntary_switches: ((sum($threads1; 4) - sum($threads0; 4)) / $k), involuntary_switches: ((sum($threads1; 5) - sum($threads0; 5)) / $k) }
+          ) end),
         podgate_waited: ($k1[0] - $k0[0]), podgate_refused: ($k1[1] - $k0[1]),
         podgate_tenant_rejected: ($k1[2] - $k0[2]), podgate_limit_max: $k1[3]
       }' >>"$OUT/runs.jsonl"
