@@ -1366,11 +1366,12 @@ async fn h3_goes_through_middlewares_and_budgets() {
 
 // ------------------------------------------------------------- measurement
 
-/// Sequential GETs on one connection, the same upstream and route: HTTP/2 over TLS straight into
-/// the pipeline, against HTTP/3 through the front and its internal h2c hop. Prints the medians and
-/// 99th percentiles; the difference bounds the hop's cost (it also holds QUIC against TCP+TLS).
-/// Run alone, under the build lock: `cargo test --release --test h3 h3_hop_latency -- --ignored
-/// --nocapture`.
+/// Sequential GETs on one connection per protocol, the same upstream and route: HTTP/2 over TLS
+/// straight into the pipeline, against HTTP/3 through the front and its internal h2c hop. The
+/// two protocols alternate request by request in one loop, so load drift hits both equally.
+/// Prints p50, p90 and p99 per protocol; the median difference bounds the hop's cost (it also
+/// holds QUIC against TCP+TLS). Run alone, under the build lock: `cargo test --release --test h3
+/// h3_hop_latency -- --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
 async fn h3_hop_latency() {
@@ -1405,31 +1406,34 @@ async fn h3_hop_latency() {
         .expect("TLS");
     let (mut h2, connection) = h2::client::handshake(stream).await.expect("h2 handshake");
     tokio::spawn(async move { drop(connection.await) });
-    let mut over_h2 = Vec::with_capacity(RUNS);
-    for at in 0..WARMUP + RUNS {
-        let started = Instant::now();
-        let request = Request::get("https://a.test/x").body(()).expect("request");
-        h2 = h2.ready().await.expect("ready");
-        let (response, _) = h2.send_request(request, true).expect("send");
-        let response = response.await.expect("response");
-        assert_eq!(response.status(), 200);
-        let mut body = response.into_body();
-        while let Some(chunk) = body.data().await {
-            let chunk = chunk.expect("body");
-            drop(body.flow_control().release_capacity(chunk.len()));
-        }
-        if at >= WARMUP {
-            over_h2.push(started.elapsed());
-        }
-    }
-
     let mut client = fx.connect("a.test").await;
+    let mut over_h2 = Vec::with_capacity(RUNS);
     let mut over_h3 = Vec::with_capacity(RUNS);
+    // One loop, one request on each protocol per iteration, the order swapping every iteration:
+    // load drift and cache state then hit both protocols equally.
     for at in 0..WARMUP + RUNS {
-        let started = Instant::now();
-        assert_eq!(client.get("a.test", "/x").await.status, 200);
-        if at >= WARMUP {
-            over_h3.push(started.elapsed());
+        for h3_first in [at % 2 == 0, at % 2 != 0] {
+            let started = Instant::now();
+            if h3_first {
+                assert_eq!(client.get("a.test", "/x").await.status, 200);
+                if at >= WARMUP {
+                    over_h3.push(started.elapsed());
+                }
+            } else {
+                let request = Request::get("https://a.test/x").body(()).expect("request");
+                h2 = h2.ready().await.expect("ready");
+                let (response, _) = h2.send_request(request, true).expect("send");
+                let response = response.await.expect("response");
+                assert_eq!(response.status(), 200);
+                let mut body = response.into_body();
+                while let Some(chunk) = body.data().await {
+                    let chunk = chunk.expect("body");
+                    drop(body.flow_control().release_capacity(chunk.len()));
+                }
+                if at >= WARMUP {
+                    over_h2.push(started.elapsed());
+                }
+            }
         }
     }
 
@@ -1438,11 +1442,20 @@ async fn h3_hop_latency() {
         let at = ((samples.len() - 1) as f64 * q).round() as usize;
         samples[at]
     };
-    let (h2_p50, h2_p99) = (quantile(&mut over_h2, 0.5), quantile(&mut over_h2, 0.99));
-    let (h3_p50, h3_p99) = (quantile(&mut over_h3, 0.5), quantile(&mut over_h3, 0.99));
+    let report = |name: &str, samples: &mut Vec<Duration>| {
+        let (p50, p90, p99) = (
+            quantile(samples, 0.5),
+            quantile(samples, 0.9),
+            quantile(samples, 0.99),
+        );
+        println!("h3 hop: {name:<8} p50 {p50:?} p90 {p90:?} p99 {p99:?}");
+        p50
+    };
+    println!("h3 hop: {RUNS} GETs per protocol, alternating in one loop after {WARMUP} warm-up");
+    let h2_p50 = report("HTTPS h2", &mut over_h2);
+    let h3_p50 = report("HTTP/3", &mut over_h3);
     println!(
-        "h3 hop: {RUNS} sequential GETs per protocol; HTTPS (h2) p50 {h2_p50:?} p99 {h2_p99:?}; \
-         HTTP/3 p50 {h3_p50:?} p99 {h3_p99:?}; median difference {:?}",
+        "h3 hop: median difference {:?}",
         h3_p50.saturating_sub(h2_p50)
     );
 }
