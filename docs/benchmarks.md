@@ -33,9 +33,9 @@ Median (min-max) of 5 runs per proxy and scenario, 15 s each, steady state, one 
 
 ### Throughput and latency
 
-![Bars of requests per second by scenario for podgate, Caddy, Traefik and the backend alone ("direct"), each bar a median with a min to max whisker over its runs. Traefik is ahead of podgate in the three plain HTTP/1.1 scenarios (176k, 174k and 152k against 160k, 158k and 134k req/s) and podgate is ahead in the two TLS scenarios (184k against 168k, and 188k against 105k); Caddy is the slowest proxy in every scenario. All three proxies sustain the 58k req/s of the rate scenario. The backend alone reaches 419k to 453k.](benchmarks/throughput.svg)
+![Bars of requests per second by scenario for podgate, Caddy, Traefik and the backend alone ("direct"), each bar a median with a min to max whisker over its runs. podgate is ahead of Traefik and Caddy in every scenario except the fixed-rate one, where all three hold the 62k target: 196k against 185k and 125k at h1-c64, 164k against 161k and 102k at h1-16k, and 195k against 112k and 81k at tls-h2. The backend alone reaches 334k to 458k.](benchmarks/throughput.svg)
 
-![Bars of p99 latency in ms by scenario, with a median and a min to max whisker per proxy, and a small panel with the p99.9 of the rate scenario. podgate has the lowest median p99 of the three proxies in every scenario (0.52 to 2.16 ms, against 1.59 to 5.01 for Traefik and 2.15 to 7.09 for Caddy). In the p99.9 panel podgate (4.0 ms, range 3.6 to 15.7) and Traefik (4.1 ms, range 3.4 to 4.8) overlap; Caddy is higher at 7.1 ms.](benchmarks/latency.svg)
+![Bars of p99 latency in ms by scenario, with a median and a min to max whisker per proxy, and a small panel with the p99.9 of the rate scenario. podgate has the lowest median p99 of the three proxies in every scenario (0.47 to 1.56 ms, against 1.44 to 4.32 for Traefik and 1.92 to 5.49 for Caddy). In the p99.9 panel podgate (2.7 ms, range 2.4 to 5.0) and Traefik (3.6 ms, range 3.4 to 3.7) overlap; Caddy is higher at 7.3 ms.](benchmarks/latency.svg)
 
 |Scenario|Proxy|req/s|p50 ms|p99 ms|p99.9 ms|
 |---|---|---|---|---|---|
@@ -68,9 +68,9 @@ The rate of the `rate` scenario is 62000 req/s: half the slowest proxy's `h1-c64
 
 ### CPU and memory
 
-![Bars of proxy CPU seconds per 100k requests by scenario, with a median and a min to max whisker per proxy. podgate costs 1.8 to 2.5 s, Traefik 1.9 to 3.3 s and Caddy 2.9 to 4.4 s. podgate is above Traefik in the plain HTTP scenarios (2.1 to 2.5 against 1.9 to 2.2 s) and below it in the TLS scenarios (1.8 against 2.0 and 3.3 s).](benchmarks/cpu.svg)
+![Bars of proxy CPU seconds per 100k requests by scenario, with a median and a min to max whisker per proxy. podgate costs 1.71 to 2.01 s, Traefik 1.85 to 3.10 s and Caddy 2.70 to 4.22 s. podgate's median is below Traefik's in every scenario, by the most in tls-h2 (1.75 against 3.10 s).](benchmarks/cpu.svg)
 
-![Left, idle resident memory of one start per proxy: podgate 16 MiB, Caddy 47 MiB, Traefik 89 MiB. Right, peak resident memory per scenario with a median and a min to max whisker: Traefik is the highest in every scenario (118 to 171 MiB); podgate is below Caddy in the plain HTTP scenarios (31 to 64 MiB against 66 to 95) and above it in the two TLS scenarios (79 and 77 against 74 and 71).](benchmarks/memory.svg)
+![Left, idle resident memory of one start per proxy: podgate 16 MiB, Caddy 48 MiB, Traefik 89 MiB. Right, peak resident memory per scenario with a median and a min to max whisker: Traefik is the highest in every scenario (119 to 176 MiB), and podgate is below Caddy in every scenario (32 to 66 MiB against 66 to 94).](benchmarks/memory.svg)
 
 CPU is cores of the proxy process (`utime + stime` of the whole process over the steady-state window, so 4.0 is all four pinned CPUs). "CPU s/100k" is that CPU time divided by the requests served in the window. Peak RSS is `VmHWM` after resetting it once warm-up ended. "Other cores max" is the largest foreign load on the proxy CPUs in any of the 5 runs (a negative value is the accounting difference between the per-process and per-CPU counters, about 0.1 core, not load), and "disturbed" counts runs with more than 0.3 foreign cores.
 
