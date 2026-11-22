@@ -638,6 +638,17 @@ impl JwtAuth {
         self.0.resolver = resolver.clone();
     }
 
+    /// The header `forward_claims` copies the verified claim `claim` into, if it does. The client's
+    /// own copy of that header is removed before the token is verified, so a stage that reads it
+    /// later in the chain reads the verified claim or nothing.
+    pub(in crate::middleware) fn claim_header(&self, claim: &str) -> Option<&HeaderName> {
+        self.0
+            .forward
+            .iter()
+            .find(|(name, _)| &**name == claim)
+            .map(|(_, header)| header)
+    }
+
     /// The `jwks_uri` this middleware fetches, if any.
     fn target(&self) -> Option<&Arc<Target>> {
         self.0.jwks.as_ref()

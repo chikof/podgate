@@ -360,6 +360,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         &stage_lists,
         context.rate_limit_stores(),
     ));
+    rejected.extend(middleware::quota::check_snapshot(
+        snapshot,
+        &stage_lists,
+        context.rate_limit_stores(),
+    ));
     rejected.extend(middleware::oidc::check_snapshot(
         snapshot,
         &stage_lists,
@@ -843,6 +848,7 @@ fn stages_of(
             Vec::new()
         }
     };
+    let mut seen: Vec<(&str, Vec<usize>)> = Vec::new();
     for (router, compiled) in app.routers.iter().zip(routers) {
         match expand(&router.chain) {
             Ok(own) => {
@@ -861,6 +867,7 @@ fn stages_of(
                         .map(|stage| (stage, texts.get(*stage)))
                         .collect::<Vec<_>>(),
                 );
+                seen.push((&*router.name, chain.clone()));
                 compiled.set_chain(chain.into_boxed_slice(), digest);
             }
             Err(invalid) => rejected.push(Rejected::new(
@@ -870,6 +877,7 @@ fn stages_of(
             )),
         }
     }
+    rejected.extend(middleware::quota::bind_claims(app, &mut stages, &seen));
     stages
 }
 

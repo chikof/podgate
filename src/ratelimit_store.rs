@@ -29,6 +29,7 @@
 
 mod circuit;
 mod file;
+pub mod quota;
 mod resp;
 
 use std::collections::BTreeMap;
@@ -170,12 +171,14 @@ impl From<RespError> for StoreError {
     }
 }
 
-/// What a request does when the store fails, for the error counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a request does when the store gives no verdict: the `on_store_error` of a middleware
+/// that counts in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// The request is admitted if the local fallback allows it.
+    /// Admit it. A middleware with a local limit applies that one.
     Allow,
-    /// The request is refused.
+    /// Refuse it with `503`.
     Deny,
 }
 
@@ -251,6 +254,12 @@ pub struct Store {
     inflight_used: AtomicBool,
     /// Requests of cluster `in_flight_req` that met a store error, by [`Mode`].
     inflight_errors: [AtomicU64; 2],
+    /// Whether a quota has used the store.
+    quota_used: AtomicBool,
+    /// Requests of a quota that met a store error, by [`Mode`].
+    quota_errors: [AtomicU64; 2],
+    /// Requests a quota admitted without counting them, because the store gave no verdict.
+    quota_unmetered: AtomicU64,
 }
 
 impl fmt::Debug for Store {
@@ -296,6 +305,9 @@ impl Store {
             errors: [AtomicU64::new(0), AtomicU64::new(0)],
             inflight_used: AtomicBool::new(false),
             inflight_errors: [AtomicU64::new(0), AtomicU64::new(0)],
+            quota_used: AtomicBool::new(false),
+            quota_errors: [AtomicU64::new(0), AtomicU64::new(0)],
+            quota_unmetered: AtomicU64::new(0),
             spec,
         });
         let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
@@ -338,6 +350,24 @@ impl Store {
     /// of its middleware.
     pub fn count_inflight_error(&self, mode: Mode) {
         self.inflight_errors[mode as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Notes that a quota uses the store, so its series are exposed.
+    pub(crate) fn note_quota_use(&self) {
+        if !self.quota_used.load(Ordering::Relaxed) {
+            self.quota_used.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Counts a request of a quota that met a store error and took the `mode` of its middleware.
+    pub fn count_quota_error(&self, mode: Mode) {
+        self.quota_errors[mode as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a request a quota admitted without counting it: the store gave no verdict and the
+    /// middleware's `on_store_error` is `allow`.
+    pub fn count_quota_unmetered(&self) {
+        self.quota_unmetered.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether the last call succeeded; `None` before the first call.
@@ -675,6 +705,60 @@ pub fn render(out: &mut String) {
                 counter.load(Ordering::Relaxed)
             );
         }
+    }
+    let quota: Vec<&Arc<Store>> = stores
+        .iter()
+        .filter(|store| store.quota_used.load(Ordering::Relaxed))
+        .collect();
+    let up = "podgate_quota_store_up";
+    let _ = writeln!(
+        out,
+        "# HELP {up} 1 when the last call to the store of a quota succeeded, 0 when it failed or its circuit is open; absent before the first call.\n# TYPE {up} gauge"
+    );
+    for store in &quota {
+        if let Some(is_up) = store.is_up() {
+            let _ = writeln!(
+                out,
+                "{up}{{store=\"{}\"}} {}",
+                Escaped(&store.name),
+                u8::from(is_up && !store.circuit.is_open())
+            );
+        }
+    }
+    let errors = "podgate_quota_store_errors_total";
+    let _ = writeln!(
+        out,
+        "# HELP {errors} Requests of a quota that met a store error, by what their middleware's on_store_error did.\n# TYPE {errors} counter"
+    );
+    for store in &quota {
+        for (mode, counter) in [Mode::Allow, Mode::Deny]
+            .into_iter()
+            .zip(&store.quota_errors)
+        {
+            let _ = writeln!(
+                out,
+                "{errors}{{store=\"{}\",mode=\"{}\"}} {}",
+                Escaped(&store.name),
+                match mode {
+                    Mode::Allow => "allow",
+                    Mode::Deny => "deny",
+                },
+                counter.load(Ordering::Relaxed)
+            );
+        }
+    }
+    let unmetered = "podgate_quota_unmetered_total";
+    let _ = writeln!(
+        out,
+        "# HELP {unmetered} Requests a quota admitted without counting them, because the store gave no verdict and on_store_error is allow.\n# TYPE {unmetered} counter"
+    );
+    for store in &quota {
+        let _ = writeln!(
+            out,
+            "{unmetered}{{store=\"{}\"}} {}",
+            Escaped(&store.name),
+            store.quota_unmetered.load(Ordering::Relaxed)
+        );
     }
 }
 

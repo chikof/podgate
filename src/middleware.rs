@@ -61,6 +61,7 @@ pub mod opa;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod plugin;
+pub mod quota;
 pub mod rate_limit;
 pub mod redirect;
 pub mod redirect_regex;
@@ -886,6 +887,8 @@ kinds! {
 
     "in_flight_req" => InFlightReq(in_flight_req::InFlightReq),
 
+    "quota" => Quota(quota::Quota),
+
     "circuit_breaker" => CircuitBreaker(circuit_breaker::CircuitBreaker),
 
     "retry" => Retry(retry::Retry),
@@ -958,6 +961,8 @@ schemas! {
     "rate_limit" => rate_limit::Config,
 
     "in_flight_req" => in_flight_req::Config,
+
+    "quota" => quota::Config,
 
     "circuit_breaker" => circuit_breaker::Config,
 

@@ -214,6 +214,16 @@ pub enum AppError {
     /// `503`, retry in a second.
     #[error("in-flight limiter unavailable")]
     InflightStoreUnavailable,
+    /// A `quota` source has used up its quota for the window: `429`, with `retry-after` the
+    /// whole seconds to the window end (at least 1).
+    #[error("quota exceeded")]
+    QuotaExceeded {
+        /// Seconds until the window ends.
+        retry_after_secs: u32,
+    },
+    /// A `quota` with `on_store_error: "deny"` cannot reach its store: `503`, retry in a second.
+    #[error("quota unavailable")]
+    QuotaUnavailable,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -257,8 +267,11 @@ impl AppError {
             | Self::LimiterBusy
             | Self::RateLimiterUnavailable
             | Self::InflightStoreUnavailable
+            | Self::QuotaUnavailable
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
-            Self::RateLimited { .. } | Self::TooManyInFlight => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited { .. } | Self::TooManyInFlight | Self::QuotaExceeded { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -278,6 +291,7 @@ impl AppError {
             | Self::LimiterBusy
             | Self::RateLimiterUnavailable
             | Self::InflightStoreUnavailable
+            | Self::QuotaUnavailable
             | Self::Saturated
             | Self::StaticBusy
             | Self::StaticOverBudget
@@ -290,7 +304,9 @@ impl AppError {
             | Self::PluginSaturated
             | Self::AuthOverBudget
             | Self::OidcBusy => Some(1),
-            Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
+            Self::RateLimited { retry_after_secs } | Self::QuotaExceeded { retry_after_secs } => {
+                Some(*retry_after_secs)
+            }
             Self::WakeTimeout => Some(5),
             Self::Fastcgi(failure) => failure.retry_after_secs(),
             _ => None,
@@ -313,6 +329,8 @@ impl AppError {
                 | Self::LimiterBusy
                 | Self::RateLimiterUnavailable
                 | Self::InflightStoreUnavailable
+                | Self::QuotaExceeded { .. }
+                | Self::QuotaUnavailable
                 | Self::Saturated
                 | Self::StaticBusy
                 | Self::StaticOverBudget
@@ -371,6 +389,8 @@ impl AppError {
             Self::LimiterBusy => "limiter_busy",
             Self::RateLimiterUnavailable => "rate_limit_store_unavailable",
             Self::InflightStoreUnavailable => "inflight_store_unavailable",
+            Self::QuotaExceeded { .. } => "quota_exceeded",
+            Self::QuotaUnavailable => "quota_store_unavailable",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::WriterOwned { .. } => "writer_owned",
