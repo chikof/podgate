@@ -125,12 +125,14 @@ pub fn set_cookie(
     let Some(selected) = selected.filter(|selected| !selected.pinned) else {
         return Ok(());
     };
-    if shared_cacheable(&response.headers) {
-        return Ok(());
-    }
+    // The cheap test first: nearly every snapshot has no secret, and `shared_cacheable` parses
+    // the response's `Cache-Control`.
     let Some(secret) = table.skew_secret() else {
         return Ok(());
     };
+    if shared_cacheable(&response.headers) {
+        return Ok(());
+    }
     let Some(app) = table.app(selected.app) else {
         return Ok(());
     };

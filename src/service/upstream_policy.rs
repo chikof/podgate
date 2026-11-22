@@ -526,14 +526,12 @@ impl UpstreamPolicy {
         Self::parse(&text)
     }
 
-    fn allow_list(&self, tenant: &str) -> Option<(&[Cidr], Box<str>)> {
+    /// The allow list that applies to `tenant` and, when it is the tenant's own, the tenant:
+    /// `None` there means the default entry's. The scope text is built only for a refusal.
+    fn allow_list<'a>(&'a self, tenant: &'a str) -> Option<(&'a [Cidr], Option<&'a str>)> {
         match self.inner.tenants.get(tenant) {
-            Some(list) => Some((list, format!("tenant {tenant}").into())),
-            None => self
-                .inner
-                .default_allow
-                .as_deref()
-                .map(|list| (list, "the default entry".into())),
+            Some(list) => Some((list, Some(tenant))),
+            None => self.inner.default_allow.as_deref().map(|list| (list, None)),
         }
     }
 
@@ -556,8 +554,14 @@ impl UpstreamPolicy {
             return Err(Refused::Denied { ip, range: *range });
         }
         match self.allow_list(tenant) {
-            Some((allow, scope)) if !allow.iter().any(|range| range.contains(seen)) => {
-                Err(Refused::NotAllowed { ip, scope })
+            Some((allow, owner)) if !allow.iter().any(|range| range.contains(seen)) => {
+                Err(Refused::NotAllowed {
+                    ip,
+                    scope: owner.map_or_else(
+                        || "the default entry".into(),
+                        |tenant| format!("tenant {tenant}").into(),
+                    ),
+                })
             }
             _ => Ok(()),
         }
