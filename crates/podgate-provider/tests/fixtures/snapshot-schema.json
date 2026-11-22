@@ -2997,6 +2997,84 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.opa": {
+      "additionalProperties": false,
+      "description": "The configuration of an `opa` middleware.",
+      "properties": {
+        "address": {
+          "description": "The Data API URL of the policy, ending in `/v1/data/<policy path>`, with no query.",
+          "type": "string"
+        },
+        "include_query": {
+          "default": false,
+          "description": "Send the request's query string as `input.query`.",
+          "type": "boolean"
+        },
+        "max_concurrent": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_response_bytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "request_headers": {
+          "default": [],
+          "description": "Request headers sent as `input.headers`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "response_headers": {
+          "default": [],
+          "description": "Headers the policy may set in its result.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transport": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "opa"
+        }
+      },
+      "required": [
+        "address",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.pass_tls_client_cert": {
       "additionalProperties": false,
       "description": "The configuration of a `pass_tls_client_cert` middleware.",
@@ -5321,6 +5399,7 @@
       "ip_allow_list": "#/$defs/middleware.ip_allow_list",
       "jwt_auth": "#/$defs/middleware.jwt_auth",
       "oidc": "#/$defs/middleware.oidc",
+      "opa": "#/$defs/middleware.opa",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
       "plugin": "#/$defs/middleware.plugin",
       "rate_limit": "#/$defs/middleware.rate_limit",

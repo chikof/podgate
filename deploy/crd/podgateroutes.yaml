@@ -281,6 +281,19 @@ spec:
                     - issuer
                     - client_id
                   - properties:
+                      max_concurrent:
+                        minimum: 0
+                      max_response_bytes:
+                        minimum: 0
+                      timeout_secs:
+                        minimum: 0
+                      type:
+                        enum:
+                        - opa
+                    required:
+                    - type
+                    - address
+                  - properties:
                       type:
                         enum:
                         - pass_tls_client_cert
@@ -581,6 +594,9 @@ spec:
                         type: string
                       nullable: true
                       type: array
+                    include_query:
+                      description: Send the request's query string as `input.query`.
+                      type: boolean
                     info:
                       description: 'Send these fields in `X-Forwarded-Tls-Client-Cert-Info`. Absent: no info header.'
                       nullable: true
@@ -913,10 +929,7 @@ spec:
                           type: object
                       type: object
                     request_headers:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
+                      x-kubernetes-preserve-unknown-fields: true
                     required_claims:
                       additionalProperties:
                         description: One value, or a list of which one must match.
@@ -1226,6 +1239,7 @@ spec:
                       - ip_allow_list
                       - jwt_auth
                       - oidc
+                      - opa
                       - pass_tls_client_cert
                       - plugin
                       - rate_limit
