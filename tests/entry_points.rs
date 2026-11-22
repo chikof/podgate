@@ -403,3 +403,24 @@ async fn entry_points_share_one_worker_pool() {
         "3 HTTP and HTTPS entry points should share one pool of {cpus} workers, found {workers} threads"
     );
 }
+
+/// a `tcp` entry point joins the same pool. Its own pool would add `cpus` threads named
+/// `tcp entry point`.
+#[tokio::test]
+async fn tcp_entry_point_shares_the_worker_pool() {
+    let podgate = Podgate::start_with_entry_points(
+        &[("public", "http"), ("secure", "https"), ("pg", "tcp")],
+        &[],
+    )
+    .await;
+    let workers = std::fs::read_dir(format!("/proc/{}/task", podgate.pid()))
+        .expect("the task directory of the running podgate")
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|name| name.starts_with("entry point") || name.starts_with("tcp entry point"))
+        .count();
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    assert!(
+        (cpus..2 * cpus).contains(&workers),
+        "HTTP, HTTPS and TCP entry points should share one pool of {cpus} workers, found {workers} threads"
+    );
+}

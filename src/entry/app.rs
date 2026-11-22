@@ -51,10 +51,11 @@ pub fn policed(
     }
 }
 
-/// The runtime group every HTTP and HTTPS entry point service joins: one pool of
-/// `ServerConf.threads` workers serves all of them. A pool per entry point put `n` times as many
-/// workers as CPUs on the machine, and the idle ones made the busy ones park and wake twice as
-/// often. The name is the workers' thread name, which Linux cuts at 15 characters.
+/// The runtime group every HTTP, HTTPS and TCP entry point service joins:
+/// one pool of `ServerConf.threads` workers serves all of them. A pool per entry point put `n`
+/// times as many workers as CPUs on the machine, and the idle ones made the busy ones park and
+/// wake twice as often. The name is the workers' thread name, which Linux cuts at 15
+/// characters.
 pub const RUNTIME_GROUP: &str = "entry points";
 
 /// The service for the entry point `gateway` serves; add its listeners to it as to any

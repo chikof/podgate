@@ -27,7 +27,7 @@ Any invalid value stops startup with `invalid ENTRY_POINTS: entry "<the entry>":
 
 Each `http` or `https` entry point is one Pingora proxy service, built from the same `Gateway` (so the same table, budgets, admission and certificate store), with its name in `Ctx.entry_point`. A request is matched only among routers that listen on that name. An `https` entry point shares the certificate store and the SNI hooks with every other `https` entry point.
 
-Pingora gives every service its own worker pool, so each additional entry point adds one pool of `available_parallelism` threads.
+Pingora gives every service its own worker pool, so each additional entry point would add one pool of `available_parallelism` threads. podgate puts the service of every `http`, `https` and `tcp` entry point on one shared pool (`entry::app::RUNTIME_GROUP`); `udp` entry points and the HTTP/3 front keep a pool of their own.
 
 ## In the snapshot
 
