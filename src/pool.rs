@@ -52,6 +52,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use http::header::{AUTHORIZATION, HeaderName, PROXY_AUTHORIZATION};
 use pingora::http::RequestHeader;
 use pingora::proxy::Session;
 use pingora::upstreams::peer::HttpPeer;
@@ -63,8 +64,9 @@ use crate::table::RoutingTable;
 /// downstream keepalive, so it outlives the downstream connection it belongs to by at most that.
 pub const PINNED_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The request headers that can carry a connection-based authentication scheme.
-const AUTH_HEADERS: [&str; 2] = ["authorization", "proxy-authorization"];
+/// The request headers that can carry a connection-based authentication scheme. Header name
+/// constants, so a lookup does not parse a name per request.
+const AUTH_HEADERS: [HeaderName; 2] = [AUTHORIZATION, PROXY_AUTHORIZATION];
 
 /// Keys the group hash per process, so a group key cannot be predicted or collided on purpose.
 static KEYS: LazyLock<RandomState> = LazyLock::new(RandomState::new);
@@ -82,15 +84,11 @@ pub struct State {
     pinned: bool,
 }
 
-/// Who a pooled upstream connection belongs to. Borrowed from the routing table.
+/// Who a pooled upstream connection belongs to.
 #[derive(Debug, Clone, Copy)]
-pub struct Identity<'a> {
-    /// The owning tenant's id.
-    pub tenant: &'a str,
-    /// The app's id.
-    pub app: &'a str,
-    /// The revision's id.
-    pub revision: &'a str,
+pub struct Identity {
+    /// [`scope`] of the owning tenant, app and revision, computed when the table was compiled.
+    pub scope: u64,
     /// The transport the connection is made with: its fingerprint and whether it is TLS.
     pub transport: u64,
 }
@@ -106,18 +104,26 @@ enum Pin {
     Request(u64),
 }
 
-impl<'a> Identity<'a> {
+/// The one number that stands for a tenant, an app and a revision, keyed per process like the
+/// group key it goes into. The table computes it once per revision, so a request does not hash
+/// three strings.
+#[must_use]
+pub fn scope(tenant: &str, app: &str, revision: &str) -> u64 {
+    KEYS.hash_one((tenant, app, revision))
+}
+
+impl Identity {
     /// The identity of the app and revision `selected` points at in `table`, reached through the
     /// transport with pool key `transport` ([`crate::service::Upstream::pool_key`]), or `None`
     /// when it points outside the table.
     #[must_use]
-    pub fn of(table: &'a RoutingTable, selected: &Selected, transport: u64) -> Option<Self> {
-        let app = table.app(selected.app)?;
-        let revision = app.revisions().get(selected.revision)?;
+    pub fn of(table: &RoutingTable, selected: &Selected, transport: u64) -> Option<Self> {
+        let revision = table
+            .app(selected.app)?
+            .revisions()
+            .get(selected.revision)?;
         Some(Self {
-            tenant: app.tenant(),
-            app: app.id(),
-            revision: revision.id(),
+            scope: revision.pool_scope(),
             transport,
         })
     }
@@ -142,7 +148,7 @@ pub fn carries_connection_auth(request: &RequestHeader) -> bool {
     AUTH_HEADERS.iter().any(|name| {
         request
             .headers
-            .get_all(*name)
+            .get_all(name)
             .iter()
             .any(|value| is_connection_scheme(value.as_bytes()))
     })
@@ -172,7 +178,7 @@ pub fn restore(state: &mut State, previous: Box<dyn Any + Send + Sync>) {
 /// setting, before returning the peer.
 pub fn isolate(
     peer: &mut HttpPeer,
-    identity: Identity<'_>,
+    identity: Identity,
     state: State,
     session: &Session,
     client: Option<SocketAddr>,
@@ -195,15 +201,8 @@ pub fn isolate(
     peer.group_key = group_key(identity, pin, client);
 }
 
-fn group_key(identity: Identity<'_>, pin: Pin, client: Option<SocketAddr>) -> u64 {
-    KEYS.hash_one((
-        identity.tenant,
-        identity.app,
-        identity.revision,
-        identity.transport,
-        pin,
-        client,
-    ))
+fn group_key(identity: Identity, pin: Pin, client: Option<SocketAddr>) -> u64 {
+    KEYS.hash_one((identity.scope, identity.transport, pin, client))
 }
 
 fn pin_for(session: &Session) -> Pin {
@@ -232,18 +231,22 @@ mod test {
         request
     }
 
-    fn peer(addr: &str, identity: Identity<'_>, pin: Pin) -> HttpPeer {
+    fn peer(addr: &str, identity: Identity, pin: Pin) -> HttpPeer {
         let mut peer = HttpPeer::new(addr, false, String::new());
         peer.group_key = group_key(identity, pin, None);
         peer
     }
 
-    const IDENTITY: Identity<'static> = Identity {
-        tenant: "t1",
-        app: "a",
-        revision: "r1",
-        transport: 0,
-    };
+    fn identity(tenant: &str, app: &str, revision: &str) -> Identity {
+        Identity {
+            scope: scope(tenant, app, revision),
+            transport: 0,
+        }
+    }
+
+    fn base() -> Identity {
+        identity("t1", "a", "r1")
+    }
 
     #[test]
     fn auth_scheme_detect() {
@@ -306,57 +309,29 @@ mod test {
     #[test]
     fn reuse_hash_separates_tenant_app_revision_and_address() {
         use pingora::upstreams::peer::Peer;
-        let base = peer("127.0.0.1:9000", IDENTITY, Pin::Shared);
-        let same = peer("127.0.0.1:9000", IDENTITY, Pin::Shared);
-        assert_eq!(base.reuse_hash(), same.reuse_hash());
+        let reference = peer("127.0.0.1:9000", base(), Pin::Shared);
+        let same = peer("127.0.0.1:9000", base(), Pin::Shared);
+        assert_eq!(reference.reuse_hash(), same.reuse_hash());
 
         let other = |identity| peer("127.0.0.1:9000", identity, Pin::Shared).reuse_hash();
+        assert_ne!(reference.reuse_hash(), other(identity("t2", "a", "r1")));
+        assert_ne!(reference.reuse_hash(), other(identity("t1", "b", "r1")));
+        assert_ne!(reference.reuse_hash(), other(identity("t1", "a", "r2")));
         assert_ne!(
-            base.reuse_hash(),
-            other(Identity {
-                tenant: "t2",
-                ..IDENTITY
-            })
-        );
-        assert_ne!(
-            base.reuse_hash(),
-            other(Identity {
-                app: "b",
-                ..IDENTITY
-            })
-        );
-        assert_ne!(
-            base.reuse_hash(),
-            other(Identity {
-                revision: "r2",
-                ..IDENTITY
-            })
-        );
-        assert_ne!(
-            base.reuse_hash(),
-            peer("127.0.0.1:9001", IDENTITY, Pin::Shared).reuse_hash()
+            reference.reuse_hash(),
+            peer("127.0.0.1:9001", base(), Pin::Shared).reuse_hash()
         );
         // Field boundaries count: ("ab", "c") is not ("a", "bc").
         assert_ne!(
-            other(Identity {
-                tenant: "ab",
-                app: "c",
-                revision: "r1",
-                transport: 0
-            }),
-            other(Identity {
-                tenant: "a",
-                app: "bc",
-                revision: "r1",
-                transport: 0
-            })
+            other(identity("ab", "c", "r1")),
+            other(identity("a", "bc", "r1"))
         );
     }
 
     #[test]
     fn pins_never_share_with_each_other_or_the_shared_pool() {
         use pingora::upstreams::peer::Peer;
-        let hash = |pin| peer("127.0.0.1:9000", IDENTITY, pin).reuse_hash();
+        let hash = |pin| peer("127.0.0.1:9000", base(), pin).reuse_hash();
         let all = [
             hash(Pin::Shared),
             hash(Pin::Connection(1)),
@@ -378,7 +353,7 @@ mod test {
                 "127.0.0.1:9000",
                 Identity {
                     transport,
-                    ..IDENTITY
+                    ..base()
                 },
                 Pin::Shared,
             )
@@ -395,7 +370,7 @@ mod test {
         let hash = |client: Option<&str>| {
             let mut peer = HttpPeer::new("127.0.0.1:9000", false, String::new());
             peer.group_key = group_key(
-                IDENTITY,
+                base(),
                 Pin::Shared,
                 client.map(|text| text.parse().expect("address")),
             );

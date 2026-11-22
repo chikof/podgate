@@ -31,6 +31,7 @@ use crate::middleware;
 use crate::observe::access_log::{self, Policy};
 use crate::observe::metrics::{self, TableSeries};
 use crate::observe::tracing as trace;
+use crate::pool;
 use crate::router::{CompiledRouter, Index, Matched};
 use crate::service::graph::{self, Graph, Link, Links, Node, Path, Readiness, Trail};
 use crate::service::state::now_ms;
@@ -135,6 +136,9 @@ pub struct CompiledRevision {
     /// Whether some router's service here can answer: it has a server below it, or is a static
     /// service.
     backed: bool,
+    /// [`pool::scope`] of the revision's tenant, app and id; set when the app is assembled, which
+    /// is the first place all three are known.
+    pool_scope: u64,
 }
 
 impl CompiledRevision {
@@ -156,6 +160,7 @@ impl CompiledRevision {
             mirrors: mirrors.into_boxed_slice(),
             links,
             backed,
+            pool_scope: 0,
         }
     }
 
@@ -163,6 +168,13 @@ impl CompiledRevision {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// [`pool::scope`] of the revision's tenant, app and id: what its upstream connections are
+    /// partitioned by.
+    #[must_use]
+    pub(crate) fn pool_scope(&self) -> u64 {
+        self.pool_scope
     }
 
     /// The revision's lifecycle state.
@@ -265,7 +277,10 @@ pub struct Pick {
 
 impl CompiledApp {
     pub(crate) fn assemble(app: &App, parts: Parts) -> Self {
-        let revisions: Box<[CompiledRevision]> = parts.revisions.into_boxed_slice();
+        let mut revisions: Box<[CompiledRevision]> = parts.revisions.into_boxed_slice();
+        for revision in &mut revisions {
+            revision.pool_scope = pool::scope(&app.tenant, &app.id, &revision.id);
+        }
         let canary = app.canary.as_ref().and_then(|policy| {
             let index = app
                 .revisions
