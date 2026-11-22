@@ -35,7 +35,7 @@
 mod client;
 
 pub use client::Client;
-pub(super) use client::{Parsed, Route, parse_url};
+pub(super) use client::{ALLOWANCE, Parsed, REQUEST_LIMIT, Route, parse_url};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -189,7 +189,7 @@ pub(super) fn reserved(name: &HeaderName) -> bool {
 
 /// Whether a header of the auth service's refusal reaches the client: not the connection's own,
 /// not what describes the auth service itself, not what podgate sets.
-fn relayable(name: &HeaderName) -> bool {
+pub(super) fn relayable(name: &HeaderName) -> bool {
     let name = name.as_str();
     !(headers::FORBIDDEN.contains(&name)
         || name.starts_with("proxy-")

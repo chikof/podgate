@@ -108,6 +108,15 @@ pub enum AppError {
     /// on.
     #[error("auth service unavailable")]
     AuthSaturated,
+    /// An `opa` call failed (no connection, refused by the upstream address policy, timed out,
+    /// an answer over its cap, not valid HTTP/1.1, not `200`, or a `result` that is not a
+    /// verdict): `503`. The request is never passed on. A deny is `403`, never this.
+    #[error("authorizer unavailable")]
+    AuthorizerUnavailable,
+    /// An `opa` call found no room (the stage is at `max_concurrent`, or the tenant's buffer
+    /// budget is full right now): `503`, retry in a second. The request is never passed on.
+    #[error("authorizer unavailable")]
+    AuthorizerSaturated,
     /// A `plugin` call failed (the plugin is down, too slow, answered something unusable, or
     /// its circuit is open) under `on_plugin_error: "fail_closed"`: `503`. The request is never
     /// passed on.
@@ -238,6 +247,8 @@ impl AppError {
             | Self::AuthBusy
             | Self::AuthUnavailable
             | Self::AuthSaturated
+            | Self::AuthorizerUnavailable
+            | Self::AuthorizerSaturated
             | Self::PluginUnavailable
             | Self::PluginSaturated
             | Self::JwtUnavailable
@@ -275,6 +286,7 @@ impl AppError {
             | Self::BufferingOverBudget
             | Self::AuthBusy
             | Self::AuthSaturated
+            | Self::AuthorizerSaturated
             | Self::PluginSaturated
             | Self::AuthOverBudget
             | Self::OidcBusy => Some(1),
@@ -309,6 +321,7 @@ impl AppError {
                 | Self::BufferingOverBudget
                 | Self::AuthBusy
                 | Self::AuthSaturated
+                | Self::AuthorizerSaturated
                 | Self::PluginSaturated
                 | Self::OidcBusy
         ) || matches!(self, Self::Fastcgi(failure) if failure.is_capacity_refusal())
@@ -341,6 +354,8 @@ impl AppError {
             Self::AuthBusy => "auth_busy",
             Self::AuthUnavailable => "auth_unavailable",
             Self::AuthSaturated => "auth_saturated",
+            Self::AuthorizerUnavailable => "opa_unavailable",
+            Self::AuthorizerSaturated => "opa_saturated",
             Self::PluginUnavailable => "plugin_unavailable",
             Self::PluginSaturated => "plugin_saturated",
             Self::AuthOverBudget => "auth_over_budget",

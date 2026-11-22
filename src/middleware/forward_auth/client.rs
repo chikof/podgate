@@ -36,11 +36,11 @@ use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{Server, Transport, Upstream};
 
 /// The most bytes the request head may take; a longer one is not sent.
-pub(super) const REQUEST_LIMIT: usize = 32 * 1024;
+pub(in crate::middleware) const REQUEST_LIMIT: usize = 32 * 1024;
 
 /// What a call holds besides the body: the request, the response head and the read buffers. A
 /// caller charges this plus the body cap to the tenant before it calls.
-pub(super) const ALLOWANCE: u64 = (REQUEST_LIMIT + HEAD_LIMIT + 2 * READ) as u64;
+pub(in crate::middleware) const ALLOWANCE: u64 = (REQUEST_LIMIT + HEAD_LIMIT + 2 * READ) as u64;
 
 /// The most headers an answer may carry.
 const MAX_HEADERS: usize = 100;

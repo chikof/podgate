@@ -1163,6 +1163,8 @@ pub struct TableHandle {
     in_flight_conns: Arc<crate::l4::middleware::Registry>,
     // Permits of `forward_auth` middlewares; touched only by `swap`.
     forward_auths: Arc<middleware::forward_auth::Registry>,
+    // Permits of `opa` middlewares; touched only by `swap`.
+    opas: Arc<middleware::opa::Registry>,
     // Cached keys and counters of `jwt_auth` middlewares; touched only by `swap`.
     jwt_auths: Arc<middleware::jwt_auth::Registry>,
     // Cached provider documents, keys and counters of `oidc` middlewares; touched only by `swap`.
@@ -1344,6 +1346,7 @@ impl TableHandle {
         self.in_flight_reqs.settle(&mut table.apps);
         self.in_flight_conns.settle(&mut table.apps);
         self.forward_auths.settle(&mut table.apps);
+        self.opas.settle(&mut table.apps);
         self.jwt_auths.settle(&mut table.apps);
         self.oidcs.settle(&mut table.apps);
         self.metrics.settle(&mut table);

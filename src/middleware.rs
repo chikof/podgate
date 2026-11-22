@@ -57,6 +57,7 @@ pub mod ip_allow_list;
 pub mod jwt_auth;
 pub(crate) mod limits;
 pub mod oidc;
+pub mod opa;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod plugin;
@@ -123,6 +124,9 @@ pub struct RequestCx<'a> {
     pub reason: &'a mut Option<&'static str>,
     /// The name of the router that matched, for a hook that tells an extension where it runs.
     pub router: &'a str,
+    /// The claims a `jwt_auth` stage of the chain verified, for a stage that decides on them
+    /// (`opa`). Never read from a request header, so a client cannot write them.
+    pub claims: Option<serde_json::Map<String, Value>>,
 }
 
 /// The stages of the chain that come before the one running a routed hook, with their per-request
@@ -874,6 +878,8 @@ kinds! {
 
     "oidc" => Oidc(oidc::Oidc),
 
+    "opa" => Opa(opa::Opa),
+
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => RateLimit(rate_limit::RateLimit),
@@ -944,6 +950,8 @@ schemas! {
     "jwt_auth" => jwt_auth::Config,
 
     "oidc" => oidc::Config,
+
+    "opa" => opa::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 
@@ -1097,6 +1105,7 @@ pub async fn run_routed(
         StageState::ForwardAuth(auth) => auth.identified(),
         StageState::JwtAuth(auth) => auth.verified(),
         StageState::Oidc(auth) => auth.authenticated(),
+        StageState::Opa(auth) => auth.identified(),
         _ => false,
     });
     cx.original = state.original.take();

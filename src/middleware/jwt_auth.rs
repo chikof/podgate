@@ -935,6 +935,7 @@ impl Kind for JwtAuth {
                         source.strip(request);
                     }
                 }
+                cx.claims = Some(claims);
                 Ok(Flow::Continue)
             }
             Err(failure) => {

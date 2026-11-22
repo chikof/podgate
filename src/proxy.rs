@@ -429,6 +429,7 @@ impl Gateway {
             body_held: &mut ctx.body_held,
             reason: &mut ctx.access.reason,
             router: router.name(),
+            claims: None,
         };
         let flow =
             middleware::run_request(app.stages(), router.chain(), &mut cx, &mut ctx.chain).await?;
