@@ -144,7 +144,7 @@ async fn h3_connection(
     let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
     endpoint.set_default_client_config(config);
     let conn = endpoint.connect(addr, &name)?.await?;
-    let (mut driver, mut send) = h3::client::new(h3_quinn::Connection::new(conn)).await?;
+    let (mut driver, mut send) = Box::pin(h3::client::new(h3_quinn::Connection::new(conn))).await?;
     let driver = tokio::spawn(async move { driver.wait_idle().await });
     let uri = format!("https://{name}/");
     begin.wait().await;
@@ -180,11 +180,6 @@ fn percentile(sorted: &[u32], fraction: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
     let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
     f64::from(sorted[index]) / 1e6
 }
@@ -213,7 +208,6 @@ where
     let mut sorted = seen.micros;
     sorted.sort_unstable();
     let ok = sorted.len();
-    #[allow(clippy::cast_precision_loss)]
     let rate = ok as f64 / seconds as f64;
     let report = json!({
         "summary": { "requestsPerSec": rate },
@@ -258,7 +252,7 @@ fn h3(
         .map(|_| {
             let (name, config, begin) = (Arc::clone(&name), config.clone(), Arc::clone(&begin));
             async move {
-                h3_connection(addr, name, config, begin, run)
+                Box::pin(h3_connection(addr, name, config, begin, run))
                     .await
                     .unwrap_or_else(|err| Seen::failed(&err))
             }

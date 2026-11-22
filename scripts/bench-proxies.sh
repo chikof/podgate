@@ -354,8 +354,15 @@ probe() { # proxy: the routed host returns the backend's body, an unknown host a
       die "podgate: the tcp entry point on $TCP_PORT did not return the backend's 100 byte body"
   fi
   if [ "$proxy" = podgate ] && [ -n "$PODGATE_UDP" ]; then
-    [[ $("$LOAD_BIN" stats "127.0.0.1:$UDP_PORT" || true) =~ ^[0-9]+$ ]] ||
-      die "podgate: the udp entry point on $UDP_PORT did not carry a datagram to the echo and back"
+    # A datagram that arrives before the entry point has taken the pushed snapshot is dropped, so retry.
+    local carried=
+    for _ in 1 2 3 4 5; do
+      if [[ $("$LOAD_BIN" stats "127.0.0.1:$UDP_PORT" 2>/dev/null || true) =~ ^[0-9]+$ ]]; then
+        carried=1
+        break
+      fi
+    done
+    [ -n "$carried" ] || die "podgate: the udp entry point on $UDP_PORT did not carry a datagram to the echo and back"
   fi
   [ "$proxy" = podgate ] && [ -n "$PODGATE_NO_TLS" ] && return 0
   local tls=${TLS_PORT[$proxy]} version
