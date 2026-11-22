@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "tenants": [
+    {
+      "id": "bench",
+      "weight": 1,
+      "budget": { "max_inflight": 1000000, "max_buffer_bytes": 1073741824 }
+    }
+  ],
+  "apps": [
+    {
+      "id": "a",
+      "tenant": "bench",
+      "declared_by": "bench/podgate-snapshot-4b3834a.json.in",
+      "hosts": ["a.test"],
+      "tls": { "mode": "acme" },
+      "revisions": [
+        { "id": "r1", "upstreams": ["127.0.0.1:@BACKEND_PORT@"], "weight": 100, "state": "serving" }
+      ]
+    }
+  ]
+}

@@ -26,6 +26,7 @@
     pkgs.openssl # `openssl verify` in the internal CA tests
     pkgs.go # builds and tests the Yaegi host for Traefik Go plugins
     pkgs.gnuplot # SVG charts for docs/benchmarks.md, scripts/bench-charts.sh
+    pkgs.valgrind # callgrind instruction counts per request, scripts/bench-callgrind.sh
   ];
 
   # Secrets and local overrides come from the gitignored .env file. See .env.example.
