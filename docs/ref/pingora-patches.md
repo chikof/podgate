@@ -4,6 +4,16 @@ podgate carries patched copies of two Pingora 0.9.1 crates, wired by `[patch.cra
 
 Reproduce each against the registry crate: `diff -ru ~/.cargo/registry/src/*/pingora-proxy-0.9.1/src vendor/pingora-proxy/src`, and the same for `pingora-core-0.9.1` and `vendor/pingora-core/src`.
 
+Upstream status (2026-11-22, cloudflare/pingora `main` at `3f87e92`). Runnable reproductions and the patches as plain diffs against 0.9.1 are public in [chikof/pingora-repros](https://github.com/chikof/pingora-repros); the issues link them.
+
+|Section|Upstream|
+|---|---|
+|1|Already reported as [#946](https://github.com/cloudflare/pingora/issues/946) and [#1050](https://github.com/cloudflare/pingora/issues/1050), open PRs [#947](https://github.com/cloudflare/pingora/pull/947), [#1051](https://github.com/cloudflare/pingora/pull/1051) and [#1016](https://github.com/cloudflare/pingora/pull/1016); [comment](https://github.com/cloudflare/pingora/issues/946#issuecomment-7074951335) added in support of #947, not filed again.|
+|2|Filed as [#1139](https://github.com/cloudflare/pingora/issues/1139).|
+|3|Filed as [#1140](https://github.com/cloudflare/pingora/issues/1140).|
+|4|Filed as [#1141](https://github.com/cloudflare/pingora/issues/1141), as the rustls counterpart of `upstream_tls_verify_callback` (`cb16c87`, OpenSSL and BoringSSL only).|
+|5|Not filed yet; not in the reproduction repo yet.|
+
 ---
 
 ## 1. HTTP/1 upgrade: a `101` read before the request's end-of-body task closes the tunnel
