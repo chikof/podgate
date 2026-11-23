@@ -3470,6 +3470,11 @@
         "name": {
           "type": "string"
         },
+        "record_arguments": {
+          "default": false,
+          "description": "Keep the `arguments` of every `tools/call` in the audit log (`docs/ref/mcp-audit.md`), at\nmost 16 KiB, with the value under any key that looks secret replaced by `[redacted]`.\nDefault `false`: arguments are not recorded.",
+          "type": "boolean"
+        },
         "servers": {
           "description": "The registered servers: 1 to 16, each with a unique name.",
           "items": {

@@ -1177,6 +1177,12 @@ spec:
                       description: The realm of the challenge; default `podgate`.
                       nullable: true
                       type: string
+                    record_arguments:
+                      description: |-
+                        Keep the `arguments` of every `tools/call` in the audit log (`docs/ref/mcp-audit.md`), at
+                        most 16 KiB, with the value under any key that looks secret replaced by `[redacted]`.
+                        Default `false`: arguments are not recorded.
+                      type: boolean
                     recovery_secs:
                       description: |-
                         How long traffic takes to return from 0 to 100%, in seconds. Default `10`; `0` closes the
