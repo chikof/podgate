@@ -27,13 +27,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::header::{HeaderName, HeaderValue};
+use http::header::HeaderName;
 use pingora::http::ResponseHeader;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::limits::{IpSource, Source, SourceConfig};
 use super::{CompileCx, Flow, Kind, Named, RequestCx, Stage};
 use crate::compile::{Invalid, Rejected};
 use crate::error::AppError;
@@ -43,8 +42,9 @@ use crate::ratelimit_store::quota::{
 use crate::ratelimit_store::{MAX_TIMEOUT_MS, Mode, Store, StoreError, Stores};
 use podgate_model::{App, Declared, Snapshot};
 
-/// What an absent header counts as: a client cannot leave a quota by omitting the value.
-const ABSENT: &[u8] = b"-";
+mod keying;
+
+pub(super) use keying::{Keying, QuotaSource};
 
 /// Posture change kinds this middleware reports, see [`Kind::posture`].
 pub mod kind {
@@ -57,41 +57,6 @@ pub mod kind {
     pub const SOURCE_CHANGED: &str = "quota_source_changed";
     /// A quota that did not admit requests when its store fails now does.
     pub const FAIL_OPEN: &str = "quota_fail_open";
-}
-
-/// What a quota counts requests by.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum QuotaSource {
-    /// The client address under an `ipStrategy`.
-    Ip(IpSource),
-    /// The first value of a request header.
-    Header(String),
-    /// The host of the request; only `true` is valid.
-    Host(bool),
-    /// A verified claim of a token, copied into a header by a `jwt_auth` earlier in the chain.
-    JwtClaim(String),
-}
-
-impl QuotaSource {
-    /// The source as `rate_limit` writes it, or `None` for a claim.
-    fn common(&self) -> Option<SourceConfig> {
-        match self {
-            Self::Ip(ip) => Some(SourceConfig::Ip(ip.clone())),
-            Self::Header(name) => Some(SourceConfig::Header(name.clone())),
-            Self::Host(on) => Some(SourceConfig::Host(*on)),
-            Self::JwtClaim(_) => None,
-        }
-    }
-
-    fn describe(&self) -> Value {
-        match self {
-            Self::JwtClaim(claim) => json!({ "jwt_claim": claim }),
-            other => other
-                .common()
-                .map_or(Value::Null, |common| common.describe()),
-        }
-    }
 }
 
 /// The configuration of a `quota` middleware.
@@ -111,17 +76,6 @@ pub(super) struct Config {
     store_timeout_ms: Option<u16>,
 }
 
-/// How a compiled quota finds the source of a request.
-#[derive(Debug)]
-enum Keyed {
-    Common(Source),
-    /// A claim and the header a `jwt_auth` copies it into, known once the chain is.
-    Claim {
-        claim: Box<str>,
-        header: Option<HeaderName>,
-    },
-}
-
 /// A compiled `quota` middleware.
 #[derive(Debug)]
 pub struct Quota {
@@ -130,8 +84,7 @@ pub struct Quota {
     store: Box<str>,
     mode: Mode,
     timeout_ms: Option<u16>,
-    source_config: QuotaSource,
-    keyed: Keyed,
+    keying: Keying,
     counter: Arc<Counter>,
 }
 
@@ -162,27 +115,6 @@ fn headers(usage: &Usage) -> [(&'static str, String); 3] {
 }
 
 impl Quota {
-    /// The claim this quota counts by, when its source is one.
-    fn claim(&self) -> Option<&str> {
-        match &self.keyed {
-            Keyed::Claim { claim, .. } => Some(&**claim),
-            Keyed::Common(_) => None,
-        }
-    }
-
-    fn source_id(&self, cx: &RequestCx<'_>) -> SourceId {
-        let request = cx.session.req_header();
-        match &self.keyed {
-            Keyed::Common(source) => source.with_material(request, cx.forwarded, SourceId::of),
-            Keyed::Claim { header, .. } => SourceId::of(
-                header
-                    .as_ref()
-                    .and_then(|name| request.headers.get(name))
-                    .map_or(ABSENT, HeaderValue::as_bytes),
-            ),
-        }
-    }
-
     async fn decide(
         &self,
         store: Option<&Arc<Store>>,
@@ -220,13 +152,6 @@ impl Quota {
             Mode::Deny => Err(Refusal::Unavailable),
         }
     }
-
-    /// Gives a claim source the header its claim is copied into.
-    fn bind(&mut self, found: HeaderName) {
-        if let Keyed::Claim { header, .. } = &mut self.keyed {
-            *header = Some(found);
-        }
-    }
 }
 
 impl Kind for Quota {
@@ -261,20 +186,13 @@ impl Kind for Quota {
                 "`store_timeout_ms` must be 1 to {MAX_TIMEOUT_MS}"
             )));
         }
-        let keyed = match (config.source.common(), &config.source) {
-            (Some(common), _) => Keyed::Common(Source::compile(&common).map_err(invalid)?),
-            (None, QuotaSource::JwtClaim(claim)) if !claim.is_empty() => Keyed::Claim {
-                claim: claim.as_str().into(),
-                header: None,
-            },
-            (None, _) => return Err(invalid("`source.jwt_claim` must name a claim")),
-        };
+        let keying = Keying::compile(config.source, "quota")?;
         // Only what names the counter: the limit, the timeout and the failure choice change
         // nothing a client has used. `admit` compares the count with the current limit, so a
         // lowered limit never hands out what was used already.
         let identity = json!({
             "period": config.period.name(),
-            "source": config.source.describe(),
+            "source": keying.describe(),
             "store": store,
         })
         .to_string();
@@ -292,8 +210,7 @@ impl Kind for Quota {
             store: store.into(),
             mode,
             timeout_ms: config.store_timeout_ms,
-            source_config: config.source,
-            keyed,
+            keying,
             counter: Counter::new(
                 &cx.app.tenant,
                 &cx.app.id,
@@ -307,7 +224,7 @@ impl Kind for Quota {
     }
 
     async fn request(&self, cx: &mut RequestCx<'_>, state: &mut State) -> pingora::Result<Flow> {
-        let id = self.source_id(cx);
+        let id = self.keying.id(cx);
         let stores = cx.stores;
         let refusal = match self.decide(stores.get(&self.store), id).await {
             Ok(usage) => {
@@ -357,7 +274,7 @@ impl Kind for Quota {
         {
             kinds.push(kind::LOOSENED);
         }
-        if self.source_config != new.source_config {
+        if self.keying.differs(&new.keying) {
             kinds.push(kind::SOURCE_CHANGED);
         }
         if new.mode == Mode::Allow && self.mode != Mode::Allow {
@@ -370,7 +287,7 @@ impl Kind for Quota {
         json!({
             "limit": self.limit,
             "period": self.period.name(),
-            "source": self.source_config.describe(),
+            "source": self.keying.describe(),
             "store": self.store,
             "on_store_error": match self.mode {
                 Mode::Allow => "allow",
@@ -432,7 +349,7 @@ pub(crate) fn bind_claims(
             else {
                 continue;
             };
-            let Some(claim) = quota.claim() else {
+            let Some(claim) = quota.keying.claim() else {
                 continue;
             };
             let header =
@@ -476,7 +393,7 @@ pub(crate) fn bind_claims(
             ..
         }) = stages.get_mut(index)
         {
-            quota.bind(header);
+            quota.keying.bind(header);
         }
     }
     rejected
