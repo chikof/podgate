@@ -492,7 +492,7 @@ async fn tbac_requires_identity() {
     }
     // An empty `tool_access` needs the identity too; without `tool_access` the gateway does not.
     let mut empty = no_jwt.clone();
-    empty["middlewares"][0]["config"]["tool_access"] = json!([]);
+    empty["middlewares"][0]["tool_access"] = json!([]);
     assert_eq!(
         podgate
             .push_snapshot(&budgeted(1, &[empty], BIG_BUDGET))
@@ -501,9 +501,9 @@ async fn tbac_requires_identity() {
         422
     );
     let mut open = no_jwt.clone();
-    open["middlewares"][0]["config"]
+    open["middlewares"][0]
         .as_object_mut()
-        .expect("config")
+        .expect("middleware")
         .remove("tool_access");
     push(&podgate, &budgeted(1, &[open], BIG_BUDGET)).await;
     // With a `jwt_auth` before it, the snapshot is accepted.
