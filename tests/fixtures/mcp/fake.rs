@@ -260,9 +260,24 @@ impl Behavior {
     }
 
     pub fn custom(name: &'static str, tools: &[&str], sse: bool, hold_open: bool) -> Arc<Self> {
+        Self::build(
+            name,
+            tools.iter().map(|tool| tool_object(tool)).collect(),
+            sse,
+            hold_open,
+        )
+    }
+
+    /// A server whose tools are exactly `tools`, tool objects as it lists them (to carry
+    /// annotations such as `readOnlyHint`).
+    pub fn with_tools(name: &'static str, tools: Vec<Value>) -> Arc<Self> {
+        Self::build(name, tools, false, false)
+    }
+
+    fn build(name: &'static str, tools: Vec<Value>, sse: bool, hold_open: bool) -> Arc<Self> {
         Arc::new(Self {
             name,
-            tools: tools.iter().map(|tool| tool_object(tool)).collect(),
+            tools,
             sse,
             hold_open,
             sessions: AtomicUsize::new(0),
