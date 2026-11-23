@@ -2051,6 +2051,169 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.content_guard": {
+      "additionalProperties": false,
+      "description": "The configuration of a `content_guard` middleware.",
+      "properties": {
+        "classifier": {
+          "additionalProperties": false,
+          "description": "An external classifier the operator named in `CONTENT_CLASSIFIERS_FILE`.",
+          "properties": {
+            "name": {
+              "description": "The name of an entry of `CONTENT_CLASSIFIERS_FILE` that lists the app's tenant.",
+              "type": "string"
+            },
+            "on_error": {
+              "description": "What to do when it cannot answer: `deny` (default, `503`) or `allow`.",
+              "oneOf": [
+                {
+                  "const": "deny",
+                  "description": "Close the door: `503`.",
+                  "type": "string"
+                },
+                {
+                  "const": "allow",
+                  "description": "Let the exchange through. A posture change in the plan.",
+                  "type": "string"
+                }
+              ]
+            },
+            "phase": {
+              "anyOf": [
+                {
+                  "description": "The part of an exchange a rule or the classifier looks at.",
+                  "oneOf": [
+                    {
+                      "const": "request",
+                      "description": "The request body.",
+                      "type": "string"
+                    },
+                    {
+                      "const": "response",
+                      "description": "The response body.",
+                      "type": "string"
+                    },
+                    {
+                      "const": "both",
+                      "description": "Both.",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What it judges: `request`, `response` or `both` (default)."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "max_body_bytes": {
+          "default": null,
+          "description": "The most body bytes that are held and scanned, 1 to 65536 (default 65536). A larger\nrequest is `413`, a larger response `502`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "rules": {
+          "description": "The rules, at most 64, run in declaration order. At least one rule or a classifier is\nrequired.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One rule as the snapshot declares it.",
+            "properties": {
+              "action": {
+                "description": "`block` or `redact`. No default.",
+                "oneOf": [
+                  {
+                    "const": "block",
+                    "description": "Refuse the exchange.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "redact",
+                    "description": "Replace each match with `[redacted:<name>]`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              "category": {
+                "default": null,
+                "description": "The label a `block` shows the client: `[a-z0-9_.-]`, at most 64 bytes. Default: the name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "Names the rule: `[a-z0-9_-]`, at most 32 bytes, unique. Printed in `[redacted:<name>]`.",
+                "type": "string"
+              },
+              "pattern": {
+                "description": "A `regex` crate pattern, at most 1024 bytes. A pattern that matches the empty string is\nrefused.",
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "description": "The part of an exchange a rule or the classifier looks at.",
+                    "oneOf": [
+                      {
+                        "const": "request",
+                        "description": "The request body.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "response",
+                        "description": "The response body.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "both",
+                        "description": "Both.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Where the rule runs (default `both`)."
+              }
+            },
+            "required": [
+              "name",
+              "pattern",
+              "action"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "content_guard"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.content_type": {
       "additionalProperties": false,
       "description": "The configuration of a `content_type` middleware.",
@@ -5968,6 +6131,7 @@
       "cache": "#/$defs/middleware.cache",
       "circuit_breaker": "#/$defs/middleware.circuit_breaker",
       "compress": "#/$defs/middleware.compress",
+      "content_guard": "#/$defs/middleware.content_guard",
       "content_type": "#/$defs/middleware.content_type",
       "digest_auth": "#/$defs/middleware.digest_auth",
       "errors": "#/$defs/middleware.errors",
