@@ -1009,6 +1009,16 @@ impl ProxyHttp for Gateway {
         ctx: &mut Ctx,
     ) -> pingora::Result<Option<Bytes>> {
         let mut tail = None;
+        // A stage that holds raw bytes back releases them here, ahead of the encoder's finish.
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            middleware::run_response_body_raw(
+                app.stages(),
+                router.chain(),
+                &mut tail,
+                true,
+                &mut ctx.chain,
+            )?;
+        }
         compress::filter(&mut ctx.compression, &mut tail, true)
             .map_err(|err| Error::because(InternalError, "compression failed", err))?;
         let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) else {
@@ -1058,6 +1068,16 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora::Result<Option<Duration>> {
+        // The model's own bytes, before the recorder and the compressor see anything.
+        if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
+            middleware::run_response_body_raw(
+                app.stages(),
+                router.chain(),
+                body,
+                end_of_stream,
+                &mut ctx.chain,
+            )?;
+        }
         ctx.failures.response_chunk(body.as_ref());
         compress::filter(&mut ctx.compression, body, end_of_stream)
             .map_err(|err| Error::because(InternalError, "compression failed", err))?;

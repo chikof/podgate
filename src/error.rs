@@ -258,6 +258,17 @@ pub enum AppError {
     /// A `quota` with `on_store_error: "deny"` cannot reach its store: `503`, retry in a second.
     #[error("quota unavailable")]
     QuotaUnavailable,
+    /// An `ai_token_limit` key has no tokens left in some window: `429`, with `retry-after` the
+    /// whole seconds until every spent window has reset (at least 1).
+    #[error("token budget exceeded")]
+    AiTokensExceeded {
+        /// Seconds until the key may call again.
+        retry_after_secs: u32,
+    },
+    /// An `ai_token_limit` with `on_store_error: "deny"` cannot reach its store: `503`, retry in
+    /// a second.
+    #[error("token budget unavailable")]
+    AiTokensUnavailable,
     /// Anything unexpected: `500`. The cause is logged, never sent to the client.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -305,10 +316,12 @@ impl AppError {
             | Self::RateLimiterUnavailable
             | Self::InflightStoreUnavailable
             | Self::QuotaUnavailable
+            | Self::AiTokensUnavailable
             | Self::AuthOverBudget => StatusCode::SERVICE_UNAVAILABLE,
-            Self::RateLimited { .. } | Self::TooManyInFlight | Self::QuotaExceeded { .. } => {
-                StatusCode::TOO_MANY_REQUESTS
-            }
+            Self::RateLimited { .. }
+            | Self::TooManyInFlight
+            | Self::QuotaExceeded { .. }
+            | Self::AiTokensExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
@@ -333,6 +346,7 @@ impl AppError {
             | Self::RateLimiterUnavailable
             | Self::InflightStoreUnavailable
             | Self::QuotaUnavailable
+            | Self::AiTokensUnavailable
             | Self::Saturated
             | Self::StaticBusy
             | Self::StaticOverBudget
@@ -346,9 +360,9 @@ impl AppError {
             | Self::GuardSaturated
             | Self::AuthOverBudget
             | Self::OidcBusy => Some(1),
-            Self::RateLimited { retry_after_secs } | Self::QuotaExceeded { retry_after_secs } => {
-                Some(*retry_after_secs)
-            }
+            Self::RateLimited { retry_after_secs }
+            | Self::QuotaExceeded { retry_after_secs }
+            | Self::AiTokensExceeded { retry_after_secs } => Some(*retry_after_secs),
             Self::WakeTimeout => Some(5),
             Self::Fastcgi(failure) => failure.retry_after_secs(),
             _ => None,
@@ -373,6 +387,8 @@ impl AppError {
                 | Self::InflightStoreUnavailable
                 | Self::QuotaExceeded { .. }
                 | Self::QuotaUnavailable
+                | Self::AiTokensExceeded { .. }
+                | Self::AiTokensUnavailable
                 | Self::Saturated
                 | Self::StaticBusy
                 | Self::StaticOverBudget
@@ -441,6 +457,8 @@ impl AppError {
             Self::InflightStoreUnavailable => "inflight_store_unavailable",
             Self::QuotaExceeded { .. } => "quota_exceeded",
             Self::QuotaUnavailable => "quota_store_unavailable",
+            Self::AiTokensExceeded { .. } => "ai_tokens_exceeded",
+            Self::AiTokensUnavailable => "ai_token_store_unavailable",
             Self::Unavailable(_) => "no_upstream",
             Self::NoHealthyUpstream => "no_healthy_upstream",
             Self::WriterOwned { .. } => "writer_owned",

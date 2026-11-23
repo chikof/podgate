@@ -1183,6 +1183,8 @@ pub struct TableHandle {
     jwt_auths: Arc<middleware::jwt_auth::Registry>,
     // Cached provider documents, keys and counters of `oidc` middlewares; touched only by `swap`.
     oidcs: Arc<middleware::oidc::Registry>,
+    // Token counts of `ai_token_limit` middlewares; touched only by `swap`.
+    ai_token_limits: Arc<middleware::ai_token_limit::Registry>,
     // Health, catalogs and permits of `mcp_gateway` middlewares; touched only by `swap`.
     mcps: Arc<middleware::mcp::Registry>,
     // Series of entry points, routers and services, and the snapshot counters; touched by
@@ -1367,6 +1369,7 @@ impl TableHandle {
         self.content_guards.settle(&mut table.apps);
         self.jwt_auths.settle(&mut table.apps);
         self.oidcs.settle(&mut table.apps);
+        self.ai_token_limits.settle(&mut table.apps);
         self.mcps.settle(&mut table.apps);
         self.metrics.settle(&mut table);
         let version = table.version;

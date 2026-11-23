@@ -581,6 +581,11 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
                    "store": "main", "on_store_error": "deny"}),
         ),
         (
+            "ai_token_limit",
+            json!({"limits": [{"limit": 1000, "period": "month"}], "source": {"header": "x-api-key"},
+                   "store": "main", "on_store_error": "deny"}),
+        ),
+        (
             "errors",
             json!({"status": ["500-599"], "service": "pinned", "query": format!("/{{status}}.html?key={page_key}")}),
         ),

@@ -41,6 +41,7 @@ use crate::wasm as engine;
 use podgate_model::{App, Declared};
 
 pub mod add_prefix;
+pub mod ai_token_limit;
 pub mod basic_auth;
 pub mod buffering;
 pub mod cache;
@@ -451,6 +452,25 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Runs on every chunk of the upstream's response body exactly as the upstream sent it, in
+    /// reverse chain order, ahead of the compressor and of every [`Self::response_body`] hook: the
+    /// one place a stage sees the model's own bytes (a token counter reads them here, so a
+    /// compressed answer to the client is counted before it is compressed). A chunk a stage
+    /// empties is not sent on; `end_of_stream` also marks the final call of a response that ends
+    /// in HTTP/2 trailers, with no chunk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chunk cannot be read.
+    fn response_body_raw(
+        &self,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        _state: &mut Self::State,
+    ) -> pingora::Result<()> {
+        Ok(())
+    }
+
     /// Runs once when the request is over, in chain order, for every stage of the chain,
     /// including those a request never reached (an earlier stage answered it): a stage keeps
     /// in its [`Self::State`] whether it ran.
@@ -800,6 +820,22 @@ macro_rules! kinds {
                 }
             }
 
+            fn response_body_raw(
+                &self,
+                body: &mut Option<bytes::Bytes>,
+                end_of_stream: bool,
+                state: &mut StageState,
+            ) -> pingora::Result<()> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_body_raw(kind, body, end_of_stream, state)
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
+
             fn finished(
                 &self,
                 cx: &$crate::middleware::FinishCx<'_>,
@@ -1028,6 +1064,8 @@ kinds! {
 
     "quota" => Quota(quota::Quota),
 
+    "ai_token_limit" => AiTokenLimit(ai_token_limit::AiTokenLimit),
+
     "circuit_breaker" => CircuitBreaker(circuit_breaker::CircuitBreaker),
 
     "retry" => Retry(retry::Retry),
@@ -1110,6 +1148,8 @@ schemas! {
     "in_flight_req" => in_flight_req::Config,
 
     "quota" => quota::Config,
+
+    "ai_token_limit" => ai_token_limit::Config,
 
     "circuit_breaker" => circuit_breaker::Config,
 
@@ -1360,6 +1400,27 @@ pub fn run_response_body(
     for (position, index) in chain.iter().enumerate().rev() {
         if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
             named.stage.response_body(body, end_of_stream, slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs the raw response-body hooks of `chain` on one chunk the upstream sent, last stage first,
+/// ahead of the compressor.
+///
+/// # Errors
+///
+/// The first error a hook returns.
+pub fn run_response_body_raw(
+    stages: &[Named],
+    chain: &[usize],
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    state: &mut State,
+) -> pingora::Result<()> {
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.response_body_raw(body, end_of_stream, slot)?;
         }
     }
     Ok(())

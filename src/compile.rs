@@ -392,6 +392,11 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         &stage_lists,
         context.rate_limit_stores(),
     ));
+    rejected.extend(middleware::ai_token_limit::check_snapshot(
+        snapshot,
+        &stage_lists,
+        context.rate_limit_stores(),
+    ));
     rejected.extend(middleware::oidc::check_snapshot(
         snapshot,
         &stage_lists,
@@ -895,7 +900,9 @@ fn stages_of(
         match expand(&router.chain) {
             Ok(own) => {
                 let chain: Vec<usize> = default.iter().copied().chain(own).collect();
-                if let Err(invalid) = middleware::check_cache_order(&stages, &chain) {
+                if let Err(invalid) = middleware::check_cache_order(&stages, &chain)
+                    .and_then(|()| middleware::ai_token_limit::check_one_per_chain(&stages, &chain))
+                {
                     rejected.push(Rejected::new(
                         app,
                         format!("router {}", router.name),
