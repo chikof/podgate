@@ -12,12 +12,13 @@
 //! signals). A file that was truncated in place keeps working because it is opened for append.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -33,21 +34,96 @@ pub const QUEUE_CAPACITY: usize = 8192;
 /// How often the file sink compares its open file with the path.
 const REOPEN_CHECK: Duration = Duration::from_secs(1);
 
-type Queue = VecDeque<Box<Record>>;
+type Queue = VecDeque<Arc<Record>>;
 
+/// One bounded queue of records with its counters. The line writer and the OTLP exporter each
+/// drain a lane of their own, so neither can slow the other.
 #[derive(Debug)]
-struct Shared {
+pub(super) struct Lane {
     queue: Mutex<Queue>,
     wake: Notify,
     capacity: usize,
-    written: AtomicU64,
+    /// Queued records at which the consumer is woken: the line writer takes every record as it
+    /// comes, the exporter waits for a batch.
+    wake_at: usize,
+    done: AtomicU64,
     dropped: AtomicU64,
 }
 
-/// The queue between requests and the writer task. Cheap to clone; every clone is the same queue.
+impl Lane {
+    fn new(capacity: usize, wake_at: usize) -> Arc<Self> {
+        Arc::new(Self {
+            queue: Mutex::new(VecDeque::new()),
+            wake: Notify::new(),
+            capacity: capacity.max(1),
+            wake_at,
+            done: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queues `record`; never waits. A full queue drops its oldest record and counts it.
+    fn push(&self, record: Arc<Record>) {
+        let (evicted, len) = {
+            let mut queue = self.lock();
+            let evicted = (queue.len() >= self.capacity)
+                .then(|| queue.pop_front())
+                .flatten();
+            queue.push_back(record);
+            (evicted.is_some(), queue.len())
+        };
+        if evicted {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        if len >= self.wake_at {
+            self.wake.notify_one();
+        }
+    }
+
+    /// Swaps the queued records with `spare`, which must be empty.
+    fn swap(&self, spare: &mut Queue) {
+        std::mem::swap(&mut *self.lock(), spare);
+    }
+
+    /// Removes up to `max` records, oldest first.
+    pub(super) fn take(&self, max: usize) -> Vec<Arc<Record>> {
+        let mut queue = self.lock();
+        let count = max.min(queue.len());
+        queue.drain(..count).collect()
+    }
+
+    /// Resolves when the consumer should look at the queue.
+    pub(super) async fn woken(&self) {
+        self.wake.notified().await;
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Counts `count` records as delivered.
+    pub(super) fn delivered(&self, count: usize) {
+        self.done
+            .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// Counts `count` records as lost after they were queued.
+    pub(super) fn lost(&self, count: usize) {
+        self.dropped
+            .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+}
+
+/// The queues between requests and the writer task, and the exporter's when the node has one.
+/// Cheap to clone; every clone is the same queues.
 #[derive(Debug, Clone)]
 pub struct AccessLog {
-    shared: Arc<Shared>,
+    lines: Arc<Lane>,
+    pub(super) otlp: Option<Arc<Lane>>,
 }
 
 impl Default for AccessLog {
@@ -67,52 +143,43 @@ impl AccessLog {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            shared: Arc::new(Shared {
-                queue: Mutex::new(VecDeque::new()),
-                wake: Notify::new(),
-                capacity: capacity.max(1),
-                written: AtomicU64::new(0),
-                dropped: AtomicU64::new(0),
-            }),
+            lines: Lane::new(capacity, 1),
+            otlp: None,
         }
     }
 
-    /// Queues `record`; never waits for the sink. A full queue drops its oldest line.
-    pub fn record(&self, record: Box<Record>) {
-        let evicted = {
-            let mut queue = self
-                .shared
-                .queue
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let evicted = (queue.len() >= self.shared.capacity)
-                .then(|| queue.pop_front())
-                .flatten();
-            queue.push_back(record);
-            evicted
-        };
-        if evicted.is_some() {
-            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+    /// Adds the queue the OTLP exporter drains (`OTEL_LOGS_EXPORTER=otlp`), as long as the line
+    /// queue. Every record goes into both.
+    #[must_use]
+    pub fn with_otlp(mut self) -> Self {
+        self.otlp = Some(Lane::new(self.lines.capacity, super::export::BATCH));
+        self
+    }
+
+    /// Queues `record`; never waits for a sink. A full queue drops its oldest record.
+    pub fn record(&self, record: Arc<Record>) {
+        if let Some(otlp) = &self.otlp {
+            otlp.push(Arc::clone(&record));
         }
-        self.shared.wake.notify_one();
+        self.lines.push(record);
     }
 
     /// Lines written to the sink so far.
     #[must_use]
     pub fn written(&self) -> u64 {
-        self.shared.written.load(Ordering::Relaxed)
+        self.lines.done.load(Ordering::Relaxed)
     }
 
     /// Lines dropped so far: evicted from a full queue, or lost with a failed write.
     #[must_use]
     pub fn dropped(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed)
+        self.lines.dropped.load(Ordering::Relaxed)
     }
 
     /// Prometheus text for `GET /metrics`.
     #[must_use]
     pub fn render(&self) -> String {
-        format!(
+        let mut out = format!(
             "# HELP podgate_access_log_lines_total Access log lines written to the sink.\n\
              # TYPE podgate_access_log_lines_total counter\n\
              podgate_access_log_lines_total {}\n\
@@ -121,7 +188,26 @@ impl AccessLog {
              podgate_access_log_dropped_total {}\n",
             self.written(),
             self.dropped(),
-        )
+        );
+        if let Some(otlp) = &self.otlp {
+            // Writing to a `String` cannot fail.
+            let _ = write!(
+                out,
+                "# HELP podgate_access_log_otlp_exported_total Access log records the OTLP collector accepted.\n\
+                 # TYPE podgate_access_log_otlp_exported_total counter\n\
+                 podgate_access_log_otlp_exported_total {}\n\
+                 # HELP podgate_access_log_otlp_dropped_total Access log records not exported: the queue was full, the export failed or the collector refused them.\n\
+                 # TYPE podgate_access_log_otlp_dropped_total counter\n\
+                 podgate_access_log_otlp_dropped_total {}\n\
+                 # HELP podgate_access_log_otlp_queue_records Access log records waiting for the OTLP exporter.\n\
+                 # TYPE podgate_access_log_otlp_queue_records gauge\n\
+                 podgate_access_log_otlp_queue_records {}\n",
+                otlp.done.load(Ordering::Relaxed),
+                otlp.dropped.load(Ordering::Relaxed),
+                otlp.len(),
+            );
+        }
+        out
     }
 
     /// The background service that drains this queue into `sink`; register it with the server.
@@ -131,16 +217,6 @@ impl AccessLog {
             log: self.clone(),
             sink: Mutex::new(Some(sink)),
         }
-    }
-
-    /// Swaps the queued records with `spare`, which must be empty.
-    fn take(&self, spare: &mut Queue) {
-        let mut queue = self
-            .shared
-            .queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        std::mem::swap(&mut *queue, spare);
     }
 }
 
@@ -261,10 +337,10 @@ impl AccessLogService {
         match result {
             Ok(()) => {
                 *failing = false;
-                self.log.shared.written.fetch_add(count, Ordering::Relaxed);
+                self.log.lines.done.fetch_add(count, Ordering::Relaxed);
             }
             Err(err) => {
-                self.log.shared.dropped.fetch_add(count, Ordering::Relaxed);
+                self.log.lines.dropped.fetch_add(count, Ordering::Relaxed);
                 if !std::mem::replace(failing, true) {
                     tracing::warn!(error = %err, "access log sink failed; its lines are dropped");
                 }
@@ -286,10 +362,10 @@ impl BackgroundService for AccessLogService {
         let mut spare = Queue::new();
         let mut failing = false;
         loop {
-            self.log.take(&mut spare);
+            self.log.lines.swap(&mut spare);
             if spare.is_empty() {
                 tokio::select! {
-                    () = self.log.shared.wake.notified() => continue,
+                    () = self.log.lines.woken() => continue,
                     _ = shutdown.changed() => break,
                 }
             }
@@ -310,7 +386,7 @@ impl BackgroundService for AccessLogService {
                 _ = shutdown.changed() => return,
             }
         }
-        self.log.take(&mut spare);
+        self.log.lines.swap(&mut spare);
         if !spare.is_empty() {
             let (_, _, lines, result) = flush(sink, spare);
             self.account(lines, &result, &mut failing);
@@ -326,15 +402,15 @@ mod test {
 
     use super::*;
 
-    fn record(id: &str) -> Box<Record> {
+    fn record(id: &str) -> Arc<Record> {
         let mut record = Record::sample(&json!({}));
         record.request_id = id.into();
-        Box::new(record)
+        Arc::new(record)
     }
 
     fn ids(log: &AccessLog) -> Vec<String> {
         let mut queue = Queue::new();
-        log.take(&mut queue);
+        log.lines.swap(&mut queue);
         queue.iter().map(|r| r.request_id.to_string()).collect()
     }
 
@@ -354,6 +430,32 @@ mod test {
             log.render()
                 .contains("podgate_access_log_dropped_total 6\n")
         );
+    }
+
+    #[test]
+    fn otlp_logs_lane_drops_oldest() {
+        let log = AccessLog::with_capacity(4).with_otlp();
+        for n in 0..10 {
+            log.record(record(&format!("r{n}")));
+        }
+        let otlp = log.otlp.as_ref().expect("the exporter's queue");
+        let kept: Vec<String> = otlp
+            .take(usize::MAX)
+            .iter()
+            .map(|r| r.request_id.to_string())
+            .collect();
+        assert_eq!(kept, ["r6", "r7", "r8", "r9"], "the oldest were dropped");
+        assert_eq!(otlp.dropped.load(Ordering::Relaxed), 6);
+        assert_eq!(log.dropped(), 6, "the line queue is bounded on its own");
+        assert_eq!(
+            ids(&log),
+            ["r6", "r7", "r8", "r9"],
+            "and keeps its own records"
+        );
+        let text = log.render();
+        assert!(text.contains("podgate_access_log_otlp_dropped_total 6\n"));
+        assert!(text.contains("podgate_access_log_otlp_queue_records 0\n"));
+        assert!(!AccessLog::with_capacity(4).render().contains("otlp"));
     }
 
     struct Stuck(mpsc::Receiver<()>);

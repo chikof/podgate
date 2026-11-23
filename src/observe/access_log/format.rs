@@ -121,7 +121,7 @@ impl Record {
         }
     }
 
-    fn client_ip_text(&self, action: Action) -> Option<String> {
+    pub(super) fn client_ip_text(&self, action: Action) -> Option<String> {
         let addr: IpAddr = self.client_ip?;
         Some(match action {
             Action::Mask(mask) => mask.apply(addr).to_string(),

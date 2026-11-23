@@ -8,13 +8,16 @@
 //! - [`log`]: called from `Gateway::logging`; decides whether the request is logged and, if it
 //!   is, copies what the line needs into a [`Record`].
 //! - `format`: turns a [`Record`] into a JSON or Common Log Format line.
-//! - `sink`: the bounded queue, the writer task and the stdout and file sinks.
+//! - `sink`: the bounded queues, the writer task and the stdout and file sinks.
+//! - `otlp` and `export`: the same records as OTLP log records, sent to a collector.
 //!
 //! A [`Record`] is built only for a request that is selected, and only with the fields its policy
 //! keeps. Every string is cut at `FIELD_MAX` bytes when it is copied, so a hostile request
 //! cannot make the queue hold more than a bounded amount of text.
 
+mod export;
 mod format;
+mod otlp;
 mod policy;
 mod sink;
 
@@ -32,13 +35,20 @@ use serde_json::Value;
 use crate::compile::Invalid;
 use crate::error::AppError;
 use crate::middleware::jwt_auth::Credentials;
+use crate::observe::tracing::Ids;
 use crate::proxy::Ctx;
 use crate::route;
 use crate::sni;
 
+pub use export::{LogService, LogsExporter};
 use format::FIELD_MAX;
 pub use policy::{Action, Field, Format, HeaderAction, Mask, Policy};
 pub use sink::{AccessLog, AccessLogService, FileSink, LineSink, QUEUE_CAPACITY, StdoutSink};
+
+/// The OTLP log messages the exporter sends, for a collector that decodes them.
+pub mod proto {
+    pub use super::otlp::*;
+}
 
 /// The most headers a line lists, request and response each.
 const HEADERS_MAX: usize = 64;
@@ -182,6 +192,8 @@ pub struct Record {
     request_headers: Vec<(Box<str>, Box<str>)>,
     response_headers: Vec<(Box<str>, Box<str>)>,
     truncated: Vec<&'static str>,
+    /// The ids of the request's trace, when its router is traced: the OTLP record carries them.
+    trace: Option<Ids>,
 }
 
 /// Cuts `value` to [`FIELD_MAX`] bytes at a character boundary; the flag says it was cut.
@@ -324,7 +336,7 @@ pub fn log(access_log: Option<&AccessLog>, session: &Session, ctx: &Ctx) {
     if !policy.sampled(&id) {
         return;
     }
-    queue.record(Box::new(Record::capture(
+    queue.record(Arc::new(Record::capture(
         Arc::clone(policy),
         session,
         ctx,
@@ -444,6 +456,7 @@ impl Record {
             request_headers,
             response_headers,
             truncated: copy.truncated,
+            trace: ctx.trace.ids(),
             policy,
         }
     }
@@ -515,6 +528,7 @@ impl Record {
             request_headers: Vec::new(),
             response_headers: Vec::new(),
             truncated: Vec::new(),
+            trace: None,
         }
     }
 }

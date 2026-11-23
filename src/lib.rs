@@ -179,7 +179,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     );
     let backends = Backends::with_settings(backend_limiter);
     let staples = tls::ocsp::Staples::default();
-    let access_log = AccessLog::new();
+    let access_log = match config.otel_logs {
+        observe::access_log::LogsExporter::Otlp => AccessLog::new().with_otlp(),
+        observe::access_log::LogsExporter::None => AccessLog::new(),
+    };
     let access_sink: Box<dyn observe::access_log::LineSink> = match &config.access_log_file {
         Some(path) => Box::new(observe::access_log::FileSink::new(path.clone())),
         None => Box::new(observe::access_log::StdoutSink),
@@ -363,6 +366,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     ));
     if let Some(exporter) = observe::tracing::TraceService::new(&tracer, &config.otel)? {
         server.add_service(background_service("trace exporter", exporter));
+    }
+    if let Some(exporter) = access_log.otlp_exporter(&config.otel.collector)? {
+        server.add_service(background_service("access log exporter", exporter));
     }
     if let Some(exporter) = observe::metrics::MetricsExportService::new(
         metrics_sources(),

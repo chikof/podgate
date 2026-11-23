@@ -135,7 +135,26 @@ pub struct State(Option<Box<Active>>);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<State>() == 8);
 
+/// The ids of a request's trace, for the access log record of the same request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ids {
+    pub(crate) trace_id: [u8; 16],
+    /// The proxy's server span, the one this request's span carries.
+    pub(crate) span_id: [u8; 8],
+    pub(crate) sampled: bool,
+}
+
 impl State {
+    /// The trace and server span ids of the request; `None` when its router is not traced.
+    #[must_use]
+    pub(crate) fn ids(&self) -> Option<Ids> {
+        self.0.as_deref().map(|active| Ids {
+            trace_id: active.trace_id.0,
+            span_id: active.span_id.0,
+            sampled: active.sampled,
+        })
+    }
+
     /// Decides the verdict for `request`, which arrived from `peer`, under `policy`. The trace id
     /// continues whatever the peer sent; its sampled flag counts only when the peer is trusted.
     #[must_use]
