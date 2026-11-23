@@ -16,11 +16,11 @@
 //! - **After the model.** The answer's `usage` (chat completions and the Responses API, a
 //!   stream included) is charged to every window once the answer is over. An answer with no
 //!   usable `usage` is charged an estimate of one token per 4 bytes of the exchange
-//!   ([`usage`]).
+//!   (`usage.rs`).
 //! - **Streams.** A streamed chat completion reports `usage` only when the request has
 //!   `stream_options.include_usage`. When the client did not set it podgate adds it to the
-//!   request ([`request`]) and takes the usage-only chunk out of the answer as it passes
-//!   ([`sse`]), so the client sees the stream it asked for, unbuffered.
+//!   request (`request.rs`) and takes the usage-only chunk out of the answer as it passes
+//!   (`sse.rs`), so the client sees the stream it asked for, unbuffered.
 //! - **Compression.** The model is asked for `identity` and the count reads its bytes before the
 //!   compressor ([`Kind::response_body_raw`]), which then encodes for the client.
 //! - The tenant names a store and sets the limits; the address, credentials and the tenants that
