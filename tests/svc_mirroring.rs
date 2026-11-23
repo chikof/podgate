@@ -246,6 +246,47 @@ async fn dropped(podgate: &Podgate, reason: &str) -> u64 {
     .await
 }
 
+/// Waits until `shadow` has received `copies` copies or `podgate` has shed them for the tenant,
+/// up to five seconds. A copy is decided and sent on its own task, so the count of the shadow
+/// alone does not say whether one is still on its way.
+async fn copies_decided(podgate: &Podgate, shadow: &Server, copies: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let shed = dropped(podgate, "tenant").await;
+        let decided = shadow.count() as u64 + shed;
+        if decided == copies as u64 {
+            return;
+        }
+        assert!(
+            decided < copies as u64 && Instant::now() < deadline,
+            "{copies} copies were wanted, the shadow saw {} and {shed} were shed",
+            shadow.count()
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until `podgate` has shed `shed` copies for `reason` in all, up to five seconds.
+async fn shed_reaches(podgate: &Podgate, reason: &str, shed: u64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dropped(podgate, reason).await < shed {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {shed} copies shed for {reason}"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The paths `server` has received so far.
+fn paths(server: &Server) -> Vec<String> {
+    server
+        .requests()
+        .iter()
+        .map(|seen| seen.path().to_string())
+        .collect()
+}
+
 /// Sends raw bytes to the proxy and returns the status and the whole response text.
 async fn raw(podgate: &Podgate, request: &[u8]) -> (u16, String) {
     let mut stream = TcpStream::connect(podgate.proxy_addr)
@@ -648,16 +689,19 @@ async fn mirror_shed_before_real_requests_when_the_tenant_is_busy() {
         main.count() == 3
     })
     .await;
-    let seen_by_shadow = shadow.count();
+    // Each request's copy is decided and sent on its own task, so one of the first three can
+    // still be on its way to the shadow here. Wait until all three are decided.
+    copies_decided(&podgate, &shadow, 3).await;
+    let shed_before = dropped(&podgate, "tenant").await;
     let response = podgate.get("a.test", "/quick").await;
     assert_eq!((response.status, response.body.as_str()), (200, "main"));
-    sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        shadow.count(),
-        seen_by_shadow,
-        "the copy of the fourth request was shed"
+    // Shed copies are counted before anything is sent, so once the fourth is counted it is gone.
+    shed_reaches(&podgate, "tenant", shed_before + 1).await;
+    let at_shadow = paths(&shadow);
+    assert!(
+        at_shadow.iter().all(|path| path.starts_with("/slow")),
+        "the copy of the fourth request was shed: {at_shadow:?}"
     );
-    assert!(dropped(&podgate, "tenant").await >= 1);
     for holder in holders {
         holder.await.expect("holder");
     }
