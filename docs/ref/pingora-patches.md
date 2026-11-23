@@ -1,6 +1,6 @@
 # Upstream issues for cloudflare/pingora
 
-podgate carries patched copies of two Pingora 0.9.1 crates, wired by `[patch.crates-io]` in `Cargo.toml`: `pingora-proxy` in `vendor/pingora-proxy/` (sections 1 to 3) and `pingora-core` in `vendor/pingora-core/` (sections 4 and 5). Each copy can be dropped only when a Pingora release covers every change in it, so file them together (one issue each, linked).
+podgate carries patched copies of two Pingora 0.9.1 crates, wired by `[patch.crates-io]` in `Cargo.toml`: `pingora-proxy` in `vendor/pingora-proxy/` (sections 1 to 3 and 6) and `pingora-core` in `vendor/pingora-core/` (sections 4 and 5). Each copy can be dropped only when a Pingora release covers every change in it, so file them together (one issue each, linked).
 
 Reproduce each against the registry crate: `diff -ru ~/.cargo/registry/src/*/pingora-proxy-0.9.1/src vendor/pingora-proxy/src`, and the same for `pingora-core-0.9.1` and `vendor/pingora-core/src`.
 
@@ -13,6 +13,7 @@ Upstream status (2026-11-22, cloudflare/pingora `main` at `3f87e92`). Runnable r
 |3|Filed as [#1140](https://github.com/cloudflare/pingora/issues/1140).|
 |4|Filed as [#1141](https://github.com/cloudflare/pingora/issues/1141), as the rustls counterpart of `upstream_tls_verify_callback` (`cb16c87`, OpenSSL and BoringSSL only).|
 |5|Filed as [#1144](https://github.com/cloudflare/pingora/issues/1144); reproduction `tests/runtime_group.rs` in the repo above.|
+|6|Drafted from change 0130, not filed.|
 
 ---
 
@@ -112,3 +113,33 @@ fn runtime_group(&self) -> Option<&str> { None }
 ```
 
 Services that name the same group run on one runtime, built from the first member's thread count, name and options. `Server::run_forever` keeps a map from group name to the runtime it built and builds a runtime only for a service whose group has none yet; `run_service` takes the runtime instead of building it. Default `None` keeps today's behaviour (a runtime per service). The alternative, one service with many listeners, needs the application to find each connection's listener, and `HttpServerApp::h2_options` and `server_options` do not receive the connection.
+
+---
+
+## 6. No way to keep a response back until it ends
+
+Added by podgate change 0130 (`vendor/pingora-proxy`: `proxy_trait.rs`, `proxy_h1.rs`, `proxy_h2.rs`).
+
+`process_upstream_tasks` (HTTP/1) and `process_upstream_tasks_h2` pull a batch of tasks from the upstream, run `response_filter` on the head and `response_body_filter` on each body chunk, then write the batch with `write_response_tasks`. The head is therefore written as soon as it arrives, before any body hook has run. A proxy that must judge a whole response before the client sees a byte of it (a content filter, a response validator, a guard model) cannot do so: by the time it has the body, the `200` and the headers are on the wire, so a refusal can only reset the connection. `response_body_filter` is also synchronous, so it cannot call anything. Holding the already filtered tasks does not help either: filters with side effects (a cache fill, a failure recorder) have run by then.
+
+Proposal: an optional async callback, called with every batch of raw upstream response tasks before any filter runs and before anything is written:
+
+```rust
+async fn hold_response(
+    &self,
+    _session: &mut Session,
+    _tasks: &mut Vec<HttpTask>,
+    _ctx: &mut Self::CTX,
+) -> Result<()> { Ok(()) }
+```
+
+The application may take tasks out of `tasks` (the head included) and put them back, in order, in a later batch. Whatever is left in `tasks` goes through the unchanged pipeline and is written; when the callback leaves it empty nothing is written and the loop returns "not done". `proxy_h1.rs` (`process_upstream_tasks`) and `proxy_h2.rs` (`process_upstream_tasks_h2`), right after the batch is pulled from `rx`:
+
+```rust
+self.inner.hold_response(session, &mut tasks, ctx).await?;
+if tasks.is_empty() {
+    return Ok(Some(false));
+}
+```
+
+The default does nothing, so behaviour is unchanged. Bounding what is held is the application's job: it sees every task before it keeps it, and an `Err` from the callback, with nothing written, ends the request through the normal error path. podgate holds the response of a route with an `llm_guard` response guard this way (`src/proxy/hold.rs`); the proof is `tests/mw_llm_guard.rs` (`guard_response_phase_blocks`, `guard_response_stream_held_until_end`, `guard_held_response_over_cap_is_502_nothing_sent`).
