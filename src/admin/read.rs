@@ -54,7 +54,7 @@ pub(super) fn router(state: AppState, timeout: Duration) -> Router {
     layered(router, timeout)
 }
 
-/// Serves [`router`] on a bound unix socket. Run it as a Pingora background service.
+/// Serves the read router on a bound unix socket. Run it as a Pingora background service.
 ///
 /// It does not touch readiness: `/readyz` is the admin socket's.
 #[derive(Debug)]
