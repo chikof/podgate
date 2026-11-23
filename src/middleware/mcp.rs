@@ -1392,7 +1392,7 @@ pub enum ReplayError {
     ServerGone,
     /// The server no longer lists the tool.
     ToolGone,
-    /// Authorization says nobody may call the tool ([`McpGateway::replayable`]).
+    /// Authorization says nobody may call the tool: `tool_access` has no rule that lists it.
     NotPermitted,
     /// The tool is not marked `readOnlyHint` and `force` is not set.
     NeedsForce,
@@ -1409,7 +1409,8 @@ pub enum ReplayAnswer {
     Result(Box<RawValue>),
     /// The server's JSON-RPC `error`, as it came.
     Error(Box<RawValue>),
-    /// The exchange failed with this code ([`Failure::code`]).
+    /// The exchange failed with this code (`busy`, `policy`, `connect`, `timeout`, `status`,
+    /// `malformed`, `too_large`, `version` or `session`).
     Failed(&'static str),
 }
 

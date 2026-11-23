@@ -250,7 +250,8 @@ pub struct Arguments {
 }
 
 /// Whether a key names a secret: lower-cased with `_`, `-` and spaces removed, it contains one of
-/// the [`SECRET_WORDS`].
+/// `password`, `passwd`, `token`, `secret`, `authorization`, `apikey`, `credential`, `cookie` or
+/// `privatekey`.
 #[must_use]
 pub fn looks_secret(key: &str) -> bool {
     let normal: String = key
