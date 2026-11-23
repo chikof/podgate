@@ -485,7 +485,9 @@ async fn tbac_requires_identity() {
             .await;
         assert_eq!(answer.status, 422, "{why}: {answer:?}");
         assert!(
-            answer.body.contains("tool_access_requires_identity"),
+            answer.body.contains("tool_access_requires_identity")
+                && answer.body.contains("jwt_auth")
+                && answer.body.contains("oidc"),
             "{why}: {}",
             answer.body
         );
@@ -721,4 +723,51 @@ async fn tbac_unreachable_server_is_not_dialled() {
     assert_eq!(raw_call(&dev, &session, "beta__search").await, missing);
     assert_eq!(raw_call(&dev, &session, "beta__whatever").await, missing);
     assert!(rig.beta.requests().is_empty());
+}
+
+/// A `jwt_auth` the developer portal cannot pin (no issuer, two audiences) still verifies tokens
+/// and fills claims, so it is an identity for `tool_access` all the same.
+#[tokio::test]
+async fn tbac_unpinnable_jwt_auth_still_identity() {
+    let podgate = Podgate::start().await;
+    let key = Signer::es256("k");
+    let alpha = Fake::mcp(&Behavior::new("alpha", &["search", "read"])).await;
+    let unused: SocketAddr = "127.0.0.1:9".parse().expect("addr");
+    let rules = json!([{"tools": ["alpha__*"], "allow": {"roles": ["dev"]}}]);
+    let mut two_audiences = jwt_config(&key);
+    two_audiences["issuer"] = json!("https://idp.test");
+    two_audiences["audiences"] = json!(["api", "web"]);
+    let variants = [
+        ("no issuer", jwt_config(&key), json!({})),
+        (
+            "two audiences",
+            two_audiences,
+            json!({"iss": "https://idp.test", "aud": "api"}),
+        ),
+    ];
+    for (version, (why, config, extra)) in (1_u64..).zip(variants) {
+        let base = with_jwt_auth(app("mcp", &["mcp.test"], &[serving("r1", unused)]), config);
+        let mut declared = with_middleware(
+            base,
+            "mcp",
+            "mcp_gateway",
+            json!({"servers": [server("alpha", alpha.addr)], "tool_access": rules}),
+        );
+        declared["tenant"] = json!("t1");
+        push(&podgate, &budgeted(version, &[declared], BIG_BUDGET)).await;
+        let mut claims = json!({"roles": ["dev"]});
+        if let (Some(all), Some(extra)) = (claims.as_object_mut(), extra.as_object()) {
+            all.extend(extra.clone());
+        }
+        let dev = Client::new(&podgate, "mcp.test").with_token(&token(&key, &claims));
+        let session = dev.initialize().await;
+        assert_eq!(dev.list(&session).await.len(), 2, "{why}");
+        let answer = dev.call(&session, "alpha__read", json!({})).await;
+        assert_eq!(text(&answer), "alpha:read", "{why}");
+        let mut other = claims.clone();
+        other["roles"] = json!(["guest"]);
+        let guest = Client::new(&podgate, "mcp.test").with_token(&token(&key, &other));
+        let session = guest.initialize().await;
+        assert!(guest.list(&session).await.is_empty(), "{why}");
+    }
 }

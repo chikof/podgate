@@ -447,6 +447,8 @@ pub struct Client {
     pub host: String,
     /// Sent as `Authorization: Bearer <token>` on every request when set.
     pub token: Option<String>,
+    /// Sent on every request, after the token.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Client {
@@ -455,12 +457,19 @@ impl Client {
             addr: podgate.proxy_addr,
             host: host.to_owned(),
             token: None,
+            headers: Vec::new(),
         }
     }
 
     /// The same client, carrying `token`.
     pub fn with_token(mut self, token: &str) -> Self {
         self.token = Some(token.to_owned());
+        self
+    }
+
+    /// The same client, sending `name: value` on every request (a session cookie, say).
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
         self
     }
 
@@ -474,6 +483,9 @@ impl Client {
         );
         if let Some(token) = &self.token {
             head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
         }
         for (name, value) in headers {
             head.push_str(&format!("{name}: {value}\r\n"));

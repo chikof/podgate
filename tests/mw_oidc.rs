@@ -10,6 +10,8 @@
 
 mod common;
 
+#[path = "fixtures/mcp/fake.rs"]
+mod fake;
 #[path = "fixtures/jwt/signer.rs"]
 mod signer;
 
@@ -26,6 +28,7 @@ use common::dns::Dns;
 use common::{
     Podgate, Response, app, router, service, serving, snapshot, with_middleware, with_oidc,
 };
+use fake::{BIG_BUDGET, Behavior, Client, Fake, budgeted, server, text};
 use serde_json::{Value, json};
 use signer::{Signer, now, unsigned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2095,4 +2098,157 @@ async fn portal_oidc_other_client_refused() {
         "portal_login_not_pinned"
     );
     assert!(!refused.body.contains(CLIENT), "{}", refused.body);
+}
+
+// ---------------------------------------------------------------------------------------------
+// tool_access behind the login
+// ---------------------------------------------------------------------------------------------
+
+const TOOLS_HOST: &str = "mcp.test";
+
+/// The rules of these tests: developers get `alpha__read`, nobody else gets anything.
+fn dev_rules() -> Value {
+    json!([{"tools": ["alpha__read"], "allow": {"roles": ["dev"]}}])
+}
+
+/// A daemon with the gateway `mcp.test` over a fake `alpha` (`search`, `read`) behind the `oidc`
+/// login, with `tool_access` `rules` over the claim `roles`, which the session carries.
+async fn tools_behind_login(idp: &Idp, rules: &Value) -> (Podgate, Fake) {
+    let podgate = Podgate::start().await;
+    let alpha = Fake::mcp(&Behavior::new("alpha", &["search", "read"])).await;
+    let unused: SocketAddr = "127.0.0.1:9".parse().expect("addr");
+    let login = config(idp, &json!({"forward_claims": {"roles": "x-roles"}}));
+    let mut declared = with_middleware(
+        with_oidc(app("mcp", &[TOOLS_HOST], &[serving("r1", unused)]), login),
+        "mcp",
+        "mcp_gateway",
+        json!({"servers": [server("alpha", alpha.addr)], "tool_access": rules}),
+    );
+    declared["tenant"] = json!("t1");
+    let mut snapshot = pushed(1, &[declared]);
+    snapshot["tenants"] = budgeted(1, &[], BIG_BUDGET)["tenants"].clone();
+    push(&podgate, &snapshot).await;
+    (podgate, alpha)
+}
+
+/// An MCP client of the gateway as a browser that sends `cookie`, behind the TLS-terminating proxy.
+fn tools_client(podgate: &Podgate, cookie: &str) -> Client {
+    Client::new(podgate, TOOLS_HOST)
+        .with_header("X-Forwarded-Proto", "https")
+        .with_header("Cookie", cookie)
+}
+
+/// A page request of the endpoint as a browser sends it: a `GET` that accepts html, which the
+/// login answers with a redirect when there is no session.
+async fn browser_get(client: &Client) -> fake::Resp {
+    client.send("GET", &[("Accept", "text/html")], b"").await
+}
+
+/// A `tools/list` as an MCP client sends it: a `POST`, which the login answers with `401` when
+/// there is no session.
+async fn api_list(client: &Client) -> fake::Resp {
+    client
+        .send(
+            "POST",
+            &[("Content-Type", "application/json"), ("Accept", "application/json")],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+                .to_string()
+                .as_bytes(),
+        )
+        .await
+}
+
+/// The raw body of a `tools/call` answer of `client` in `session`, with the id fixed.
+async fn raw_call(client: &Client, session: &str, name: &str) -> String {
+    let answer = client
+        .post(
+            Some(session),
+            &[("MCP-Protocol-Version", "2025-11-25")],
+            &json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": name, "arguments": {}}}),
+        )
+        .await;
+    assert_eq!(answer.status, 200, "{answer:?}");
+    answer.body
+}
+
+fn is_login_redirect(answer: &fake::Resp, idp: &Idp) -> bool {
+    answer.status == 302
+        && answer
+            .header("location")
+            .is_some_and(|location| location.starts_with(&idp.base))
+}
+
+#[tokio::test]
+async fn tbac_oidc_session_claims_grant() {
+    let idp = Idp::start().await;
+    let (podgate, alpha) = tools_behind_login(&idp, &dev_rules()).await;
+    let cookie = sign_in(&podgate, &idp, TOOLS_HOST, &json!({"roles": ["dev"]})).await;
+    let client = tools_client(&podgate, &cookie);
+    let session = client.initialize().await;
+    assert_eq!(client.list(&session).await, ["alpha__read"]);
+    let answer = client.call(&session, "alpha__read", json!({})).await;
+    assert_eq!(text(&answer), "alpha:read");
+    assert_eq!(alpha.calls("tools/call").len(), 1);
+}
+
+#[tokio::test]
+async fn tbac_oidc_denied_equals_unknown() {
+    let idp = Idp::start().await;
+    let (podgate, alpha) = tools_behind_login(&idp, &dev_rules()).await;
+    // A logged-in user whose session claims match no rule sees no tool, and a tool it may not
+    // call answers byte for byte like one nobody registered.
+    let cookie = sign_in(&podgate, &idp, TOOLS_HOST, &json!({"roles": ["guest"]})).await;
+    let client = tools_client(&podgate, &cookie);
+    let session = client.initialize().await;
+    assert!(client.list(&session).await.is_empty());
+    let denied = raw_call(&client, &session, "alpha__read").await;
+    assert!(denied.contains("unknown tool"), "{denied}");
+    for other in ["alpha__nothing", "gamma__read", "read"] {
+        assert_eq!(denied, raw_call(&client, &session, other).await, "{other}");
+    }
+    assert!(alpha.calls("tools/call").is_empty());
+}
+
+#[tokio::test]
+async fn tbac_oidc_no_session_redirects() {
+    let idp = Idp::start().await;
+    let (podgate, alpha) = tools_behind_login(&idp, &dev_rules()).await;
+    let client = Client::new(&podgate, TOOLS_HOST).with_header("X-Forwarded-Proto", "https");
+    let page = browser_get(&client).await;
+    assert!(is_login_redirect(&page, &idp), "{page:?}");
+    let call = api_list(&client).await;
+    assert_eq!(call.status, 401, "{call:?}");
+    assert!(alpha.requests().is_empty());
+}
+
+#[tokio::test]
+async fn tbac_oidc_forged_cookie_grants_nothing() {
+    let idp = Idp::start().await;
+    let (podgate, alpha) = tools_behind_login(&idp, &dev_rules()).await;
+    let cookie = sign_in(&podgate, &idp, TOOLS_HOST, &json!({"roles": ["dev"]})).await;
+    let value = cookie
+        .strip_prefix(&format!("{SESSION_COOKIE}="))
+        .expect("a session pair");
+    let mut changed = value.to_owned();
+    let middle = changed.len() / 2;
+    let flipped = if changed.as_bytes()[middle] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    changed.replace_range(middle..=middle, flipped);
+    let forged = URL_SAFE_NO_PAD.encode(json!({"sub": "ann", "roles": ["dev"]}).to_string());
+    for attempt in [
+        format!("{SESSION_COOKIE}={changed}"),
+        format!("{SESSION_COOKIE}={forged}"),
+        format!("{SESSION_COOKIE}={}", "x".repeat(80)),
+        "roles=dev".to_owned(),
+    ] {
+        let page = browser_get(&tools_client(&podgate, &attempt)).await;
+        assert!(is_login_redirect(&page, &idp), "{attempt}: {page:?}");
+        let call = api_list(&tools_client(&podgate, &attempt)).await;
+        assert_eq!(call.status, 401, "{attempt}: {call:?}");
+    }
+    assert!(alpha.requests().is_empty());
 }
