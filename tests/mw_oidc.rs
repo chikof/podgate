@@ -1881,7 +1881,7 @@ fn published(tenant: &str, id: &str, host: &str, up: &Up, mark: &str) -> Value {
 
 /// The documented example: the operator's app `ops/portal` with the `oidc` login, which copies the
 /// verified `tenant` claim into the session, and the portal after it; two tenants with an API each.
-/// Run with `PORTAL_APPS=ops/portal=<issuer>|oidc`.
+/// Run with `PORTAL_APPS=ops/portal=<issuer>|oidc|<client id>`.
 fn portal_snapshot(up: &Up, login: &Value) -> Value {
     let mut portal = with_oidc(
         app("portal", &[PORTAL_HOST], &[serving("r1", up.addr)]),
@@ -1903,7 +1903,11 @@ fn portal_snapshot(up: &Up, login: &Value) -> Value {
 }
 
 async fn portal_podgate(idp: &Idp) -> Podgate {
-    Podgate::start_with_env(&[("PORTAL_APPS", &format!("ops/portal={}|oidc", idp.base))]).await
+    Podgate::start_with_env(&[(
+        "PORTAL_APPS",
+        &format!("ops/portal={}|oidc|{CLIENT}", idp.base),
+    )])
+    .await
 }
 
 #[tokio::test]
@@ -2072,4 +2076,23 @@ async fn portal_oidc_login_must_be_pinned() {
         "portal_login_not_pinned",
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn portal_oidc_other_client_refused() {
+    let idp = Idp::start().await;
+    let podgate = portal_podgate(&idp).await;
+    let up = Up::start().await;
+    // The pinned issuer, another client of the same provider: its owner could map claims for it.
+    let login = config(
+        &idp,
+        &json!({"client_id": "another-client", "forward_claims": {"tenant": "x-tenant"}}),
+    );
+    let refused = podgate.push_snapshot(&portal_snapshot(&up, &login)).await;
+    assert_eq!(refused.status, 422, "{refused:?}");
+    assert_eq!(
+        refused.json()["conflicts"][0]["code"],
+        "portal_login_not_pinned"
+    );
+    assert!(!refused.body.contains(CLIENT), "{}", refused.body);
 }

@@ -92,7 +92,7 @@ const _: () =
 /// | `BASIC_AUTH_MAX_CONCURRENT` | available cores, at most 256 | `basic_auth` password verifications at once, 1..=256; one tenant may hold half of them. |
 /// | `HEALTH_MAX_CONCURRENT` | `64` | Active health probes in flight at once across all tenants, 1..=4096. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
-/// | `PORTAL_APPS` | unset | Comma-separated `tenant/app=<issuer>\|<source>` entries: the apps that may declare a `portal` middleware (the developer portal, `docs/ref/portal.md`), each with the pin of the login stage the portal may stand behind. `<source>` is `jwks:<url>` (a `jwt_auth` with exactly that `jwks_uri`), `keys:<64 hex digits>` (a `jwt_auth` with exactly those inline keys) or `oidc` (an `oidc` stage of that issuer). A snapshot whose login does not match the pin exactly is refused. List only apps whose login you control. The pin lives only here: never in a snapshot, an answer, a log or an error. A malformed entry stops startup. Unset: no app may declare a portal. |
+/// | `PORTAL_APPS` | unset | Comma-separated `tenant/app=<issuer>\|<source>\|<audience>` entries: the apps that may declare a `portal` middleware (the developer portal, `docs/ref/portal.md`), each with the pin of the login stage the portal may stand behind. `<source>` is `jwks:<url>` (a `jwt_auth` with exactly that `jwks_uri`), `keys:<64 hex digits>` (a `jwt_auth` with exactly those inline keys) or `oidc` (an `oidc` stage of that issuer); `<audience>` is the one audience the login accepts (`jwt_auth` `audiences` exactly that one, `oidc` `client_id` equal to it). A snapshot whose login does not match the pin exactly is refused. List only apps whose login you control. The pin lives only here: never in a snapshot, an answer, a log or an error. A malformed entry stops startup. Unset: no app may declare a portal. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 /// | `SPIFFE_ENDPOINT_SOCKET` | unset | The SPIFFE Workload API agent's unix socket (`/run/spire/sockets/agent.sock` or `unix:///...`). Needs `SPIFFE_POLICY_FILE`. Unset: no SPIFFE. |
 /// | `SPIFFE_POLICY_FILE` | unset | JSON file with the SPIFFE policy: per tenant its SVID hint, the server IDs it may talk to, the client trust domains it may verify. Needs `SPIFFE_ENDPOINT_SOCKET`. |
@@ -981,7 +981,7 @@ mod test {
             ("DASHBOARD_HOSTS", "dash.example, Ops.Example"),
             ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
-            ("PORTAL_APPS", "ops/portal=https://idp.example|oidc"),
+            ("PORTAL_APPS", "ops/portal=https://idp.example|oidc|web"),
             ("CACHE_TENANT_MAX_PERCENT", "40"),
             ("OCSP_ALLOWED_HOSTS", "OCSP.Example.com, .Digicert.com,,"),
             ("H3_MAX_CONNECTIONS", "50"),
@@ -1042,7 +1042,7 @@ mod test {
                 otel_metrics: MetricsExportConfig::default(),
                 otel_logs: LogsExporter::default(),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
-                portal_apps: Apps::parse("ops/portal=https://idp.example|oidc")
+                portal_apps: Apps::parse("ops/portal=https://idp.example|oidc|web")
                     .expect("a valid pin"),
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),

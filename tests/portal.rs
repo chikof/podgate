@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use signer::{Signer, now};
 
 const ISSUER: &str = "https://idp.test";
+const AUDIENCE: &str = "portal-web";
 const HOST: &str = "portal.test";
 
 fn keys_of(signer: &Signer) -> Value {
@@ -29,11 +30,11 @@ fn keys_of(signer: &Signer) -> Value {
 /// The `PORTAL_APPS` entry that lists `ops/portal` with a pin over `signer`'s inline keys.
 fn pin(signer: &Signer) -> String {
     let print = fingerprint(&keys_of(signer)).expect("a fingerprint");
-    format!("ops/portal={ISSUER}|keys:{print}")
+    format!("ops/portal={ISSUER}|keys:{print}|{AUDIENCE}")
 }
 
 fn jwt_config(signer: &Signer) -> Value {
-    json!({"keys": keys_of(signer), "algorithms": ["ES256"], "issuer": ISSUER})
+    json!({"keys": keys_of(signer), "algorithms": ["ES256"], "issuer": ISSUER, "audiences": [AUDIENCE]})
 }
 
 fn tenant(id: &str) -> Value {
@@ -272,7 +273,7 @@ async fn start() -> Fleet {
 
 impl Fleet {
     fn token(&self, claims: &Value) -> String {
-        let mut all = json!({"sub": "ann", "iss": ISSUER, "exp": now() + 600});
+        let mut all = json!({"sub": "ann", "iss": ISSUER, "aud": AUDIENCE, "exp": now() + 600});
         if let (Some(all), Some(extra)) = (all.as_object_mut(), claims.as_object()) {
             all.extend(extra.clone());
         }
@@ -461,7 +462,7 @@ async fn portal_listed_app_same_issuer_other_keys_refused() {
         "portal_login_not_pinned"
     );
     // A `jwks_uri` instead of the pinned keys.
-    let mut remote = json!({"algorithms": ["ES256"], "issuer": ISSUER});
+    let mut remote = json!({"algorithms": ["ES256"], "issuer": ISSUER, "audiences": [AUDIENCE]});
     remote["jwks_uri"] = json!("http://127.0.0.1:9/jwks");
     assert_eq!(
         code_of(&push_login(&fleet_up, &remote).await),
@@ -495,11 +496,13 @@ async fn portal_pinned_login_accepted() {
     // A `jwks:` pin over a `jwks_uri`.
     let signer = Signer::es256("idp-key");
     let uri = "http://127.0.0.1:9/jwks";
-    let podgate =
-        Podgate::start_with_env(&[("PORTAL_APPS", &format!("ops/portal={ISSUER}|jwks:{uri}"))])
-            .await;
+    let podgate = Podgate::start_with_env(&[(
+        "PORTAL_APPS",
+        &format!("ops/portal={ISSUER}|jwks:{uri}|{AUDIENCE}"),
+    )])
+    .await;
     let upstream = Upstream::start("ok").await;
-    let remote = json!({"algorithms": ["ES256"], "issuer": ISSUER, "jwks_uri": uri});
+    let remote = json!({"algorithms": ["ES256"], "issuer": ISSUER, "audiences": [AUDIENCE], "jwks_uri": uri});
     let mut portal = app("portal", &[HOST], &[serving("r1", upstream.addr)]);
     portal["tenant"] = json!("ops");
     let portal = with_middleware(portal, "jwt", "jwt_auth", remote.clone());
@@ -537,12 +540,16 @@ async fn portal_pin_not_in_errors_or_logs() {
     let signer = Signer::es256("idp-key");
     let issuer = "https://pinned-issuer-zq81.test";
     let uri = "http://127.0.0.1:9/pinned-keys-zq81";
-    let podgate =
-        Podgate::start_logged(&[("PORTAL_APPS", &format!("ops/portal={issuer}|jwks:{uri}"))]).await;
+    let podgate = Podgate::start_logged(&[(
+        "PORTAL_APPS",
+        &format!("ops/portal={issuer}|jwks:{uri}|{AUDIENCE}"),
+    )])
+    .await;
     let upstream = Upstream::start("ok").await;
     let mut portal = app("portal", &[HOST], &[serving("r1", upstream.addr)]);
     portal["tenant"] = json!("ops");
-    let wrong = json!({"algorithms": ["ES256"], "issuer": "https://other.test", "jwks_uri": uri});
+    let wrong = json!({"algorithms": ["ES256"], "issuer": "https://other.test",
+                       "audiences": [AUDIENCE], "jwks_uri": uri});
     let portal = with_middleware(portal, "jwt", "jwt_auth", wrong);
     let portal = with_middleware(portal, "portal", "portal", json!({}));
     let mut pushed = fleet(1, &signer, &upstream);
@@ -1501,7 +1508,7 @@ async fn portal_claims_never_recorded_or_logged() {
     ops["tenant"] = json!("ops");
     ops["middlewares"] = json!([
         {"name": "jwt", "type": "jwt_auth", "keys": keys_of(&signer),
-         "algorithms": ["ES256"], "issuer": ISSUER},
+         "algorithms": ["ES256"], "issuer": ISSUER, "audiences": [AUDIENCE]},
         {"name": "portal", "type": "portal"},
     ]);
     ops["revisions"][0]["services"]
@@ -1521,7 +1528,7 @@ async fn portal_claims_never_recorded_or_logged() {
 
     let planted_email = "planted-email-claim-5c1";
     let planted_group = "planted-group-claim-9d2";
-    let mut all = json!({"sub": "ann", "iss": ISSUER, "exp": now() + 600});
+    let mut all = json!({"sub": "ann", "iss": ISSUER, "aud": AUDIENCE, "exp": now() + 600});
     all["tenant"] = json!("acme");
     all["email"] = json!(planted_email);
     all["groups"] = json!([planted_group]);
@@ -1703,4 +1710,31 @@ async fn portal_claims_writers_report_login() {
             && writers.iter().any(|path| path.ends_with("oidc.rs")),
         "the guard found no writer: {writers:?}"
     );
+}
+
+#[tokio::test]
+async fn portal_listed_app_other_audience_refused() {
+    let fleet_up = start().await;
+    // The pinned issuer and keys with another audience, with an extra one, with none.
+    for audiences in [
+        json!(["another-client"]),
+        json!([AUDIENCE, "another-client"]),
+        json!([]),
+    ] {
+        let mut login = jwt_config(&fleet_up.signer);
+        login["audiences"] = audiences.clone();
+        let refused = push_login(&fleet_up, &login).await;
+        assert_eq!(refused.status, 422, "{audiences}: {refused:?}");
+        assert_eq!(code_of(&refused), "portal_login_not_pinned", "{audiences}");
+        assert!(!refused.body.contains(AUDIENCE), "{}", refused.body);
+    }
+    let mut none = jwt_config(&fleet_up.signer);
+    none.as_object_mut().expect("object").remove("audiences");
+    assert_eq!(
+        code_of(&push_login(&fleet_up, &none).await),
+        "portal_login_not_pinned"
+    );
+    // The pinned audience alone is accepted.
+    let accepted = push_login(&fleet_up, &jwt_config(&fleet_up.signer)).await;
+    assert_eq!(accepted.status, 200, "{accepted:?}");
 }

@@ -1330,6 +1330,7 @@ impl Kind for Oidc {
             Login::Pinnable {
                 issuer: self.0.issuer.clone(),
                 source: Source::Discovery,
+                audience: self.0.client_id.clone(),
             }
         })
     }

@@ -890,23 +890,22 @@ impl Kind for JwtAuth {
             .jwks_refresh_secs
             .unwrap_or(jwks::REFRESH_DEFAULT)
             .clamp(jwks::REFRESH_MIN, jwks::REFRESH_MAX);
-        let login = match config.issuer.as_deref() {
-            Some(issuer)
+        let login = match (config.issuer.as_deref(), config.audiences.as_slice()) {
+            (Some(issuer), [audience])
                 if !algorithms.iter().any(Algorithm::is_hmac)
                     && !inline.has_symmetric()
                     && config.transport.is_none() =>
             {
+                let pinned = |source| Login::Pinnable {
+                    issuer: issuer.into(),
+                    source,
+                    audience: audience.as_str().into(),
+                };
                 match (&config.jwks_uri, &config.keys) {
-                    (Some(uri), None) => Login::Pinnable {
-                        issuer: issuer.into(),
-                        source: pin::Source::Jwks(uri.as_str().into()),
-                    },
-                    (None, Some(keys)) => {
-                        pin::fingerprint(keys).map_or(Login::Unpinnable, |hex| Login::Pinnable {
-                            issuer: issuer.into(),
-                            source: pin::Source::Keys(hex.into()),
-                        })
-                    }
+                    (Some(uri), None) => pinned(pin::Source::Jwks(uri.as_str().into())),
+                    (None, Some(keys)) => pin::fingerprint(keys).map_or(Login::Unpinnable, |hex| {
+                        pinned(pin::Source::Keys(hex.into()))
+                    }),
                     _ => Login::Unpinnable,
                 }
             }

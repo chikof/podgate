@@ -35,15 +35,17 @@ pub enum Source {
 /// What a stage that fills `RequestCx::claims` says about how it verifies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Login {
-    /// The issuer it requires and where its keys come from.
+    /// The issuer it requires, where its keys come from and the one audience it accepts.
     Pinnable {
         /// The `iss` the stage requires.
         issuer: Box<str>,
         /// Where its keys come from.
         source: Source,
+        /// The one audience (`aud`, or the client of an `oidc` stage) a token must have.
+        audience: Box<str>,
     },
     /// A stage whose trust cannot be written down as a pin: no issuer, a shared secret, keys from
-    /// two places, or a private transport. It never matches a pin.
+    /// two places, a private transport, or no single audience. It never matches a pin.
     Unpinnable,
 }
 
@@ -62,6 +64,7 @@ impl fmt::Debug for Source {
 pub struct Pin {
     issuer: Box<str>,
     source: Source,
+    audience: Box<str>,
 }
 
 impl fmt::Debug for Pin {
@@ -71,11 +74,16 @@ impl fmt::Debug for Pin {
 }
 
 impl Pin {
-    /// Whether `login` verifies with exactly the pinned issuer and key source.
+    /// Whether `login` verifies with exactly the pinned issuer and key source and accepts the
+    /// pinned audience, and no other.
     #[must_use]
     pub fn admits(&self, login: &Login) -> bool {
         match login {
-            Login::Pinnable { issuer, source } => *issuer == self.issuer && *source == self.source,
+            Login::Pinnable {
+                issuer,
+                source,
+                audience,
+            } => *issuer == self.issuer && *source == self.source && *audience == self.audience,
             Login::Unpinnable => false,
         }
     }
@@ -85,8 +93,8 @@ impl Pin {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PinError {
-    /// An entry is not `tenant/app=<issuer>|<source>`.
-    #[error("entry {entry} is not tenant/app=<issuer>|<source>")]
+    /// An entry is not `tenant/app=<issuer>|<source>|<audience>`.
+    #[error("entry {entry} is not tenant/app=<issuer>|<source>|<audience>")]
     Shape {
         /// The entry's position, from 1.
         entry: usize,
@@ -139,9 +147,15 @@ impl Apps {
             let entry = at + 1;
             let shape = PinError::Shape { entry };
             let (app, rest) = text.split_once('=').ok_or(PinError::Shape { entry })?;
-            let (issuer, source) = rest.split_once('|').ok_or(PinError::Shape { entry })?;
+            let (issuer, rest) = rest.split_once('|').ok_or(PinError::Shape { entry })?;
+            let (source, audience) = rest.rsplit_once('|').ok_or(PinError::Shape { entry })?;
             let (tenant, app) = app.split_once('/').ok_or(PinError::Shape { entry })?;
-            if tenant.is_empty() || app.is_empty() || app.contains('/') || issuer.is_empty() {
+            if tenant.is_empty()
+                || app.is_empty()
+                || app.contains('/')
+                || issuer.is_empty()
+                || audience.is_empty()
+            {
                 return Err(shape);
             }
             let source = match source {
@@ -167,6 +181,7 @@ impl Apps {
                 Pin {
                     issuer: issuer.into(),
                     source,
+                    audience: audience.into(),
                 },
             ));
         }
@@ -314,19 +329,19 @@ mod test {
     fn portal_apps_setting_parses_pins() {
         let grants = Grants::new(
             Apps::parse(&format!(
-                "ops/portal=https://idp.example|oidc, t2/p=https://i|jwks:https://i/keys,t3/p=i|keys:{HEX}"
+                "ops/portal=https://idp.example|oidc|web, t2/p=https://i|jwks:https://i/keys|x,t3/p=i|keys:{HEX}|y"
             ))
             .expect("parses"),
         );
         let pin = grants.of("ops", "portal").expect("listed").pin().clone();
-        assert!(pin.admits(&Login::Pinnable {
-            issuer: "https://idp.example".into(),
-            source: Source::Discovery
-        }));
-        assert!(!pin.admits(&Login::Pinnable {
-            issuer: "https://idp.example/".into(),
-            source: Source::Discovery
-        }));
+        let login = |issuer: &str, audience: &str| Login::Pinnable {
+            issuer: issuer.into(),
+            source: Source::Discovery,
+            audience: audience.into(),
+        };
+        assert!(pin.admits(&login("https://idp.example", "web")));
+        assert!(!pin.admits(&login("https://idp.example/", "web")));
+        assert!(!pin.admits(&login("https://idp.example", "other")));
         assert!(!pin.admits(&Login::Unpinnable));
         assert!(grants.of("ops", "other").is_none());
         assert!(grants.of("t2", "portal").is_none());
@@ -334,17 +349,19 @@ mod test {
         for bad in [
             "ops/portal",
             "ops/portal=issuer",
-            "ops=issuer|oidc",
-            "a/b/c=issuer|oidc",
-            "/p=issuer|oidc",
-            "t/=issuer|oidc",
-            "t/p=|oidc",
-            "t/p=i|",
-            "t/p=i|jwks:",
-            "t/p=i|keys:abc",
-            "t/p=i|keys:zz112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-            "t/p=i|saml",
-            "t/p=i|oidc,t/p=j|oidc",
+            "ops/portal=issuer|oidc",
+            "ops/portal=issuer|oidc|",
+            "ops=issuer|oidc|a",
+            "a/b/c=issuer|oidc|a",
+            "/p=issuer|oidc|a",
+            "t/=issuer|oidc|a",
+            "t/p=|oidc|a",
+            "t/p=i||a",
+            "t/p=i|jwks:|a",
+            "t/p=i|keys:abc|a",
+            "t/p=i|keys:zz112233445566778899aabbccddeeff00112233445566778899aabbccddeeff|a",
+            "t/p=i|saml|a",
+            "t/p=i|oidc|a,t/p=j|oidc|a",
         ] {
             let error = Apps::parse(bad).expect_err(bad);
             let shown = error.to_string();
@@ -358,13 +375,15 @@ mod test {
     #[test]
     fn pins_never_print() {
         let grants = Grants::new(
-            Apps::parse("t/p=https://secret-issuer|jwks:https://secret-keys").expect("parses"),
+            Apps::parse("t/p=https://secret-issuer|jwks:https://secret-keys|secret-audience")
+                .expect("parses"),
         );
         let shown = format!("{grants:?} {:?}", grants.of("t", "p"));
         assert!(!shown.contains("secret"), "{shown}");
         let pin = Pin {
             issuer: "secret-issuer".into(),
             source: Source::Jwks("secret-keys".into()),
+            audience: "secret-audience".into(),
         };
         assert!(!format!("{pin:?}").contains("secret"));
         assert!(!format!("{:?}", pin.source).contains("secret"));
@@ -372,7 +391,7 @@ mod test {
 
     #[test]
     fn grants_match_whole_halves() {
-        let grants = Grants::new(Apps::parse("ops/portal=i|oidc").expect("parses"));
+        let grants = Grants::new(Apps::parse("ops/portal=i|oidc|a").expect("parses"));
         for (tenant, app) in [
             ("ops/portal", ""),
             ("ops", "portal/x"),
@@ -459,7 +478,8 @@ mod test {
             .expect("a stage that fills claims")
         };
         let jwt = |extra: Value| {
-            let mut config = json!({"algorithms": ["EdDSA"], "issuer": "https://idp.test"});
+            let mut config = json!({"algorithms": ["EdDSA"], "issuer": "https://idp.test",
+                                    "audiences": ["app"]});
             config
                 .as_object_mut()
                 .expect("object")
@@ -470,6 +490,7 @@ mod test {
         let pinned = |issuer: &str, source: Source| Login::Pinnable {
             issuer: issuer.into(),
             source,
+            audience: "app".into(),
         };
 
         assert_eq!(
@@ -483,16 +504,23 @@ mod test {
             jwt(json!({"keys": keys})),
             pinned("https://idp.test", Source::Keys(print.into()))
         );
-        // Keys from two places, a private transport, a shared secret and no issuer have no pin.
+        // Keys from two places, a private transport, a shared secret, no issuer and not exactly
+        // one audience have no pin.
         for unpinnable in [
             jwt(json!({"keys": keys, "jwks_uri": "http://10.0.0.7/jwks"})),
             jwt(json!({"jwks_uri": "https://10.0.0.7/jwks", "transport": "t"})),
             jwt(json!({"keys": oct, "algorithms": ["HS256"]})),
-            login("jwt_auth", json!({"keys": keys, "algorithms": ["EdDSA"]})),
+            jwt(json!({"keys": keys, "audiences": []})),
+            jwt(json!({"keys": keys, "audiences": ["app", "second"]})),
+            login(
+                "jwt_auth",
+                json!({"keys": keys, "algorithms": ["EdDSA"], "audiences": ["app"]}),
+            ),
         ] {
             assert_eq!(unpinnable, Login::Unpinnable);
         }
-        // `oidc`: its issuer and the discovery document; a private transport has no pin.
+        // `oidc`: its issuer, the discovery document and its client as the audience; a private
+        // transport has no pin.
         let oidc = |extra: Value| {
             let mut config = json!({"issuer": "https://idp.test", "client_id": "app"});
             config
@@ -507,10 +535,11 @@ mod test {
         );
         assert_eq!(oidc(json!({"transport": "t"})), Login::Unpinnable);
         // A pin of one kind admits that kind only.
-        let pin = Apps::parse("t/a=https://idp.test|oidc").expect("parses");
+        let pin = Apps::parse("t/a=https://idp.test|oidc|app").expect("parses");
         let grants = Grants::new(pin);
         let grant = grants.of("t", "a").expect("listed");
         assert!(grant.pin().admits(&oidc(json!({}))));
+        assert!(!grant.pin().admits(&oidc(json!({"client_id": "other"}))));
         assert!(!grant.pin().admits(&jwt(json!({"keys": keys}))));
     }
 }

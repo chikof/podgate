@@ -459,8 +459,7 @@ fn pem_body(pem: &str) -> String {
 
 /// `PORTAL_APPS` for the fixture's app `t1/a`, which declares a `portal` middleware. The pin is
 /// the operator's and lives in the environment: no overview answer may show a part of it.
-const PORTAL_PIN: &str =
-    "t1/a=https://pin-issuer-planted-4d1.test|jwks:https://pin-keys-planted-4d1.test/jwks";
+const PORTAL_PIN: &str = "t1/a=https://pin-issuer-planted-4d1.test|jwks:https://pin-keys-planted-4d1.test/jwks|pin-audience-planted-4d1";
 
 /// One middleware of every built kind, with a planted secret wherever the kind takes one. A kind
 /// that is built and missing here fails the guard, so no kind reaches the overview unchecked.
@@ -799,6 +798,7 @@ async fn overview_redacts_secrets() {
     plants.extend([
         "pin-issuer-planted-4d1".to_owned(),
         "pin-keys-planted-4d1".to_owned(),
+        "pin-audience-planted-4d1".to_owned(),
     ]);
     push(&podgate, &pushed).await;
 
