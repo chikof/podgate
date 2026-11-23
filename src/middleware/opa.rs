@@ -633,7 +633,7 @@ mod test {
         compile(&config).expect("compiled")
     }
 
-    fn with(extra: Value) -> Value {
+    fn with(extra: &Value) -> Value {
         let mut config = json!({"address": "http://10.0.0.7:8181/v1/data/p"});
         config
             .as_object_mut()
@@ -687,7 +687,7 @@ mod test {
     fn opa_config_rejects_bad_limits() {
         assert!(
             compile(&with(
-                json!({"timeout_secs": 10, "max_response_bytes": MAX_RESPONSE, "max_concurrent": 4096})
+                &json!({"timeout_secs": 10, "max_response_bytes": MAX_RESPONSE, "max_concurrent": 4096})
             ))
             .is_ok()
         );
@@ -701,14 +701,14 @@ mod test {
             json!({"include_body": true}),
             json!({"nope": 1}),
         ] {
-            assert_eq!(code(&with(bad.clone())), "invalid_middleware", "{bad}");
+            assert_eq!(code(&with(&bad)), "invalid_middleware", "{bad}");
         }
         assert_eq!(
-            code(&with(json!({"transport": "missing"}))),
+            code(&with(&json!({"transport": "missing"}))),
             "unknown_transport"
         );
         assert_eq!(
-            code(&with(json!({"transport": "t"}))),
+            code(&with(&json!({"transport": "t"}))),
             "invalid_middleware",
             "TLS options on a plain address"
         );
@@ -718,7 +718,7 @@ mod test {
     fn opa_config_rejects_reserved_header_names() {
         assert!(
             compile(&with(
-                json!({"request_headers": ["Authorization", "cookie", "x-api-key"], "response_headers": ["x-user", "www-authenticate"]})
+                &json!({"request_headers": ["Authorization", "cookie", "x-api-key"], "response_headers": ["x-user", "www-authenticate"]})
             ))
             .is_ok()
         );
@@ -731,15 +731,14 @@ mod test {
             json!({"response_headers": ["proxy-authorization"]}),
             json!({"request_headers": ["x-user"], "response_headers": ["X-User"]}),
         ] {
-            assert_eq!(code(&with(bad.clone())), "invalid_middleware", "{bad}");
+            assert_eq!(code(&with(&bad)), "invalid_middleware", "{bad}");
         }
     }
 
     #[test]
     fn input_has_exactly_the_documented_keys() {
         let stage = opa(&json!({"request_headers": ["x-api-key", "authorization", "x-absent"]}));
-        let request = RequestHeader::build("POST", b"/orders?id=7", None).expect("request");
-        let mut request = request;
+        let mut request = RequestHeader::build("POST", b"/orders?id=7", None).expect("request");
         request.append_header("host", "A.test:8443").expect("host");
         request.append_header("x-api-key", "k1").expect("header");
         request.append_header("x-api-key", "k2").expect("header");

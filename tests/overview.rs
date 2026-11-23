@@ -576,6 +576,11 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"address": format!("http://10.0.0.9:9091/verify?key={auth_key}"), "response_headers": ["x-user"]}),
         ),
         (
+            "opa",
+            json!({"address": "http://10.0.0.7:8181/v1/data/podgate/authz",
+                   "request_headers": ["x-api-key"], "response_headers": ["x-user"]}),
+        ),
+        (
             "jwt_auth",
             json!({"algorithms": ["HS256", "ES256"],
                    "keys": {"keys": [{"kty": "oct", "kid": "shared", "k": URL_SAFE_NO_PAD.encode(&jwt_secret)}]},
