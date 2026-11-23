@@ -185,6 +185,12 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Auto-revert of a bad config | none | none | built |
 | Benchmark against both | n/a | n/a | 0020 |
 
+## API management, AI and MCP governance
+
+| Feature | Traefik | Caddy | podgate |
+|---|---|---|---|
+| MCP server registry and gateway | Traefik Hub MCP Gateway | none | built (`docs/ref/mw-mcp-gateway.md`) |
+
 ## Not planned, with a recommendation
 
 Every item the earlier passes deferred or declined now has a spec in the matrix. What remains is not planned on purpose.
