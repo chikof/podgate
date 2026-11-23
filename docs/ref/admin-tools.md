@@ -89,6 +89,14 @@ The pin lives in memory next to the live snapshot. Nothing is written to disk, s
 
 The check, the apply and the pin are one step under one gate, so two first pushes racing for an empty node cannot both win, and a client that disconnects while the snapshot compiles cannot leave a new snapshot live under the old pin: the gate moves into the blocking task that applies the snapshot.
 
+## The read socket
+
+`ADMIN_READ_SOCKET` names a second unix socket for a reader that must not hold the admin API. It is off when unset: no socket file, no listener, no task. `ADMIN_READ_SOCKET_MODE` sets its permission bits (default `0660`, allowed `0600` to `0666`, no execute bit). It stops startup when set without the socket, and `ADMIN_READ_SOCKET` stops startup when it equals `ADMIN_SOCKET`. A mode that gives other users access logs a warning. The admin socket stays `0600`.
+
+The socket serves `GET /v1/overview?section=summary` with the admin handler's own answer, byte for byte, and shares its overview slots. A `GET` of `/v1/overview` with no `section`, or one that is not exactly `summary`, is `400` with `{"error": "this socket serves section=summary only"}`. Any other method on the route is `405` with `allow: GET`. Every other path is `404` with `{"error": "not found"}`: no `/healthz`, no snapshot, no events, no purge. `GET /v1/catalog` joins the overview once change 0135 is in.
+
+To give one other user read access, put the socket in a directory owned by the daemon user with a dedicated group and the setgid bit (`2750`), and add that user to the group and to no group that can open `ADMIN_SOCKET`. The socket carries operator-wide data, so keep the mode as tight as the reader allows.
+
 ## Against Traefik and Caddy
 
 | | Traefik | Caddy | podgate |
