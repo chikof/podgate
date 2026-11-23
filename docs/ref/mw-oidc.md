@@ -2,7 +2,7 @@
 
 Protects a web app with an OpenID Connect login (authorization code flow with PKCE). Code: `src/middleware/oidc.rs` and `src/middleware/oidc/{flow,session,discovery}.rs`; tests `tests/mw_oidc.rs`.
 
-**The session is the cookie.** It is encrypted under a key derived from the snapshot's `skew_secret`; podgate keeps nothing per user. The price: logout is local (the provider is not told), and a person whose access is revoked at the provider stays signed in until their cookie ends (at most `session.max_age_secs`, and never past the ID token's `exp`).
+**The session is the cookie.** It is encrypted under a key derived from the snapshot's `skew_secret`; podgate keeps nothing per user. The price: logout is local (the provider is not told), and a person whose access is revoked at the provider stays signed in until their cookie ends (at most `session.max_age_secs`, and never past the ID token's `exp`). The claims it holds, verified at login, are also handed to the stages after it (`opa`, the developer portal, `docs/ref/portal.md`).
 
 Traefik has no OIDC outside Traefik Hub (and a community forward-auth pattern with `oauth2-proxy`); Caddy needs the `caddy-security` plugin. Not built, on purpose: refresh tokens, a `userinfo` call, dynamic client registration, single logout from the provider, any flow but the authorization code flow.
 

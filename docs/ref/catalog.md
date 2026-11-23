@@ -34,7 +34,7 @@ The catalog does not route. A version is a path or a host the routers already ma
 | `routers` | One to 64 routers of the same app. A router belongs to at most one entry. |
 | `title`, `description` | Free text, at most 256 and 2048 bytes. |
 | `openapi` | The name of an `openapi` middleware of the app. The catalog shows the document's title, version, dialect and operation count, never the document. |
-| `published` | The tenant's consent to appear on the developer portal. Default `false`. The operator's catalog lists every entry either way. |
+| `published` | The tenant's consent to appear on the developer portal. Default `false`. The operator's catalog lists every entry either way. The portal shows an entry only to viewers of its own tenant (`docs/ref/portal.md`). |
 | `sunset` | `YYYY-MM-DD`, UTC, from 1970. Required for `deprecated`, allowed for `retired`, refused for the other stages. |
 | `successor` | `{id, version}` of another entry of the same tenant. Allowed for `deprecated` and `retired`. |
 

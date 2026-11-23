@@ -1,6 +1,6 @@
 # Middleware `openapi`
 
-Reference for the kind in `src/middleware/openapi.rs` (with `src/middleware/openapi/`). The model it plugs into is in `docs/architecture.md` (`### Middlewares`). It matches the OpenAPI request validation of Traefik Hub: a route carries an OpenAPI description, and a request that does not fit it is answered before it reaches the upstream.
+Reference for the kind in `src/middleware/openapi.rs` (with `src/middleware/openapi/`). The model it plugs into is in `docs/architecture.md` (`### Middlewares`). It matches the OpenAPI request validation of Traefik Hub: a route carries an OpenAPI description, and a request that does not fit it is answered before it reaches the upstream. The compiled document also keeps its compact text for the developer portal's view (`docs/ref/portal.md`).
 
 ```json
 {

@@ -54,7 +54,7 @@ The `input` has these keys and no others:
 | `source_ip` | The resolved client address (`docs/ref/client-ip.md`), as text. Omitted when the connection has no IP peer. |
 | `tenant`, `app` | The ids of the tenant and the app the request was routed to. |
 | `headers` | `{name: [values]}` for the names of `request_headers` the request has, lower-case names, `{}` when none. Always lists, never a string: a header that turned from a string into an array when a client repeated it would let a duplicate slip past a deny rule. A value that is not UTF-8 is sent with replacement characters, so the header stays present. |
-| `claims` | The verified claims object of a `jwt_auth` stage placed **before** this one in the chain. Present only when such a stage verified a token; otherwise the key is absent, so `input.claims.role` is undefined in Rego and denies. With two `jwt_auth` stages the last one that verified wins. |
+| `claims` | The verified claims object of a `jwt_auth` or `oidc` stage placed **before** this one in the chain. Present only when such a stage verified a token or opened a session; otherwise the key is absent, so `input.claims.role` is undefined in Rego and denies. With two such stages the last one that verified wins. An `oidc` session holds `sub` and the claims its declaration names in `forward_claims` and `required_claims`, as verified from the ID token at login and sealed in the cookie; a cookie the client changed or made up opens to nothing and gives no claims. |
 
 The request body is never sent. A call whose head and body pass 32 KiB is not sent and the request gets `503`.
 
@@ -164,4 +164,4 @@ Sending more (a header added, `response_headers`, a new timeout) lists nothing. 
 
 ## Not here
 
-No decision cache, no bundle or data push to OPA, no `?explain` or `?metrics`, no bearer token for the OPA server (use `transport` with a client certificate), no request body in the input, no gRPC, no claims from an `oidc` session.
+No decision cache, no bundle or data push to OPA, no `?explain` or `?metrics`, no bearer token for the OPA server (use `transport` with a client certificate), no request body in the input, no gRPC.
