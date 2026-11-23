@@ -176,6 +176,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | Access log (fields, filters, JSON and CLF) | `accessLog` | `log` | built (query and headers dropped by default, credential headers redacted, never blocks a request) |
 | Prometheus metrics per entry point, router, service | `metrics.prometheus` | `metrics` | built (separate metrics listener, cardinality caps) |
 | OpenTelemetry tracing | `tracing.otlp` | `tracing` | built (OTLP over HTTP; `capturedResponseHeaders`, `safeQueryParams` not built), built (OTLP over gRPC: `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, headers as metadata, TLS and client certificates, gzip, insecure, timeout) |
+| OpenTelemetry metrics | `metrics.otlp` | none | built (OTLP over HTTP and gRPC: `OTEL_METRICS_EXPORTER=otlp`, `OTEL_METRIC_EXPORT_INTERVAL`) |
 | Health endpoint | `ping` | none | built (`/healthz`, `/readyz` on the admin socket) |
 | JSON schema of the configuration | none | `caddy adapt`, JSON docs | built (`GET /v1/schema`, generated from the model types) |
 | Validate without applying | none | `caddy validate` | built (`POST /v1/snapshot/validate`, the same compile as the push), plan built |
