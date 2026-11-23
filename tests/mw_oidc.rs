@@ -1856,3 +1856,220 @@ async fn oidc_named_issuer_through_dns() {
             .starts_with(&format!("http://idp.internal:{port}/authorize?"))
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The developer portal behind the login
+// ---------------------------------------------------------------------------------------------
+
+const PORTAL_HOST: &str = "portal.test";
+
+/// Tenant `tenant`'s app `id` with one published API whose title holds `mark`.
+fn published(tenant: &str, id: &str, host: &str, up: &Up, mark: &str) -> Value {
+    let mut app = app(id, &[host], &[serving("r1", up.addr)]);
+    app["tenant"] = json!(tenant);
+    app["routers"] = json!([router(
+        "api",
+        json!({"all": [{"host": host}, {"path_prefix": "/api"}]}),
+        "web"
+    )]);
+    app["apis"] = json!([{
+        "id": "pets", "version": "1", "lifecycle": "stable", "routers": ["api"],
+        "published": true, "title": format!("{mark} Pets"),
+    }]);
+    app
+}
+
+/// The documented example: the operator's app `ops/portal` with the `oidc` login, which copies the
+/// verified `tenant` claim into the session, and the portal after it; two tenants with an API each.
+/// Run with `PORTAL_APPS=ops/portal=<issuer>|oidc`.
+fn portal_snapshot(up: &Up, login: &Value) -> Value {
+    let mut portal = with_oidc(
+        app("portal", &[PORTAL_HOST], &[serving("r1", up.addr)]),
+        login.clone(),
+    );
+    portal["tenant"] = json!("ops");
+    let portal = with_middleware(portal, "portal", "portal", json!({}));
+    let tenant = |id: &str| json!({"id": id, "weight": 1, "budget": {"max_inflight": 100, "max_buffer_bytes": 4_194_304}});
+    let mut snapshot = pushed(
+        1,
+        &[
+            portal,
+            published("acme", "pets-app", "pets.acme.test", up, "ACMEMARK"),
+            published("globex", "billing", "billing.globex.test", up, "GLOBEXMARK"),
+        ],
+    );
+    snapshot["tenants"] = json!([tenant("ops"), tenant("acme"), tenant("globex")]);
+    snapshot
+}
+
+async fn portal_podgate(idp: &Idp) -> Podgate {
+    Podgate::start_with_env(&[("PORTAL_APPS", &format!("ops/portal={}|oidc", idp.base))]).await
+}
+
+#[tokio::test]
+async fn portal_behind_oidc_route() {
+    let idp = Idp::start().await;
+    let podgate = portal_podgate(&idp).await;
+    let up = Up::start().await;
+    let login = config(&idp, &json!({"forward_claims": {"tenant": "x-tenant"}}));
+    push(&podgate, &portal_snapshot(&up, &login)).await;
+
+    // A browser that has not signed in is sent to the provider and never reaches the portal.
+    let first = h(&podgate, PORTAL_HOST, "/", &HTML).await;
+    assert_eq!(first.status, 302, "{first:?}");
+    assert!(
+        first
+            .header("location")
+            .expect("location")
+            .starts_with(&idp.base)
+    );
+    let script = h(&podgate, PORTAL_HOST, "/api/catalog", &[]).await;
+    assert_eq!(script.status, 401, "{script:?}");
+    assert!(script.header("www-authenticate").is_some());
+    assert!(!script.body.contains("ACMEMARK") && !script.body.contains("items"));
+
+    // After the login the page lists the claim's tenant only.
+    let acme = sign_in(&podgate, &idp, PORTAL_HOST, &json!({"tenant": "acme"})).await;
+    let page = with_session(&podgate, PORTAL_HOST, "/", &acme).await;
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.header("content-security-policy").is_some());
+    let list = with_session(&podgate, PORTAL_HOST, "/api/catalog", &acme).await;
+    assert_eq!(list.status, 200, "{list:?}");
+    assert!(list.body.contains("ACMEMARK Pets"), "{}", list.body);
+    assert!(!list.body.contains("GLOBEXMARK"), "{}", list.body);
+    let globex = sign_in(&podgate, &idp, PORTAL_HOST, &json!({"tenant": "globex"})).await;
+    let list = with_session(&podgate, PORTAL_HOST, "/api/catalog", &globex).await;
+    assert!(list.body.contains("GLOBEXMARK Pets"), "{}", list.body);
+    assert!(!list.body.contains("ACMEMARK"), "{}", list.body);
+
+    // A person whose token names no tenant gets the page and a `401` for the data.
+    let nobody = sign_in(&podgate, &idp, PORTAL_HOST, &json!({})).await;
+    assert_eq!(
+        with_session(&podgate, PORTAL_HOST, "/", &nobody)
+            .await
+            .status,
+        200
+    );
+    let refused = with_session(&podgate, PORTAL_HOST, "/api/catalog", &nobody).await;
+    assert_eq!(refused.status, 401, "{refused:?}");
+    assert_eq!(refused.body, r#"{"error":"unauthorized"}"#);
+    assert_eq!(
+        up.requests(),
+        0,
+        "the portal answers; the upstream is never dialled"
+    );
+}
+
+#[tokio::test]
+async fn oidc_hands_session_claims_to_later_stages() {
+    let idp = Idp::start().await;
+    let podgate = portal_podgate(&idp).await;
+    let up = Up::start().await;
+    // Only the claims the declaration names are in the session: `tenant` is, `team` is not.
+    let login = config(&idp, &json!({"forward_claims": {"tenant": "x-tenant"}}));
+    push(&podgate, &portal_snapshot(&up, &login)).await;
+    let cookie = sign_in(
+        &podgate,
+        &idp,
+        PORTAL_HOST,
+        &json!({"tenant": "acme", "team": "globex"}),
+    )
+    .await;
+    let list = with_session(&podgate, PORTAL_HOST, "/api/catalog", &cookie).await;
+    assert!(
+        list.body.contains("ACMEMARK") && !list.body.contains("GLOBEXMARK"),
+        "{}",
+        list.body
+    );
+    // The portal reads the claim its settings name: `team` was never carried by the session.
+    let mut other = portal_snapshot(&up, &login);
+    other["version"] = json!(2);
+    other["apps"][0]["middlewares"][1]["tenant_claim"] = json!("team");
+    push(&podgate, &other).await;
+    let list = with_session(&podgate, PORTAL_HOST, "/api/catalog", &cookie).await;
+    assert_eq!(list.status, 401, "{list:?}");
+}
+
+#[tokio::test]
+async fn oidc_claims_from_verified_session_only() {
+    let idp = Idp::start().await;
+    let podgate = portal_podgate(&idp).await;
+    let up = Up::start().await;
+    let login = config(&idp, &json!({"forward_claims": {"tenant": "x-tenant"}}));
+    push(&podgate, &portal_snapshot(&up, &login)).await;
+    let cookie = sign_in(&podgate, &idp, PORTAL_HOST, &json!({"tenant": "acme"})).await;
+    let ok = with_session(&podgate, PORTAL_HOST, "/api/catalog", &cookie).await;
+    assert_eq!(ok.status, 200, "{ok:?}");
+
+    // A cookie the client changed, one it made up, and header and cookie claims it supplies
+    // instead of a session: each gets the login redirect and no portal view.
+    let value = cookie
+        .strip_prefix(&format!("{SESSION_COOKIE}="))
+        .expect("a session pair");
+    let mut changed = value.to_owned();
+    let middle = changed.len() / 2;
+    let flipped = if changed.as_bytes()[middle] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    changed.replace_range(middle..=middle, flipped);
+    let forged = URL_SAFE_NO_PAD.encode(json!({"sub": "ann", "tenant": "globex"}).to_string());
+    for attempt in [
+        format!("{SESSION_COOKIE}={changed}"),
+        format!("{SESSION_COOKIE}={forged}"),
+        format!("{SESSION_COOKIE}={}", "x".repeat(80)),
+        "tenant=acme".to_owned(),
+    ] {
+        let answer = with_session(&podgate, PORTAL_HOST, "/api/catalog", &attempt).await;
+        assert_eq!(answer.status, 302, "{attempt}: {answer:?}");
+        assert!(
+            answer
+                .header("location")
+                .expect("location")
+                .starts_with(&idp.base)
+        );
+        assert!(!answer.body.contains("ACMEMARK"));
+    }
+    let header = h(
+        &podgate,
+        PORTAL_HOST,
+        "/api/catalog",
+        &[
+            ("X-Tenant", "acme"),
+            ("X-Portal-Tenant", "acme"),
+            ("Accept", "text/html"),
+        ],
+    )
+    .await;
+    assert_eq!(header.status, 302, "{header:?}");
+    assert_eq!(up.requests(), 0);
+}
+
+#[tokio::test]
+async fn portal_oidc_login_must_be_pinned() {
+    let idp = Idp::start().await;
+    let other = Idp::start().await;
+    let podgate = portal_podgate(&idp).await;
+    let up = Up::start().await;
+    // The pinned issuer is `idp`; a login at another provider is refused whole.
+    let login = config(&other, &json!({"forward_claims": {"tenant": "x-tenant"}}));
+    let refused = podgate.push_snapshot(&portal_snapshot(&up, &login)).await;
+    assert_eq!(refused.status, 422, "{refused:?}");
+    assert_eq!(
+        refused.json()["conflicts"][0]["code"],
+        "portal_login_not_pinned"
+    );
+    assert!(!refused.body.contains(&idp.base), "{}", refused.body);
+    // A private transport cannot be pinned.
+    let mut private = config(&idp, &json!({"forward_claims": {"tenant": "x-tenant"}}));
+    private["transport"] = json!("t");
+    let mut snapshot = portal_snapshot(&up, &private);
+    snapshot["apps"][0]["transports"] = json!([{"name": "t", "type": "servers_transport"}]);
+    let refused = podgate.push_snapshot(&snapshot).await;
+    assert_eq!(
+        refused.json()["conflicts"][0]["code"],
+        "portal_login_not_pinned",
+        "{refused:?}"
+    );
+}

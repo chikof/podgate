@@ -457,6 +457,11 @@ fn pem_body(pem: &str) -> String {
     pem.lines().nth(1).expect("a PEM body line").to_owned()
 }
 
+/// `PORTAL_APPS` for the fixture's app `t1/a`, which declares a `portal` middleware. The pin is
+/// the operator's and lives in the environment: no overview answer may show a part of it.
+const PORTAL_PIN: &str =
+    "t1/a=https://pin-issuer-planted-4d1.test|jwks:https://pin-keys-planted-4d1.test/jwks";
+
 /// One middleware of every built kind, with a planted secret wherever the kind takes one. A kind
 /// that is built and missing here fails the guard, so no kind reaches the overview unchecked.
 fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
@@ -638,6 +643,7 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             "content_guard",
             json!({"rules": [{"name": "planted", "pattern": guard_pattern, "action": "redact"}]}),
         ),
+        ("portal", json!({"tenant_claim": "tenant"})),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
     let mut built: Vec<&str> = podgate::middleware::Stage::BUILT.to_vec();
@@ -784,10 +790,16 @@ async fn overview_redacts_secrets() {
     let podgate = Podgate::start_with_env(&[
         ("RATE_LIMIT_STORES_FILE", &stores),
         ("PLUGINS_FILE", &plugins),
+        ("PORTAL_APPS", PORTAL_PIN),
     ])
     .await;
     let upstream = Upstream::start("x").await;
-    let (pushed, plants) = planted(upstream.addr);
+    let (pushed, mut plants) = planted(upstream.addr);
+    // The pin is the environment's: no part of it may appear in any answer.
+    plants.extend([
+        "pin-issuer-planted-4d1".to_owned(),
+        "pin-keys-planted-4d1".to_owned(),
+    ]);
     push(&podgate, &pushed).await;
 
     // Every section in one answer, and the apps again page by page.
@@ -886,6 +898,7 @@ async fn every_describe_is_secret_free() {
     let podgate = Podgate::start_with_env(&[
         ("RATE_LIMIT_STORES_FILE", &stores),
         ("PLUGINS_FILE", &plugins),
+        ("PORTAL_APPS", PORTAL_PIN),
     ])
     .await;
     let upstream = Upstream::start("x").await;
