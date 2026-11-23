@@ -35,6 +35,51 @@ spec:
               - config
             - properties:
                 config:
+                  properties:
+                    limits:
+                      items:
+                        properties:
+                          limit:
+                            minimum: 0
+                          period:
+                            enum:
+                            - minute
+                            - hour
+                            - day
+                            - month
+                        required:
+                        - limit
+                        - period
+                    max_prompt_bytes:
+                      minimum: 0
+                    on_store_error:
+                      enum:
+                      - allow
+                      - deny
+                    source:
+                      properties:
+                        ip:
+                          properties:
+                            depth:
+                              maximum: 65535
+                              minimum: 1
+                            ipv6_subnet_bits:
+                              maximum: 255
+                              minimum: 0
+                    store_timeout_ms:
+                      maximum: 65535
+                      minimum: 0
+                  required:
+                  - limits
+                  - source
+                type:
+                  enum:
+                  - ai_token_limit
+              required:
+              - type
+              - config
+            - properties:
+                config:
                   required:
                   - users
                 type:
@@ -1029,6 +1074,28 @@ spec:
                     description: 'Requests one source may make per window: 1 to 2^40.'
                     minimum: 0
                     type: integer
+                  limits:
+                    description: One to four windows, one per period; a key is refused when any is spent.
+                    items:
+                      description: One window of a configuration.
+                      properties:
+                        limit:
+                          description: 'Tokens one key may use per window: 1 to 2^40.'
+                          minimum: 0
+                          type: integer
+                        period:
+                          description: The calendar window, UTC.
+                          enum:
+                          - minute
+                          - hour
+                          - day
+                          - month
+                          type: string
+                      required:
+                      - limit
+                      - period
+                      type: object
+                    type: array
                   local_fallback:
                     x-kubernetes-preserve-unknown-fields: true
                   logout_path:
@@ -1665,6 +1732,7 @@ spec:
                 description: The middleware kind.
                 enum:
                 - add_prefix
+                - ai_token_limit
                 - basic_auth
                 - buffering
                 - cache
