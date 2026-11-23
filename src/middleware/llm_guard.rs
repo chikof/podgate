@@ -18,7 +18,7 @@
 //!   (the vendored `ProxyHttp::hold_response`, see [`Kind::response_hold`]), and read as
 //!   `choices[].message.content`, or `choices[].delta.content` for an event stream.
 //! - **Verdicts.** The first block is `403 {"error":"blocked by guard","category":...}` and the
-//!   other guards are cancelled; the guard's reason goes to the log only. A guard that cannot
+//!   other guards are cancelled; the guard's reason is never sent or logged. A guard that cannot
 //!   answer is `503 {"error":"guard unavailable"}` unless its `on_error` is `allow`.
 
 use std::collections::BTreeMap;

@@ -1617,6 +1617,37 @@ async fn guard_blocked_prompt_never_logged() {
     assert_eq!(up.requests(), 0);
 }
 
+#[tokio::test]
+async fn guard_reason_echoing_prompt_never_logged() {
+    let podgate = Podgate::start_logged(&[("RUST_LOG", "trace")]).await;
+    let up = model().await;
+    let canary = "CANARY-5b1e90d2-reason";
+    let blocker =
+        Server::start(|call| block("pii", &format!("the prompt said: {}", call.text()))).await;
+    let app = site(
+        "echo",
+        "echo.test",
+        up.addr,
+        &[guard("g1", blocker.addr, &Value::Null)],
+        &Value::Null,
+    );
+    push(&podgate, &snapshot(1, &[app])).await;
+
+    let answer = post(&podgate, "echo.test", "/", &chat(&format!("tell {canary}"))).await;
+    assert_eq!(answer.status, 403, "{}", answer.wire_text());
+    assert!(
+        blocker.bodies().contains(canary),
+        "the guard saw the prompt"
+    );
+    assert!(!answer.wire_text().contains(canary), "the client saw it");
+    let log = podgate.log();
+    assert!(
+        !log.contains(canary),
+        "the log carries the guard's reason:\n{log}"
+    );
+    assert!(log.contains("guard blocked"), "the block is logged:\n{log}");
+}
+
 /// An `h2c://` model that answers `200` with `pieces` as separate DATA frames.
 async fn h2c_model(content_type: &'static str, pieces: Vec<bytes::Bytes>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

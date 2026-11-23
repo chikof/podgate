@@ -7,8 +7,7 @@
 //! "<text>"}`; the guard answers `200` and exactly `{"verdict": "allow" | "block", "category"?,
 //! "reason"?}`. Anything else is a [`Failure`], and a failure closes the door unless that guard
 //! says [`OnError::Allow`]. The text, the verdict's reason and the answer are never put into a
-//! log line, a metric or explain by this file, except the guard's own `reason` (see
-//! [`settle`]).
+//! log line, a metric or explain by this file; a block logs only its category.
 //!
 //! A call dials through [`forward_auth::Client`] (the upstream address policy is checked for the
 //! calling tenant on the exact address, every call), holds one permit of `max_concurrent`, goes
@@ -46,8 +45,6 @@ pub(in crate::middleware) const MAX_ADDRESS: usize = 512;
 const MAX_REASON: usize = 1024;
 /// The longest `category`.
 const MAX_CATEGORY: usize = 64;
-/// How much of a `reason` reaches the log.
-const LOGGED_REASON: usize = 200;
 /// What a call holds besides its own bytes: the answer head, the read buffers and the answer.
 pub(in crate::middleware) const OVERHEAD: u64 = (HEAD_LIMIT + 2 * READ + ANSWER_LIMIT) as u64;
 
@@ -127,7 +124,7 @@ pub(in crate::middleware) enum Verdict {
     Block {
         /// A label for the client.
         category: Option<Category>,
-        /// Why, for the log; never sent to the client.
+        /// Why, as the guard gave it; never sent to the client and never logged.
         reason: Option<Box<str>>,
     },
 }
@@ -266,8 +263,8 @@ impl Settled {
     }
 }
 
-/// Applies `on_error` to one call's result. A block's `reason` goes to the log, shortened and
-/// stripped of control characters; a failure is logged with what failed, never with the text.
+/// Applies `on_error` to one call's result. A block logs its category, never its `reason` (a
+/// guard may quote the prompt in it); a failure is logged with what failed, never with the text.
 #[must_use]
 pub(in crate::middleware) fn settle(
     result: Result<Verdict, Failure>,
@@ -276,20 +273,12 @@ pub(in crate::middleware) fn settle(
 ) -> Settled {
     match result {
         Ok(Verdict::Allow) => Settled::Allow { degraded: false },
-        Ok(Verdict::Block { category, reason }) => {
-            let reason: String = reason
-                .as_deref()
-                .unwrap_or_default()
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(LOGGED_REASON)
-                .collect();
+        Ok(Verdict::Block { category, .. }) => {
             tracing::info!(
                 app = who.app,
                 guard = who.guard,
                 phase = who.phase.name(),
                 category = category.as_ref().map_or("", Category::as_str),
-                reason = %reason,
                 "guard blocked"
             );
             Settled::Block { category }

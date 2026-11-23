@@ -63,7 +63,7 @@ The guard answers `200` and **exactly** one JSON object:
 |---|---|
 | `verdict` | Required, exactly `allow` or `block` (lower case). |
 | `category` | Optional. A short label `[a-z0-9][a-z0-9_.:-]{0,63}`; it is the only thing of the verdict a client sees. Anything else is a failure. |
-| `reason` | Optional, at most 1 KiB. For the log only; never sent to the client. |
+| `reason` | Optional, at most 1 KiB. Never sent to the client and never logged. |
 
 Anything else is a failure: another status, a redirect, an answer over 4 KiB, a body that is not exactly this object (an unknown field, a repeated field, trailing bytes, an unknown verdict such as `maybe` or `ALLOW`), a head that is not clean HTTP/1.x (two `Content-Length` headers, a content coding, a folded header).
 
@@ -109,7 +109,7 @@ Try it by hand: `curl -s -d '{"phase":"request","text":"hello"}' http://127.0.0.
 | Case | Answer |
 |---|---|
 | Every guard allows | The request goes on (the model gets the held body untouched); the answer comes back as it would without the middleware. |
-| A guard says `block` | `403 {"error":"blocked by guard","category":"violence"}` (no `category` key when the guard gave none). The other guards of the phase are cancelled: their connections are closed. The reason goes to the log. |
+| A guard says `block` | `403 {"error":"blocked by guard","category":"violence"}` (no `category` key when the guard gave none). The other guards of the phase are cancelled: their connections are closed. The reason is never logged. |
 | A guard cannot answer, `on_error: deny` | `503 {"error":"guard unavailable"}`. |
 | No room for the call (the guard is at `max_concurrent`, or the tenant's buffer budget is full right now) | `503 {"error":"guard unavailable"}` with `retry-after: 1`; a capacity refusal, which auto-revert does not count. |
 | A guard cannot answer, `on_error: allow` | The exchange goes on; a warning names the guard in the log. |
@@ -145,7 +145,7 @@ Guard addresses are tenant configuration, so podgate treats them as untrusted:
 
 ## Logs, metrics, explain, the recorder
 
-podgate never writes a prompt, an answer or extracted text to a log line, a metric label, the failed-request recorder or explain. The log names the app, the guard, the phase and the category. A guard's `reason` is written to the log (at `info`, control characters removed, 200 bytes at most): **a guard that echoes the prompt in its reason puts the prompt in your log.** Keep reasons to rule names.
+podgate never writes a prompt, an answer or extracted text to a log line, a metric label, the failed-request recorder or explain. The log names the app, the guard, the phase and the category. A guard's `reason` is never written to the log, whatever it says; a block logs only its category.
 
 The prompt is read by the middleware and never reaches the body hooks of the proxy unless every guard allowed it, so a blocked or failed-closed prompt is never fed to the recorder or to a mirror. Explain shows each guard's name, address, phases, `on_error` and limits.
 
