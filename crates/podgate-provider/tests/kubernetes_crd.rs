@@ -1359,6 +1359,65 @@ fn crd_manifests_not_stale() {
     }
 }
 
+/// A kind that shares a field name with another but describes it differently (the `source` of
+/// `quota` takes a `jwt_claim`) must keep its value limits in the manifests.
+#[test]
+fn crd_source_bounds_survive_a_sibling() {
+    let valid = |kind: &str| -> Value {
+        let config = match kind {
+            "rate_limit" => json!({ "average": 1, "burst": 1 }),
+            "in_flight_req" => json!({ "amount": 1 }),
+            _ => json!({ "limit": 1, "period": "day" }),
+        };
+        json!({ "type": kind, "config": config })
+    };
+    let with_ip = |kind: &str, ip: Value| -> Value {
+        let mut spec = valid(kind);
+        spec["config"]["source"] = json!({ "ip": ip });
+        spec
+    };
+    let validator = spec_validator(&crd("podgatemiddlewares.yaml"));
+    for kind in ["rate_limit", "in_flight_req", "quota"] {
+        let found = errors(
+            &validator,
+            &with_ip(kind, json!({ "depth": 1, "ipv6_subnet_bits": 64 })),
+        );
+        assert!(
+            found.is_empty(),
+            "{kind}: a source in bounds is valid: {found:?}"
+        );
+        for (why, ip) in [
+            ("depth 0", json!({ "depth": 0 })),
+            ("depth 65536", json!({ "depth": 65_536 })),
+            ("ipv6_subnet_bits 256", json!({ "ipv6_subnet_bits": 256 })),
+        ] {
+            assert!(
+                !validator.is_valid(&with_ip(kind, ip)),
+                "{kind}: {why} must be refused by the manifest"
+            );
+        }
+    }
+    let mut claim = valid("quota");
+    claim["config"]["source"] = json!({ "jwt_claim": "sub" });
+    let found = errors(&validator, &claim);
+    assert!(found.is_empty(), "a quota counts by a claim: {found:?}");
+
+    let routes = spec_validator(&crd("podgateroutes.yaml"));
+    for kind in ["rate_limit", "in_flight_req", "quota"] {
+        let mut spec = web("a.acme.test", json!({}));
+        let mut middleware = json!({ "name": "limited", "type": kind });
+        let config = with_ip(kind, json!({ "depth": 0 }))["config"].clone();
+        for (field, value) in config.as_object().into_iter().flatten() {
+            middleware[field.as_str()] = value.clone();
+        }
+        spec["middlewares"] = json!([middleware]);
+        assert!(
+            !routes.is_valid(&spec),
+            "{kind}: a route's middleware with depth 0 must be refused by the manifest"
+        );
+    }
+}
+
 #[tokio::test]
 async fn crd_manifests_match_the_daemon() {
     // The fixture is the daemon's own document: a middleware that lands changes the daemon's

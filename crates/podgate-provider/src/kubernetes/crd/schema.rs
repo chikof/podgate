@@ -315,15 +315,10 @@ impl Converter<'_> {
                 .map(str::to_owned)
                 .collect();
             for (field, schema) in &properties {
-                match merged.get(field) {
-                    None => {
-                        merged.insert(field.clone(), schema.clone());
-                    }
-                    Some(known) if same(known, schema) => {}
-                    Some(_) => {
-                        merged.insert(field.clone(), any(None));
-                    }
-                }
+                let joined = merged
+                    .get(field)
+                    .map_or_else(|| schema.clone(), |known| join(known, schema));
+                merged.insert(field.clone(), joined);
             }
             parsed.push((kind.clone(), required, properties));
         }
@@ -332,7 +327,7 @@ impl Converter<'_> {
             .map(|(kind, required, properties)| {
                 let checks = properties
                     .iter()
-                    .filter(|(field, schema)| merged.get(*field).is_some_and(|m| same(m, schema)))
+                    .filter(|(field, schema)| merged.get(*field).is_some_and(|m| fits(m, schema)))
                     .filter_map(|(field, schema)| {
                         checks(schema).map(|check| (field.clone(), check))
                     })
@@ -587,6 +582,46 @@ fn same(left: &Value, right: &Value) -> bool {
         }
     }
     bare(left) == bare(right)
+}
+
+/// The node for a field two kinds describe. The same shape stays as it is. An object that
+/// extends the other (it has every field of the other, described the same, and more: the
+/// `source` of `quota` adds `jwt_claim` to the one of `rate_limit`) is the wider one, so the
+/// narrower kind keeps its value limits. Anything else is free-form.
+fn join(known: &Value, schema: &Value) -> Value {
+    if same(known, schema) {
+        return known.clone();
+    }
+    let wider = if extends(schema, known) {
+        schema
+    } else if extends(known, schema) {
+        known
+    } else {
+        return any(None);
+    };
+    let mut node = wider.clone();
+    if let (Some(object), Some(description)) = (node.as_object_mut(), known.get("description")) {
+        object.insert("description".to_owned(), description.clone());
+    }
+    node
+}
+
+/// Whether `wide` is an object with every field of the object `narrow`, each described the same.
+fn extends(wide: &Value, narrow: &Value) -> bool {
+    let (Some(Value::Object(wide)), Some(Value::Object(narrow))) =
+        (wide.get("properties"), narrow.get("properties"))
+    else {
+        return false;
+    };
+    narrow
+        .iter()
+        .all(|(name, schema)| wide.get(name).is_some_and(|known| same(known, schema)))
+}
+
+/// Whether the value limits of `schema` hold for a field whose merged node is `merged`: they do
+/// when `merged` is `schema` itself or an object that extends it.
+fn fits(merged: &Value, schema: &Value) -> bool {
+    same(merged, schema) || extends(merged, schema)
 }
 
 /// String enums as one: a Rust enum with documented variants is a `oneOf` of single values.
