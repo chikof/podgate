@@ -18,7 +18,7 @@ use crate::ratelimit_store::quota::SourceId;
 /// What an absent header counts as: a client cannot leave a limit by omitting the value.
 const ABSENT: &[u8] = b"-";
 
-/// What a limit counts requests by.
+/// A `source` as written in a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::middleware) enum QuotaSource {

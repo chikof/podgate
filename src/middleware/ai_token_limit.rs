@@ -117,7 +117,8 @@ pub(super) struct Config {
     on_store_error: Option<Mode>,
     #[serde(default)]
     store_timeout_ms: Option<u16>,
-    /// The largest JSON prompt read, 1 to 65536 (the default); a longer one is `413`.
+    /// The most bytes of prompt that are held and judged (default and most 65536); a larger
+    /// prompt is refused with `413`.
     #[serde(default)]
     max_prompt_bytes: Option<u32>,
 }
