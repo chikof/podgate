@@ -948,3 +948,242 @@ async fn ai_one_per_chain_is_refused() {
         .to_owned();
     assert!(message.contains("only one counts"), "{message}");
 }
+
+// With `llm_guard`: a held answer is counted from its complete raw body before the
+// guard judges it, whatever the verdict.
+
+/// A guard that blocks a response whose text holds `FLAGGED`, and allows everything else.
+async fn flag_guard() -> Model {
+    Model::start(|seen| {
+        let asked = seen.json();
+        let flagged = asked["phase"] == "response"
+            && asked["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("FLAGGED");
+        Reply::json(&if flagged {
+            json!({"verdict": "block", "category": "leak", "reason": "secret"})
+        } else {
+            json!({"verdict": "allow"})
+        })
+    })
+    .await
+}
+
+/// A model whose answer to a prompt that mentions `flag` says `FLAGGED`, with usage 100 and 50.
+async fn flagging_model() -> Model {
+    Model::start(|seen| {
+        let text = if String::from_utf8_lossy(&seen.body).contains("flag") {
+            "FLAGGED secret"
+        } else {
+            "a harmless answer"
+        };
+        let mut body = chat(100, 50);
+        body["choices"][0]["message"]["content"] = json!(text);
+        Reply::json(&body)
+    })
+    .await
+}
+
+fn guarded_route(
+    model: SocketAddr,
+    guard: SocketAddr,
+    guard_config: Value,
+    tokens_first: bool,
+    tokens: Value,
+) -> Value {
+    let mut safety = json!({
+        "guards": [{"name": "g1", "address": format!("http://{guard}/check"), "phases": ["request", "response"]}],
+    });
+    safety
+        .as_object_mut()
+        .expect("object")
+        .extend(guard_config.as_object().cloned().unwrap_or_default());
+    let mut chain = vec![
+        middleware("tokens", "ai_token_limit", tokens),
+        middleware("safety", "llm_guard", safety),
+    ];
+    if !tokens_first {
+        chain.reverse();
+    }
+    with_chain(app("a", &["a.test"], &[serving("r1", model)]), &chain)
+}
+
+async fn guarded(snapshot_of: impl FnOnce(&Model, &Model) -> Value) -> (Rig, Model) {
+    let valkey = Valkey::start().await;
+    let (model, guard) = (flagging_model().await, flag_guard().await);
+    let dir = valkey::scratch("ai-guard");
+    let podgate = node(&one_store(&dir, &valkey)).await;
+    push(&podgate, &snapshot(1, &[snapshot_of(&model, &guard)])).await;
+    (
+        Rig {
+            podgate,
+            model,
+            valkey,
+        },
+        guard,
+    )
+}
+
+#[tokio::test]
+async fn ai_tokens_blocked_answer_is_charged() {
+    clear_of_midnight().await;
+    let (rig, _guard) = guarded(|model, guard| {
+        guarded_route(
+            model.addr,
+            guard.addr,
+            json!({}),
+            true,
+            limited(1000, "deny"),
+        )
+    })
+    .await;
+    let blocked = post(&rig.podgate, "k", &prompt_of("flag me")).await;
+    assert_eq!(blocked.status, 403, "{}", blocked.text());
+    assert!(!blocked.text().contains("FLAGGED"), "{}", blocked.text());
+    assert_eq!(
+        rig.model.calls().len(),
+        1,
+        "the model answered, and spent tokens"
+    );
+    settled().await;
+    let next = post(&rig.podgate, "k", &prompt_of("hello")).await;
+    assert_eq!(next.status, 200, "{}", next.text());
+    assert_eq!(
+        next.number("x-ratelimit-remaining-tokens"),
+        1000 - 150,
+        "the blocked answer cost the key what the model used"
+    );
+}
+
+#[tokio::test]
+async fn ai_tokens_chain_order_does_not_change_the_charge() {
+    clear_of_midnight().await;
+    let (rig, _guard) = guarded(|model, guard| {
+        guarded_route(
+            model.addr,
+            guard.addr,
+            json!({}),
+            false,
+            limited(1000, "deny"),
+        )
+    })
+    .await;
+    let blocked = post(&rig.podgate, "k", &prompt_of("flag me")).await;
+    assert_eq!(blocked.status, 403, "{}", blocked.text());
+    settled().await;
+    let next = post(&rig.podgate, "k", &prompt_of("hello")).await;
+    assert_eq!(next.status, 200, "{}", next.text());
+    assert_eq!(next.number("x-ratelimit-remaining-tokens"), 1000 - 150);
+}
+
+#[tokio::test]
+async fn ai_tokens_allowed_held_answer_is_charged_once() {
+    clear_of_midnight().await;
+    let valkey = Valkey::start().await;
+    let events = stream_events();
+    let model = Model::start({
+        let reply = Reply::events(&events);
+        move |_| reply.clone()
+    })
+    .await;
+    let guard = flag_guard().await;
+    let dir = valkey::scratch("ai-guard-once");
+    let podgate = node(&one_store(&dir, &valkey)).await;
+    let pushed = guarded_route(
+        model.addr,
+        guard.addr,
+        json!({}),
+        true,
+        limited(1000, "deny"),
+    );
+    push(&podgate, &snapshot(1, &[pushed])).await;
+    let answer = post(&podgate, "k", &prompt(true, "")).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    let expected: String = events
+        .iter()
+        .filter(|(_, event)| !event.contains("total_tokens"))
+        .map(|(_, event)| event.as_str())
+        .collect();
+    assert_eq!(
+        answer.text(),
+        expected,
+        "a held stream still loses the usage chunk it did not ask for"
+    );
+    settled().await;
+    let next = post(&podgate, "k", &prompt(true, "")).await;
+    assert_eq!(
+        next.number("x-ratelimit-remaining-tokens"),
+        1000 - 7,
+        "charged once, not twice"
+    );
+}
+
+#[tokio::test]
+async fn ai_tokens_guard_unavailable_answer_is_charged() {
+    clear_of_midnight().await;
+    let down = common::refused();
+    let (rig, _guard) = guarded(|model, _| {
+        guarded_route(
+            model.addr,
+            down.addr,
+            json!({"guards": [{"name": "g1", "address": format!("http://{}/check", down.addr), "phases": ["response"]}]}),
+            true,
+            limited(1000, "deny"),
+        )
+    })
+    .await;
+    let answer = post(&rig.podgate, "k", &prompt_of("hello")).await;
+    assert_eq!(answer.status, 503, "{}", answer.text());
+    settled().await;
+    let metrics = rig.podgate.admin_get("/metrics").await.body;
+    let series = |kind: &str| {
+        metric(
+            &metrics,
+            &format!(r#"podgate_ai_tokens_total{{tenant="t1",app="a",kind="{kind}"}}"#),
+        )
+    };
+    assert_eq!(
+        series("prompt"),
+        Some(100),
+        "the model's usage, though the client got a 503"
+    );
+    assert_eq!(series("completion"), Some(50));
+}
+
+#[tokio::test]
+async fn ai_tokens_held_over_cap_is_charged_estimated() {
+    clear_of_midnight().await;
+    let (rig, _guard) = guarded(|model, guard| {
+        guarded_route(
+            model.addr,
+            guard.addr,
+            json!({"max_response_bytes": 16}),
+            true,
+            limited(1000, "deny"),
+        )
+    })
+    .await;
+    let answer = post(&rig.podgate, "k", &prompt_of("hello")).await;
+    assert_eq!(answer.status, 502, "{}", answer.text());
+    settled().await;
+    let metrics = rig.podgate.admin_get("/metrics").await.body;
+    assert_eq!(
+        metric(
+            &metrics,
+            r#"podgate_ai_tokens_estimated_total{tenant="t1",app="a"}"#
+        ),
+        Some(1)
+    );
+    let estimated = metric(
+        &metrics,
+        r#"podgate_ai_tokens_total{tenant="t1",app="a",kind="estimated"}"#,
+    )
+    .unwrap_or(0);
+    assert!(estimated >= 16 / 4, "at least the cap's worth: {estimated}");
+}
+
+/// A chat body with `text` as the user's prompt.
+fn prompt_of(text: &str) -> String {
+    json!({"model": "m", "messages": [{"role": "user", "content": text}]}).to_string()
+}

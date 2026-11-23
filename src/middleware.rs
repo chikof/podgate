@@ -348,6 +348,19 @@ pub struct HeldCx<'a> {
     pub policy: &'a UpstreamPolicy,
 }
 
+/// What a held-response observer sees ([`Kind::response_held_seen`]).
+pub struct HeldSeen<'a> {
+    /// The request the response answers.
+    pub request: &'a RequestHeader,
+    /// The upstream's raw response head.
+    pub head: &'a ResponseHeader,
+    /// The whole raw body; `None` when the hold was dropped before the response ended.
+    pub body: Option<&'a Bytes>,
+    /// Body bytes the upstream sent: the length of `body`, or what had arrived when the hold was
+    /// dropped.
+    pub body_bytes: u64,
+}
+
 /// What a page hook sees: the response that may be replaced and what a replacement needs.
 pub struct PageCx<'a> {
     /// The client's request.
@@ -599,6 +612,13 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), AppError>> + Send {
         std::future::ready(Ok(()))
     }
+
+    /// Runs for every stage of the chain on a held response, in reverse chain order, before the
+    /// judging hooks ([`Self::response_held`]) and whatever they decide: the whole raw response
+    /// when it ended, or its head and the bytes held so far when the hold was dropped without a
+    /// verdict (the response passed its cap, or the upstream died). It cannot refuse and cannot
+    /// change anything; a stage that counts what an answer cost reads it here.
+    fn response_held_seen(&self, _cx: &HeldSeen<'_>, _state: &mut Self::State) {}
 
     /// Runs when the response is an error podgate may replace, before any of it has reached the
     /// client: a stage that serves a replacement page returns it. Only the first stage (last in
@@ -938,6 +958,21 @@ macro_rules! kinds {
                         }
                     )*
                     _ => Ok(()),
+                }
+            }
+
+            fn response_held_seen(
+                &self,
+                cx: &$crate::middleware::HeldSeen<'_>,
+                state: &mut StageState,
+            ) {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_held_seen(kind, cx, state)
+                        }
+                    )*
+                    _ => {}
                 }
             }
 
@@ -1566,6 +1601,18 @@ pub async fn run_held(
         }
     }
     Ok(())
+}
+
+/// Shows a response that was held, as the upstream sent it, to every stage of `chain` before any
+/// of them judges it ([`run_held`]), in reverse chain order. No stage can refuse: a stage that
+/// only counts what the model spent sees every held response, whatever a guard declared later or
+/// earlier in the chain decides.
+pub fn run_held_seen(stages: &[Named], chain: &[usize], cx: &HeldSeen<'_>, state: &mut State) {
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.response_held_seen(cx, slot);
+        }
+    }
 }
 
 /// Runs the request-body chunk hooks of `chain` on one chunk, in chain order.

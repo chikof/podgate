@@ -51,7 +51,9 @@ use self::sse::Sse;
 use self::usage::{MAX_TOKENS, Reported, estimate, reported};
 use super::buffering::{declared_length, expects_continue};
 use super::quota::{Keying, QuotaSource};
-use super::{CompileCx, FinishCx, Flow, Kind, Named, RequestCx, ResponseCx, Stage, state};
+use super::{
+    CompileCx, FinishCx, Flow, HeldSeen, Kind, Named, RequestCx, ResponseCx, Stage, state,
+};
 use crate::budget::{BufferGuard, Escaped};
 use crate::compile::{Invalid, Rejected};
 use crate::error::AppError;
@@ -236,6 +238,9 @@ struct Active {
     status: u16,
     response_bytes: u64,
     answer: Option<Answer>,
+    /// What the answer cost, counted from the complete raw body of a held answer before any
+    /// verdict ([`Kind::response_held_seen`]); the charge, whatever happened to the answer after.
+    held: Option<Charge>,
 }
 
 /// What a request keeps of its `ai_token_limit` stage: nothing until the stage admitted it.
@@ -309,6 +314,45 @@ impl Shape {
     }
 }
 
+impl Shape {
+    /// The shape of an answer a stage can read: a `2xx` that is not encoded. Anything else is
+    /// only counted by size.
+    fn classify(head: &ResponseHeader) -> Self {
+        let plain = head
+            .headers
+            .get(CONTENT_ENCODING)
+            .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"));
+        if plain && head.status.is_success() {
+            Self::of(head)
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// What a held answer costs, from its complete body (`None` when the hold was dropped before the
+/// answer ended: `body_bytes` is what had arrived): the same reading the streaming path ends in,
+/// so a held answer and an unheld one are charged alike.
+fn held_charge(shape: Shape, body: Option<&Bytes>, body_bytes: u64, request_bytes: u64) -> Charge {
+    let found = body.and_then(|body| match shape {
+        Shape::Json if len(body) <= MAX_COUNTED_BODY => serde_json::from_slice::<Whole>(body)
+            .ok()
+            .and_then(|whole| whole.usage)
+            .as_ref()
+            .and_then(reported),
+        Shape::Events => {
+            let mut events = Sse::new(false);
+            events.push(body.clone(), true);
+            events.best()
+        }
+        Shape::Json | Shape::Other => None,
+    });
+    found.map_or_else(
+        || Charge::Estimated(estimate(request_bytes, body_bytes)),
+        Charge::Reported,
+    )
+}
+
 /// The `usage` of a whole JSON answer.
 #[derive(Deserialize)]
 struct Whole {
@@ -320,6 +364,12 @@ impl Active {
     /// What this request is charged, `None` when nothing is: it never reached the model, no
     /// answer came, or the model answered with an error.
     fn charge(&self) -> Option<Charge> {
+        if let Some(held) = self.held
+            && self.forwarded
+            && (200..300).contains(&self.status)
+        {
+            return Some(held);
+        }
         if !self.forwarded || !(200..300).contains(&self.status) {
             return None;
         }
@@ -735,18 +785,11 @@ impl Kind for AiTokenLimit {
         };
         let head = cx.response;
         active.status = head.status.as_u16();
-        let plain = head
-            .headers
-            .get(CONTENT_ENCODING)
-            .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"));
-        let shape = if plain && (200..300).contains(&active.status) {
-            Shape::of(head)
-        } else {
-            Shape::Other
-        };
+        let shape = Shape::classify(head);
         active.answer = Some(match shape {
             Shape::Events => Answer::Stream(Box::new(Sse::new(active.drop_usage))),
-            Shape::Json => {
+            // A held answer was counted whole already: no second reading.
+            Shape::Json if active.held.is_none() => {
                 let declared = declared_length(&head.headers);
                 let room =
                     declared.map_or(MAX_COUNTED_BODY, |declared| declared.min(MAX_COUNTED_BODY));
@@ -759,7 +802,7 @@ impl Kind for AiTokenLimit {
                     None => Answer::Blind,
                 }
             }
-            Shape::Other => Answer::Blind,
+            Shape::Json | Shape::Other => Answer::Blind,
         });
         // A stream read event by event holds a partial event: charged now when no rewrite
         // reserved the carry at admission.
@@ -770,6 +813,21 @@ impl Kind for AiTokenLimit {
             active.reservation.push(carry);
         }
         Ok(())
+    }
+
+    fn response_held_seen(&self, cx: &HeldSeen<'_>, state: &mut State) {
+        let Some(active) = state.0.as_deref_mut() else {
+            return;
+        };
+        // The answer is judged next, and may never reach the client or the hooks above: what
+        // the model spent is counted now, from its complete raw body, whatever the verdict.
+        active.status = cx.head.status.as_u16();
+        active.held = Some(held_charge(
+            Shape::classify(cx.head),
+            cx.body,
+            cx.body_bytes,
+            active.request_bytes,
+        ));
     }
 
     fn response(&self, response: &mut ResponseHeader, state: &mut State) -> pingora::Result<()> {
@@ -1081,6 +1139,65 @@ mod test {
         let mut never_sent = active(200, Some(json_answer(reported)));
         never_sent.forwarded = false;
         assert_eq!(never_sent.charge(), None);
+    }
+
+    #[test]
+    fn ai_held_charge_is_the_streaming_function() {
+        // A whole answer read once and the same answer streamed in pieces cost the same.
+        let json = |usage: &str| format!(r#"{{"id":"c","usage":{usage}}}"#);
+        for usage in [
+            r#"{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}"#,
+            r#"{"total_tokens":-1}"#,
+            r#"{"input_tokens":5,"output_tokens":6}"#,
+            "null",
+        ] {
+            let body = json(usage);
+            let held = held_charge(
+                Shape::Json,
+                Some(&Bytes::from(body.clone())),
+                len(body.as_bytes()),
+                40,
+            );
+            let mut streamed = active(200, Some(json_answer(&body)));
+            streamed.response_bytes = len(body.as_bytes());
+            assert_eq!(streamed.charge(), Some(held), "{usage}");
+        }
+        let events = format!(
+            "data: {{\"choices\":[{{\"delta\":{{}}}}],\"usage\":null}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}}}\n\ndata: [DONE]\n\n"
+        );
+        let held = held_charge(
+            Shape::Events,
+            Some(&Bytes::from(events.clone())),
+            len(events.as_bytes()),
+            40,
+        );
+        let mut sse = Sse::new(true);
+        for piece in events.as_bytes().chunks(13) {
+            sse.push(Bytes::copy_from_slice(piece), false);
+        }
+        sse.push(Bytes::new(), true);
+        let streamed = active(200, Some(Answer::Stream(Box::new(sse))));
+        assert_eq!(streamed.charge(), Some(held));
+        assert_eq!(
+            held,
+            Charge::Reported(Reported {
+                prompt: 3,
+                completion: 4,
+                other: 0
+            })
+        );
+        // A hold dropped before the answer ended is the estimate of what had arrived.
+        assert_eq!(
+            held_charge(Shape::Json, None, 160, 40),
+            Charge::Estimated(50)
+        );
+        // A held answer is charged once: its own count wins over the streamed one.
+        let mut both = active(200, Some(json_answer(&json(r#"{"total_tokens":999}"#))));
+        both.held = Some(Charge::Estimated(5));
+        assert_eq!(both.charge(), Some(Charge::Estimated(5)));
+        let mut refused_upstream = both;
+        refused_upstream.status = 500;
+        assert_eq!(refused_upstream.charge(), None);
     }
 
     #[test]

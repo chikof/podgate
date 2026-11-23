@@ -68,6 +68,7 @@ impl Gateway {
             ctx.held = match self.ask(session, tasks, ctx) {
                 Ok(held) => held,
                 Err(err) => {
+                    self.observe_refused(session, ctx, tasks);
                     ctx.held = Held::Off;
                     ctx.capacity_refusal = err.is_capacity_refusal();
                     return Err(respond::abort(session, &err).await);
@@ -85,6 +86,12 @@ impl Gateway {
                 HttpTask::Body(Some(chunk), _) | HttpTask::UpgradedBody(Some(chunk), _) => {
                     // Before the task is kept: the stash never passes the cap.
                     if stash.bytes.saturating_add(len(chunk)) > stash.max_body {
+                        self.observe_dropped(
+                            session,
+                            ctx,
+                            &stash,
+                            stash.bytes.saturating_add(len(chunk)),
+                        );
                         return Err(
                             respond::abort(session, &AppError::UpstreamResponseTooLarge).await
                         );
@@ -92,6 +99,7 @@ impl Gateway {
                     stash.bytes += len(chunk);
                 }
                 HttpTask::Failed(_) => {
+                    self.observe_dropped(session, ctx, &stash, stash.bytes);
                     // The upstream died before the answer was complete and nothing was written:
                     // the error goes out as an error, not as half an answer.
                     if let HttpTask::Failed(err) = task {
@@ -110,6 +118,41 @@ impl Gateway {
         }
         *tasks = self.judge(session, ctx, *stash).await?;
         Ok(())
+    }
+
+    /// Shows a hold that is dropped without a verdict to the stages that count what an answer
+    /// cost: the head, and the body bytes that had arrived.
+    fn observe_dropped(&self, session: &Session, ctx: &mut Ctx, stash: &Stash, body_bytes: u64) {
+        if let Some(HttpTask::Header(head, _)) = stash.tasks.first() {
+            self.observe_head(session, ctx, head, body_bytes);
+        }
+    }
+
+    /// [`Self::observe_dropped`] for a head whose hold was refused before any body was kept: the
+    /// model already answered, so it is counted by the length it declared.
+    fn observe_refused(&self, session: &Session, ctx: &mut Ctx, tasks: &[HttpTask]) {
+        if let Some(HttpTask::Header(head, _)) = tasks.first() {
+            let declared = head
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            self.observe_head(session, ctx, head, declared);
+        }
+    }
+
+    fn observe_head(&self, session: &Session, ctx: &mut Ctx, head: &ResponseHeader, bytes: u64) {
+        let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) else {
+            return;
+        };
+        let seen = middleware::HeldSeen {
+            request: session.req_header(),
+            head,
+            body: None,
+            body_bytes: bytes,
+        };
+        middleware::run_held_seen(app.stages(), router.chain(), &seen, &mut ctx.chain);
     }
 
     /// Looks at the first batch: when it starts with the response head and a stage of the chain
@@ -172,6 +215,13 @@ impl Gateway {
         };
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             let tenant = ctx.tenant_slot.as_ref().map(TenantSlot::tenant);
+            let seen = middleware::HeldSeen {
+                request: session.req_header(),
+                head: &head,
+                body: Some(&body),
+                body_bytes: len(&body),
+            };
+            middleware::run_held_seen(app.stages(), router.chain(), &seen, &mut ctx.chain);
             let mut cx = HeldCx {
                 request: session.req_header(),
                 head: &mut head,
