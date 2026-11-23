@@ -70,7 +70,8 @@ const BODY_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) struct Config {
     /// The guards, one to eight, called in parallel.
     guards: Vec<GuardConfig>,
-    /// The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.
+    /// The deadline of one call, in milliseconds: `plugin` 1 to 1000 (default 50), `llm_guard`
+    /// 1 to 10000 (default 2000), and never more than `REQUEST_TIMEOUT_SECS`.
     #[serde(default)]
     timeout_ms: Option<u32>,
     /// The most bytes of prompt that are held and judged (default and most 65536); a larger

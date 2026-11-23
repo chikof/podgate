@@ -142,7 +142,8 @@ pub(super) struct Config {
     /// `fail_closed` (the default) or `fail_open`.
     #[serde(default)]
     on_plugin_error: Option<OnPluginError>,
-    /// The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.
+    /// The deadline of one call, in milliseconds: `plugin` 1 to 1000 (default 50), `llm_guard`
+    /// 1 to 10000 (default 2000), and never more than `REQUEST_TIMEOUT_SECS`.
     #[serde(default)]
     timeout_ms: Option<u32>,
     /// The request headers to send. Without it all but `authorization`, `proxy-authorization`
