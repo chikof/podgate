@@ -132,11 +132,14 @@ fn int(value: u64) -> AnyValue {
     }
 }
 
-/// Milliseconds with microsecond precision, the number the JSON line prints.
+/// Milliseconds with microsecond precision, cut (not rounded) as the JSON line prints them.
 fn millis(duration: std::time::Duration) -> AnyValue {
+    let micros = duration.as_micros();
+    let whole = u32::try_from(micros / 1000).unwrap_or(u32::MAX);
+    let fraction = u32::try_from(micros % 1000).unwrap_or_default();
     AnyValue {
         value: Some(any_value::Value::Double(
-            (duration.as_secs_f64() * 1_000_000.0).round() / 1_000.0,
+            f64::from(whole) + f64::from(fraction) / 1000.0,
         )),
     }
 }
