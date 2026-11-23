@@ -1,7 +1,7 @@
 //! The `llm_guard` middleware: sends each prompt (and, if asked, each answer) of an OpenAI-style
 //! chat route to one or more guard models and blocks the exchange when any of them says so.
 //! Full reference: `docs/ref/mw-llm-guard.md`. What every guard-calling kind shares (the wire,
-//! the verdict, `on_error`, the fan-out, the posture) is in [`super::guard`].
+//! the verdict, `on_error`, the fan-out, the posture) is in `super::guard`.
 //!
 //! ```json
 //! { "name": "safety", "type": "llm_guard",
