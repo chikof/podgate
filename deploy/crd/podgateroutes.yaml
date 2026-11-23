@@ -458,6 +458,12 @@ spec:
                     - type
                     - plugin
                   - properties:
+                      type:
+                        enum:
+                        - portal
+                    required:
+                    - type
+                  - properties:
                       limit:
                         minimum: 0
                       on_store_error:
@@ -1490,6 +1496,12 @@ spec:
                       description: The response header that lists purge tags (for example `Cache-Tag`).
                       nullable: true
                       type: string
+                    tenant_claim:
+                      description: |-
+                        The string claim of the login stage's verified claims that names the viewer's tenant.
+                        Default `tenant`.
+                      nullable: true
+                      type: string
                     timeout_ms:
                       description: |-
                         The deadline of one call, in milliseconds: `plugin` 1 to 1000 (default 50), `llm_guard`
@@ -1651,6 +1663,7 @@ spec:
                       - openapi
                       - pass_tls_client_cert
                       - plugin
+                      - portal
                       - quota
                       - rate_limit
                       - redirect_regex

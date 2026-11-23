@@ -4125,6 +4125,32 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.portal": {
+      "additionalProperties": false,
+      "description": "The configuration of a `portal` middleware.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "tenant_claim": {
+          "default": null,
+          "description": "The string claim of the login stage's verified claims that names the viewer's tenant.\nDefault `tenant`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "portal"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.quota": {
       "additionalProperties": false,
       "description": "The configuration of a `quota` middleware.",
@@ -6358,6 +6384,7 @@
       "openapi": "#/$defs/middleware.openapi",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
       "plugin": "#/$defs/middleware.plugin",
+      "portal": "#/$defs/middleware.portal",
       "quota": "#/$defs/middleware.quota",
       "rate_limit": "#/$defs/middleware.rate_limit",
       "redirect_regex": "#/$defs/middleware.redirect_regex",
