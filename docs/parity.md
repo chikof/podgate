@@ -111,6 +111,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | JWT verification | Traefik Hub only | plugins | `jwt_auth` built (JWKS fetched through the upstream policy; names are resolved per call since 0090) |
 | OPA authorization | Traefik Hub OPA | none | built (`docs/ref/mw-opa.md`): the OPA Data API, fail closed, verified JWT claims in the input |
 | OIDC login (authorization code, PKCE) | Traefik Hub only | `caddy-security` plugin | built (stateless encrypted cookie sessions; no refresh tokens) |
+| OpenAPI request validation | Traefik Hub OAS validation | none | built (`docs/ref/mw-openapi.md`): an OpenAPI 3.0 or 3.1 JSON document inline in the snapshot; path, method, parameters and the JSON body schema are checked before the upstream, a bounded schema subset, fails closed; responses and `security` are not checked |
 | Response caching | Hub only | `cache` plugin | built: memory only, bounded per tenant (charged to `max_buffer_bytes`, capped share), no disk tier, no distributed mode, purge API |
 | Templating (`templates`), `map`, `vars` | none | yes | declined: snapshots are generated data; templating belongs in the writer |
 | Static files: `file_server`, `try_files`, precompressed | none | yes | built: operator-declared per-tenant roots opened as `cap-std` handles (`STATIC_ROOTS_FILE`), no `..` or symlink escape, no hidden files, `index`, `try_files`, status pages, validators, ranges, `br`/`gzip` sidecars, file buffers charged to `max_buffer_bytes`; see `docs/ref/svc-static.md` |
