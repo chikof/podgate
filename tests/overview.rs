@@ -515,6 +515,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     plants.push(mcp_key.clone());
     let openapi_secret = plant("openapi-description-secret");
     plants.push(openapi_secret.clone());
+    let guard_pattern = plant("content-guard-pattern");
+    plants.push(guard_pattern.clone());
 
     let kinds = vec![
         (
@@ -626,6 +628,10 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             json!({"document": {"openapi": "3.1.0",
                    "info": {"title": "Pets", "version": "1", "description": openapi_secret},
                    "paths": {"/p": {"get": {}}}}}),
+        ),
+        (
+            "content_guard",
+            json!({"rules": [{"name": "planted", "pattern": guard_pattern, "action": "redact"}]}),
         ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
