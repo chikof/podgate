@@ -263,6 +263,36 @@ spec:
                     - type
                     - algorithms
                   - properties:
+                      guards:
+                        items:
+                          properties:
+                            on_error:
+                              enum:
+                              - deny
+                              - allow
+                            phases:
+                              items:
+                                enum:
+                                - request
+                                - response
+                          required:
+                          - name
+                          - address
+                      max_concurrent:
+                        minimum: 0
+                      max_prompt_bytes:
+                        minimum: 0
+                      max_response_bytes:
+                        minimum: 0
+                      timeout_ms:
+                        minimum: 0
+                      type:
+                        enum:
+                        - llm_guard
+                    required:
+                    - type
+                    - guards
+                  - properties:
                       servers:
                         items:
                           properties:
@@ -651,6 +681,44 @@ spec:
                       description: Instructions the filter may execute per request; running out ends the request with `500`.
                       minimum: 0
                       type: integer
+                    guards:
+                      description: The guards, one to eight, called in parallel.
+                      items:
+                        description: One guard of an `llm_guard` middleware.
+                        properties:
+                          address:
+                            description: The guard's URL, `http://` or `https://`. Dialled through the upstream address policy.
+                            type: string
+                          name:
+                            description: 'Names the guard in logs and explain: `[a-z0-9_-]`, at most 32 bytes, unique.'
+                            type: string
+                          on_error:
+                            description: 'What to do when it cannot answer: `deny` (default, `503`) or `allow`.'
+                            enum:
+                            - deny
+                            - allow
+                            type: string
+                          phases:
+                            description: 'What the guard judges: `request` (default), `response`, or both.'
+                            items:
+                              description: What a guard is shown.
+                              enum:
+                              - request
+                              - response
+                              type: string
+                            nullable: true
+                            type: array
+                          transport:
+                            description: |-
+                              A `servers_transport` of the app: CA, server name and client certificate of an `https://`
+                              address.
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        - address
+                        type: object
+                      type: array
                     header_field:
                       description: A request header that receives the user name; a value the client sent for it is replaced.
                       nullable: true
@@ -824,6 +892,13 @@ spec:
                       type: integer
                     max_object_bytes:
                       description: Largest response kept, in bytes; default 1 MiB or `max_bytes`, whichever is lower.
+                      minimum: 0
+                      nullable: true
+                      type: integer
+                    max_prompt_bytes:
+                      description: |-
+                        The most bytes of prompt that are held and judged (default and most 65536); a larger
+                        prompt is refused with `413`.
                       minimum: 0
                       nullable: true
                       type: integer
@@ -1239,7 +1314,9 @@ spec:
                       nullable: true
                       type: string
                     timeout_ms:
-                      description: The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.
+                      description: |-
+                        The deadline of one call, in milliseconds: `plugin` 1 to 1000 (default 50), `llm_guard`
+                        1 to 10000 (default 2000), and never more than `REQUEST_TIMEOUT_SECS`.
                       minimum: 0
                       nullable: true
                       type: integer
@@ -1357,6 +1434,7 @@ spec:
                       - in_flight_req
                       - ip_allow_list
                       - jwt_auth
+                      - llm_guard
                       - mcp_gateway
                       - oidc
                       - opa
