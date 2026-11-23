@@ -29,6 +29,7 @@ Names carry the `podgate_` prefix. `code_class` is `1xx` to `5xx`.
 |`tls_cert_not_after_seconds`|gauge|`host`|
 |`snapshot_version`|gauge||
 |`otlp_metrics_failed_total`|counter||
+|`mcp_denied_total`|counter|`tenant`, `app` (calls an `mcp_gateway`'s `tool_access` refused; one series per app with `tool_access`, the apps past `METRICS_SERIES_PER_TENANT` summed into `app="other"`)|
 |`snapshot_applied_timestamp_seconds`|gauge||
 |`snapshot_rejected_total`|counter|`code`|
 |`metrics_collapsed_total`|counter|`tenant`|

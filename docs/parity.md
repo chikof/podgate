@@ -196,6 +196,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | MCP server registry and gateway | Traefik Hub MCP Gateway | none | built (`docs/ref/mw-mcp-gateway.md`) |
 | API catalog | Traefik Hub API management | none | built (`docs/ref/catalog.md`): `apis` on an app, `GET /v1/catalog` on the admin socket from the live table, filtered and paged by key, no secret and no OpenAPI document |
 | API versioning and lifecycle | Traefik Hub API management | none | built (`docs/ref/catalog.md`): `draft` is `404`, `deprecated` adds `Deprecation`, `Sunset` and the successor `Link`, `retired` is `410`, enforced by a guard stage a tenant cannot declare or undo; reopening an API is the plan's `api_reopened`; routing between versions stays the routers' job |
+| Per-tool authorization for MCP | Traefik Hub tool-based access control | none | built (`docs/ref/mw-mcp-gateway.md`) |
 
 ## Not planned, with a recommendation
 

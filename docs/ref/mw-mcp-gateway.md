@@ -1,6 +1,6 @@
 # Middleware `mcp_gateway`
 
-Reference for the kind in `src/middleware/mcp.rs` and its files under `src/middleware/mcp/` (`rpc.rs` the JSON-RPC envelope, `server.rs` the exchanges with one registered server, `sse.rs` the event-stream reader, `sessions.rs` the session table, `tools.rs` the tool names and catalogs). The model it plugs into is in `docs/architecture.md` (`### Middlewares`). Change 0132.
+Reference for the kind in `src/middleware/mcp.rs` and its files under `src/middleware/mcp/` (`access.rs` the `tool_access` rules, `rpc.rs` the JSON-RPC envelope, `server.rs` the exchanges with one registered server, `sse.rs` the event-stream reader, `sessions.rs` the session table, `tools.rs` the tool names and catalogs). The model it plugs into is in `docs/architecture.md` (`### Middlewares`). Changes 0132 and 0133.
 
 Presents several MCP servers to a client as one. An app declares a registry of servers; the router that carries the middleware is the endpoint; `tools/list` returns the tools of every registered server and `tools/call` goes to the server that owns the tool. A client needs one URL and one credential, whatever sits behind it. This is the MCP gateway of Traefik Hub; Caddy has none.
 
@@ -16,7 +16,7 @@ Presents several MCP servers to a client as one. An app declares a registry of s
 }
 ```
 
-Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages that judge a request before it in the chain: `jwt_auth`, `oidc`, `ip_allow_list`, `rate_limit`. The middleware answers every request it gets and never contacts the app's own service.
+Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages that judge a request before it in the chain: `jwt_auth`, `oidc`, `ip_allow_list`, `rate_limit`. A gateway with `tool_access` needs a `jwt_auth` before it. The middleware answers every request it gets and never contacts the app's own service.
 
 | Field | Meaning |
 |---|---|
@@ -26,6 +26,7 @@ Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages t
 | `servers[].timeout_ms` | One bound for one exchange with the server (connect, send, read its whole answer). Default 30000, 100 to 600000; an exchange also never runs past `REQUEST_TIMEOUT_SECS`. |
 | `servers[].max_concurrent` | Exchanges with the server at once. Default 32, 1 to 1024. |
 | `allowed_origins` | At most 16 origins (`scheme://host[:port]`, lower-cased) that may call the endpoint from a browser besides its own host. |
+| `tool_access` | Optional list of rules that say which tools a caller may see and call, by the claims of the caller's verified JWT. Absent: every tool is open. Present, even `[]`: a tool is closed unless a rule opens it. See `## Tool access`. |
 
 Unknown fields are `invalid_middleware`. A tenant whose `max_buffer_bytes` is below what one `tools/call` reserves (6 MiB and 48 KiB: the largest client body, the request to the server, the largest result and the exchange's buffers) is refused when the snapshot compiles, naming the tenant and the bytes.
 
@@ -74,6 +75,49 @@ The answer is `application/json` or `text/event-stream`. From a stream the gatew
 - **Where.** Every dial goes through the operator's upstream address policy (`UPSTREAM_POLICY_FILE`, `docs/ref/upstream-policy.md`) for the tenant, on the exact address about to be dialled; a host name is resolved once per exchange and each answer is checked. A refused address is a failed server.
 - **How much.** An exchange holds one permit of the server's `max_concurrent` and charges its bytes (the exchange's buffers, the request, the answer's cap: 64 KiB for `initialize`, 1 MiB a `tools/list` page, 4 MiB a `tools/call`) to the tenant's buffer budget before it connects. A request body is charged its length. An answer over its cap is a failure.
 - **Fail closed.** A server that is down, slow, refused by the policy, over a cap, answers a status other than `200`, is not speaking MCP, or answers a result that is not an object is left out of `tools/list` and its calls are `-32603` with `data: {"server": "...", "reason": "..."}`, the reason being one of `policy`, `connect`, `timeout`, `status`, `malformed`, `too_large`, `version`, `session`. No permit, or no room in the budget, is `-32000 server busy`. A JSON-RPC error a server chooses to answer a call with is passed on as its own.
+
+## Tool access
+
+Tool-based access control, as in Traefik Hub's MCP gateway; Caddy has none. A route that serves MCP says which tools a caller may see and call, by the claims of the token the `jwt_auth` stage verified. Change 0133.
+
+```json
+{
+  "name": "tools",
+  "type": "mcp_gateway",
+  "servers": [
+    { "name": "search", "address": "http://10.0.0.5:8080/mcp" },
+    { "name": "files", "address": "http://10.0.0.6:8080/mcp" }
+  ],
+  "tool_access": [
+    { "tools": ["search__*"], "allow": { "roles": ["dev", "admin"] } },
+    { "tools": ["files__read_file", "files__list_dir"], "allow": { "roles": ["dev", "admin"] } },
+    { "tools": ["files__*"], "allow": { "roles": ["admin"] } }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `tool_access[].tools` | 1 to 64 entries. Each is `<server>__<tool>`, the name a client sees, or `<server>__*` for every tool of that server, including tools it adds later. The server must be in `servers`. A bare tool name, an unknown server, an empty tool and a `*` inside a name (`files__re*`) are `invalid_middleware`. A tool literally named `*` is reached only through the wildcard. |
+| `tool_access[].allow` | 1 to 8 claims, each with 1 to 32 non-empty string values. The caller may use the rule's tools when every claim holds one of its values. An empty `allow` is `invalid_middleware`: it would open the tools to every verified token. To say that on purpose, name a claim every token holds, such as `iss`. |
+
+At most 64 rules. A claim name is at most 64 bytes and a value at most 256.
+
+**The default is deny once rules are in force.** `tool_access` absent means the feature is off and the gateway behaves as without it: every tool of every healthy server is listed and callable. `tool_access` present, even as `[]`, means a tool is open only when some rule lists it and the caller's claims hold. `[]` is a lockdown: the registry stays declared and serves nothing. Adding `tool_access` to a gateway tightens it. Removing it opens every tool again and is a posture change (`mcp_tool_access_removed`).
+
+**What a rule matches.** A caller may use a tool when some rule lists it and the claims of its verified token hold for that rule. The tool is the gateway's own `(server, tool)` pair, resolved from the registry: `files__read_file` is the tool `read_file` of the server `files`, and a rule for `search__query` never opens a `query` tool of another server. Nothing the client sends picks the server or grants a tool: not a header, not a `server` field of the params, not `_meta`. The claims are those `jwt_auth` verified. A header the client wrote is never read, and a request with no verified token never reaches the rules (`jwt_auth` answers it `401`). The claim matching is the one of `jwt_auth`'s `required_claims`: a string claim equal to a value, or an array claim with an item equal to a value. A claim that is absent, a number, a boolean, an object, `null` or an empty array denies. A `scope` claim written as one space separated string is one value, so use an array claim. Values are compared exactly, with case.
+
+Only the claims of a `jwt_auth` stage count; an `oidc` session is not an identity here. A gateway with `tool_access` and no `jwt_auth` earlier in the chain of its router is `invalid_middleware` (`tool_access_requires_identity`), and so is one where only some of its routers have it.
+
+**What a denied caller sees.** A tool the caller may not use is left out of `tools/list`. A `tools/call` for it answers `-32602 unknown tool`: the same code, text and bytes as a tool nobody registered, and nothing is dialled upstream. The same holds for a server none of whose tools the caller may use: calls under its name answer `-32602 unknown tool` without a catalog fetch, and `tools/list` does not ask that server, so a caller cannot learn which servers exist or which are down. A distinct `forbidden` answer would let any caller list the tools of every server by probing.
+
+Rules run on the compiled rules in memory on every request: no outbound call and no cache. A session carries no authorization, so a new token on the same `Mcp-Session-Id` is judged by its own claims. A push that changes the declaration drops the sessions.
+
+**Plan.** Widening `tool_access` is a posture change in `POST /v1/snapshot/plan`: `mcp_tool_access_widened` when a rule lets someone use a tool they could not (a tool, a value, a wildcard or a rule added, or a claim dropped from `allow`), and `mcp_tool_access_removed` when `tool_access` is gone. Tightening is not listed. The comparison is conservative: it does not unite two old rules, so merging two rules into one is listed although it opens nothing new.
+
+**Explain and metrics.** `GET /v1/overview` and explain show the rules as `tool_access` beside `servers`: `null` when absent, else the rules in declaration order with their claims in name order. A denial is counted in `podgate_mcp_denied_total{tenant,app}`: the calls the rules refused, summed over the app's gateways, one series per app with `tool_access`. Past `METRICS_SERIES_PER_TENANT` apps of a tenant, the rest are summed into `app="other"`. A denial is logged at `info` with the `tool` the client named and the token's `sub`, each cut at 128 bytes. A name that leads nowhere for everyone is not counted. The counter restarts when the declaration changes.
+
+**Not covered.** Rules on arguments (allow `delete_file` only under `/tmp`) need a policy language and the call's arguments. The `opa` middleware does not send the request body, so it cannot do that today.
 
 ## Sessions
 

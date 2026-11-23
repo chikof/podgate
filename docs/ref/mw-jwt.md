@@ -88,6 +88,8 @@ What is out of podgate's reach: a token in the query string also goes to the ups
 - **Keys.** A key of the endpoint that cannot be used (too weak or too strong an RSA key, a private part, an unsupported type or curve, an `oct` key: a shared secret never comes from an endpoint) is left out; an answer with no usable key is a failure and keeps the old set. `keys` and the endpoint's keys are both used, the inline ones first.
 - **Not a fallback.** When `jwks_uri` is set and no keys can be had, even a token that an inline key would verify gets `503`: the stage fails closed on a keyset it cannot complete.
 
+The verified claims are also what `tool_access` of an `mcp_gateway` later in the chain reads to open tools (`docs/ref/mw-mcp-gateway.md`). A header the client sent is never a claim.
+
 ## Posture
 
 `POST /v1/snapshot/plan` lists in `posture_changes`, per host:
