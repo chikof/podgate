@@ -16,7 +16,7 @@ Presents several MCP servers to a client as one. An app declares a registry of s
 }
 ```
 
-Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages that judge a request before it in the chain: `jwt_auth`, `oidc`, `ip_allow_list`, `rate_limit`. A gateway with `tool_access` needs a `jwt_auth` before it. The middleware answers every request it gets and never contacts the app's own service.
+Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages that judge a request before it in the chain: `jwt_auth`, `oidc`, `ip_allow_list`, `rate_limit`. A gateway with `tool_access` needs a `jwt_auth` or an `oidc` before it. The middleware answers every request it gets and never contacts the app's own service.
 
 | Field | Meaning |
 |---|---|
@@ -26,7 +26,7 @@ Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages t
 | `servers[].timeout_ms` | One bound for one exchange with the server (connect, send, read its whole answer). Default 30000, 100 to 600000; an exchange also never runs past `REQUEST_TIMEOUT_SECS`. |
 | `servers[].max_concurrent` | Exchanges with the server at once. Default 32, 1 to 1024. |
 | `allowed_origins` | At most 16 origins (`scheme://host[:port]`, lower-cased) that may call the endpoint from a browser besides its own host. |
-| `tool_access` | Optional list of rules that say which tools a caller may see and call, by the claims of the caller's verified JWT. Absent: every tool is open. Present, even `[]`: a tool is closed unless a rule opens it. See `## Tool access`. |
+| `tool_access` | Optional list of rules that say which tools a caller may see and call, by the claims of the caller's verified JWT or `oidc` session. Absent: every tool is open. Present, even `[]`: a tool is closed unless a rule opens it. See `## Tool access`. |
 | `record_arguments` | Optional, default `false`. Keep the `arguments` of every `tools/call` in the audit log, secrets redacted. See `## Audit`. |
 
 Unknown fields are `invalid_middleware`. A tenant whose `max_buffer_bytes` is below what one `tools/call` reserves (6 MiB and 48 KiB: the largest client body, the request to the server, the largest result and the exchange's buffers) is refused when the snapshot compiles, naming the tenant and the bytes.
@@ -79,7 +79,7 @@ The answer is `application/json` or `text/event-stream`. From a stream the gatew
 
 ## Tool access
 
-Tool-based access control, as in Traefik Hub's MCP gateway; Caddy has none. A route that serves MCP says which tools a caller may see and call, by the claims of the token the `jwt_auth` stage verified. Change 0133.
+Tool-based access control, as in Traefik Hub's MCP gateway; Caddy has none. A route that serves MCP says which tools a caller may see and call, by the claims of the token the `jwt_auth` stage verified, or of the session the `oidc` stage verified. Change 0133, and change 0139 for `oidc`.
 
 ```json
 {
@@ -106,9 +106,9 @@ At most 64 rules. A claim name is at most 64 bytes and a value at most 256.
 
 **The default is deny once rules are in force.** `tool_access` absent means the feature is off and the gateway behaves as without it: every tool of every healthy server is listed and callable. `tool_access` present, even as `[]`, means a tool is open only when some rule lists it and the caller's claims hold. `[]` is a lockdown: the registry stays declared and serves nothing. Adding `tool_access` to a gateway tightens it. Removing it opens every tool again and is a posture change (`mcp_tool_access_removed`).
 
-**What a rule matches.** A caller may use a tool when some rule lists it and the claims of its verified token hold for that rule. The tool is the gateway's own `(server, tool)` pair, resolved from the registry: `files__read_file` is the tool `read_file` of the server `files`, and a rule for `search__query` never opens a `query` tool of another server. Nothing the client sends picks the server or grants a tool: not a header, not a `server` field of the params, not `_meta`. The claims are those `jwt_auth` verified. A header the client wrote is never read, and a request with no verified token never reaches the rules (`jwt_auth` answers it `401`). The claim matching is the one of `jwt_auth`'s `required_claims`: a string claim equal to a value, or an array claim with an item equal to a value. A claim that is absent, a number, a boolean, an object, `null` or an empty array denies. A `scope` claim written as one space separated string is one value, so use an array claim. Values are compared exactly, with case.
+**What a rule matches.** A caller may use a tool when some rule lists it and the verified claims of the caller hold for that rule. The tool is the gateway's own `(server, tool)` pair, resolved from the registry: `files__read_file` is the tool `read_file` of the server `files`, and a rule for `search__query` never opens a `query` tool of another server. Nothing the client sends picks the server or grants a tool: not a header, not a `server` field of the params, not `_meta`. The claims are those a `jwt_auth` stage verified in the token, or an `oidc` stage verified at login and sealed into the user's session. A header or cookie the client wrote is never read, and a request with no verified token or session never reaches the rules (`jwt_auth` answers it `401`; `oidc` answers a browser with the redirect to its login and any other client `401`). The claim matching is the one of `jwt_auth`'s `required_claims`: a string claim equal to a value, or an array claim with an item equal to a value. A claim that is absent, a number, a boolean, an object, `null` or an empty array denies. A `scope` claim written as one space separated string is one value, so use an array claim. Values are compared exactly, with case.
 
-Only the claims of a `jwt_auth` stage count; an `oidc` session is not an identity here. A gateway with `tool_access` and no `jwt_auth` earlier in the chain of its router is `invalid_middleware` (`tool_access_requires_identity`), and so is one where only some of its routers have it.
+Only the claims of a stage that verified them count: `jwt_auth` or `oidc`, whichever is earlier in the chain, the same stages the developer portal accepts as a login (`docs/ref/portal.md`). A `jwt_auth` the portal cannot pin (no issuer, several audiences, a private transport) still counts here. A session holds `sub` and the claims named in the `oidc` stage's `forward_claims` and `required_claims` only, so a claim a rule reads must be named in one of them, or it is absent and denies. A gateway with `tool_access` and neither a `jwt_auth` nor an `oidc` earlier in the chain of its router is `invalid_middleware` (`tool_access_requires_identity`), and so is one where only some of its routers have it.
 
 **What a denied caller sees.** A tool the caller may not use is left out of `tools/list`. A `tools/call` for it answers `-32602 unknown tool`: the same code, text and bytes as a tool nobody registered, and nothing is dialled upstream. The same holds for a server none of whose tools the caller may use: calls under its name answer `-32602 unknown tool` without a catalog fetch, and `tools/list` does not ask that server, so a caller cannot learn which servers exist or which are down. A distinct `forbidden` answer would let any caller list the tools of every server by probing.
 

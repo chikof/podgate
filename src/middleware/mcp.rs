@@ -275,8 +275,9 @@ impl McpGateway {
 }
 
 /// What a request is, to the hooks that decide about it: who asks, for which app, in which
-/// session, and the request head. `claims` are those of the token a `jwt_auth` stage verified
-/// (`RequestCx::claims`), never a header: the one input of per-tool authorization.
+/// session, and the request head. `claims` are those a `jwt_auth` stage verified in the token or
+/// an `oidc` stage in the session (`RequestCx::claims`), never a header: the one input of
+/// per-tool authorization.
 #[derive(Debug)]
 struct Caller<'a> {
     tenant: &'a str,
