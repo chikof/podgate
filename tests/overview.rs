@@ -495,6 +495,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     ]);
     let auth_key = plant("forward-auth-key");
     plants.push(auth_key.clone());
+    let guard_key = plant("llm-guard-key");
+    plants.push(guard_key.clone());
     plants.extend([plant("store-password"), plant("store-host")]);
     let (jwt_secret, jwt_query) = (
         plant("jwt-hmac-secret-padded-to-32-bytes"),
@@ -588,6 +590,11 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             "opa",
             json!({"address": "http://10.0.0.7:8181/v1/data/podgate/authz",
                    "request_headers": ["x-api-key"], "response_headers": ["x-user"]}),
+        ),
+        (
+            "llm_guard",
+            json!({"guards": [{"name": "g1", "address": format!("http://10.0.0.9:8080/check?key={guard_key}"),
+                               "phases": ["request", "response"]}]}),
         ),
         (
             "jwt_auth",

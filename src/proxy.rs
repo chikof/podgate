@@ -41,6 +41,8 @@
 //! `static_files`), passing the response through `response_filter` and `response_body_filter`
 //! itself, and returns `Ok(true)`.
 
+mod hold;
+
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
@@ -167,6 +169,9 @@ pub struct Ctx {
     /// The tunnel this request may become or is: its limits from the transport, and the
     /// timers that end it.
     pub tunnel: extras::State,
+    /// Whether the chain holds this request's response back until it ends, and the tasks held
+    /// so far.
+    pub(crate) held: hold::Held,
 }
 
 /// The reverse proxy logic: one instance per entry point, all sharing the same handles.
@@ -598,6 +603,7 @@ impl ProxyHttp for Gateway {
             body_held: false,
             retry: retry::Progress::default(),
             tunnel: extras::State::default(),
+            held: hold::Held::default(),
         }
     }
 
@@ -861,6 +867,15 @@ impl ProxyHttp for Gateway {
             ctx,
         );
         Ok(())
+    }
+
+    async fn hold_response(
+        &self,
+        session: &mut Session,
+        tasks: &mut Vec<pingora::protocols::http::HttpTask>,
+        ctx: &mut Ctx,
+    ) -> pingora::Result<()> {
+        self.hold_tasks(session, tasks, ctx).await
     }
 
     async fn response_filter(

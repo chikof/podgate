@@ -28,7 +28,7 @@ use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
 use serde_json::Value;
 
-use crate::budget::TenantBudget;
+use crate::budget::{BufferGuard, TenantBudget};
 use crate::cache::Cache;
 use crate::client_ip::ForwardedView;
 use crate::compile::Invalid;
@@ -51,11 +51,13 @@ pub mod digest_auth;
 pub mod errors;
 pub mod forward_auth;
 pub mod grpc_web;
+mod guard;
 pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
 pub mod jwt_auth;
 pub(crate) mod limits;
+pub mod llm_guard;
 pub mod mcp;
 pub mod oidc;
 pub mod opa;
@@ -284,6 +286,51 @@ pub struct ResponseCx<'a> {
     pub tenant: Option<&'a Arc<TenantBudget>>,
 }
 
+/// What a stage says about holding the upstream's response back until it ends
+/// ([`Kind::response_hold`]).
+#[derive(Debug)]
+pub enum Hold {
+    /// The response streams as usual.
+    No,
+    /// The whole response is held, unwritten, until it ends or passes `max_body` bytes.
+    Yes {
+        /// The most body bytes the proxy keeps; a response past it is `502`.
+        max_body: u64,
+        /// The tenant's charge for what is held, released with the stash.
+        charge: BufferGuard,
+    },
+}
+
+/// What the proxy keeps when a chain holds a response: the smallest `max_body` of the stages that
+/// asked and every charge they made.
+#[derive(Debug)]
+pub struct HoldPlan {
+    /// The most body bytes to keep.
+    pub max_body: u64,
+    /// The charges, released when the stash is.
+    pub charges: Vec<BufferGuard>,
+}
+
+/// What a held-response hook sees: the complete raw response the upstream sent, before any
+/// response hook has run on it. A stage may rewrite `head` and `body` (and must then keep
+/// `Content-Length` right) or refuse the response with an [`AppError`].
+pub struct HeldCx<'a> {
+    /// The request the response answers.
+    pub request: &'a RequestHeader,
+    /// The upstream's response head.
+    pub head: &'a mut ResponseHeader,
+    /// The whole body.
+    pub body: &'a mut Bytes,
+    /// The app the request was matched to.
+    pub app: &'a CompiledApp,
+    /// The tenant's budget, to charge memory before allocating.
+    pub tenant: Option<&'a Arc<TenantBudget>>,
+    /// Dials the services a guard calls.
+    pub auth: &'a forward_auth::Client,
+    /// The operator's rule for the addresses the proxy may dial.
+    pub policy: &'a UpstreamPolicy,
+}
+
 /// What a page hook sees: the response that may be replaced and what a replacement needs.
 pub struct PageCx<'a> {
     /// The client's request.
@@ -484,6 +531,37 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         _state: &mut Self::State,
     ) -> Result<(), AppError> {
         Ok(())
+    }
+
+    /// Runs once on the upstream's raw response head, before any response hook has run on it and
+    /// before anything is written to the client, in reverse chain order. A stage that must judge
+    /// the whole response before the client sees a byte of it answers [`Hold::Yes`]; the proxy
+    /// then keeps the response back until it ends and calls [`Self::response_held`] once.
+    ///
+    /// # Errors
+    ///
+    /// The [`AppError`] that replaces the response (nothing has been written).
+    fn response_hold(
+        &self,
+        _cx: &ResponseCx<'_>,
+        _state: &mut Self::State,
+    ) -> Result<Hold, AppError> {
+        Ok(Hold::No)
+    }
+
+    /// Runs once on a response a stage held ([`Self::response_hold`]), complete and raw, in
+    /// reverse chain order. After it returns the proxy runs the usual head and body hooks on
+    /// what is left in `cx`, so a later hook only ever sees the response the chain let through.
+    ///
+    /// # Errors
+    ///
+    /// The [`AppError`] that replaces the response (nothing has been written).
+    fn response_held(
+        &self,
+        _cx: &mut HeldCx<'_>,
+        _state: &mut Self::State,
+    ) -> impl Future<Output = Result<(), AppError>> + Send {
+        std::future::ready(Ok(()))
     }
 
     /// Runs when the response is an error podgate may replace, before any of it has reached the
@@ -776,6 +854,36 @@ macro_rules! kinds {
                 }
             }
 
+            fn response_hold(
+                &self,
+                cx: &$crate::middleware::ResponseCx<'_>,
+                state: &mut StageState,
+            ) -> Result<$crate::middleware::Hold, $crate::error::AppError> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_hold(kind, cx, state)
+                        }
+                    )*
+                    _ => Ok($crate::middleware::Hold::No),
+                }
+            }
+
+            async fn response_held(
+                &self,
+                cx: &mut $crate::middleware::HeldCx<'_>,
+                state: &mut StageState,
+            ) -> Result<(), $crate::error::AppError> {
+                match (self, state) {
+                    $(
+                        (Self::$variant(kind), StageState::$variant(state)) => {
+                            $crate::middleware::Kind::response_held(kind, cx, state).await
+                        }
+                    )*
+                    _ => Ok(()),
+                }
+            }
+
             fn request_body_chunk(
                 &self,
                 body: &mut Option<bytes::Bytes>,
@@ -885,6 +993,8 @@ kinds! {
 
     "opa" => Opa(opa::Opa),
 
+    "llm_guard" => LlmGuard(llm_guard::LlmGuard),
+
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => RateLimit(rate_limit::RateLimit),
@@ -963,6 +1073,8 @@ schemas! {
     "oidc" => oidc::Config,
 
     "opa" => opa::Config,
+
+    "llm_guard" => llm_guard::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 
@@ -1315,6 +1427,54 @@ pub fn run_response_head(
     for (position, index) in chain.iter().enumerate().rev() {
         if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
             named.stage.response_head(cx, slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// Asks the stages of `chain` whether the upstream's response is held back until it ends, last
+/// stage first. `None` when no stage holds it. `Ok(Some(..))` carries the tightest cap and every
+/// charge.
+///
+/// # Errors
+///
+/// The first refusal a hook returns (nothing has been written yet).
+pub fn run_response_hold(
+    stages: &[Named],
+    chain: &[usize],
+    cx: &ResponseCx<'_>,
+    state: &mut State,
+) -> Result<Option<HoldPlan>, AppError> {
+    let mut plan: Option<HoldPlan> = None;
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position))
+            && let Hold::Yes { max_body, charge } = named.stage.response_hold(cx, slot)?
+        {
+            let held = plan.get_or_insert(HoldPlan {
+                max_body,
+                charges: Vec::new(),
+            });
+            held.max_body = held.max_body.min(max_body);
+            held.charges.push(charge);
+        }
+    }
+    Ok(plan)
+}
+
+/// Runs the held-response hooks of `chain` on a response that was held, last stage first.
+///
+/// # Errors
+///
+/// The first refusal a hook returns.
+pub async fn run_held(
+    stages: &[Named],
+    chain: &[usize],
+    cx: &mut HeldCx<'_>,
+    state: &mut State,
+) -> Result<(), AppError> {
+    for (position, index) in chain.iter().enumerate().rev() {
+        if let (Some(named), Some(slot)) = (stages.get(*index), state.stages.get_mut(position)) {
+            named.stage.response_held(cx, slot).await?;
         }
     }
     Ok(())

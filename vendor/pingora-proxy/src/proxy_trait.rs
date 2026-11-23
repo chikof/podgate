@@ -383,6 +383,23 @@ pub trait ProxyHttp {
         Ok(())
     }
 
+    /// podgate patch (`docs/ref/pingora-patches.md` section 6): called with every batch
+    /// of raw upstream response tasks, before any filter runs and before anything is written to
+    /// the downstream. The application may take tasks out of `tasks` to hold them back (the
+    /// response head included) and put them back, in order, in a later batch; whatever is left in
+    /// `tasks` goes through the filters and is written. Holding is bounded by the application.
+    async fn hold_response(
+        &self,
+        _session: &mut Session,
+        _tasks: &mut Vec<HttpTask>,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        Ok(())
+    }
+
     /// Modify the response header before it is send to the downstream
     ///
     /// The modification is after caching. This filter is called for all responses including

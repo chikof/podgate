@@ -127,6 +127,25 @@ pub enum AppError {
     /// never passed on.
     #[error("plugin unavailable")]
     PluginSaturated,
+    /// An `llm_guard` guard said to stop: `403`. The body names the guard's `category` when it
+    /// gave one and never its reason.
+    #[error("blocked by guard")]
+    GuardBlocked {
+        /// The label the guard gave, safe to show the client.
+        category: Option<Box<str>>,
+    },
+    /// A guard could not answer (down, too slow, answered something unusable, or its circuit is
+    /// open) and its `on_error` is `deny`: `503`. The exchange is never passed on.
+    #[error("guard unavailable")]
+    GuardUnavailable,
+    /// A guard call found no room (the guard is at `max_concurrent`, or the tenant's buffer
+    /// budget is full right now): `503`, retry in a second.
+    #[error("guard unavailable")]
+    GuardSaturated,
+    /// A guarded `2xx` answer is not one the guard can read (encoded, not a chat completion):
+    /// `502`. The answer is never passed on.
+    #[error("unreadable response")]
+    GuardResponseUnreadable,
     /// A `jwt_auth` stage found no valid token: `401` with a `WWW-Authenticate` challenge. The body
     /// never says which check failed; `reason` is for the access log.
     #[error("unauthorized")]
@@ -261,6 +280,8 @@ impl AppError {
             | Self::AuthorizerSaturated
             | Self::PluginUnavailable
             | Self::PluginSaturated
+            | Self::GuardUnavailable
+            | Self::GuardSaturated
             | Self::JwtUnavailable
             | Self::OidcUnavailable { .. }
             | Self::OidcBusy
@@ -276,7 +297,10 @@ impl AppError {
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::HeadersTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            Self::UpstreamResponseTooLarge => StatusCode::BAD_GATEWAY,
+            Self::UpstreamResponseTooLarge | Self::GuardResponseUnreadable => {
+                StatusCode::BAD_GATEWAY
+            }
+            Self::GuardBlocked { .. } => StatusCode::FORBIDDEN,
             Self::Fastcgi(failure) => failure.status(),
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -302,6 +326,7 @@ impl AppError {
             | Self::AuthSaturated
             | Self::AuthorizerSaturated
             | Self::PluginSaturated
+            | Self::GuardSaturated
             | Self::AuthOverBudget
             | Self::OidcBusy => Some(1),
             Self::RateLimited { retry_after_secs } | Self::QuotaExceeded { retry_after_secs } => {
@@ -341,6 +366,7 @@ impl AppError {
                 | Self::AuthSaturated
                 | Self::AuthorizerSaturated
                 | Self::PluginSaturated
+                | Self::GuardSaturated
                 | Self::OidcBusy
         ) || matches!(self, Self::Fastcgi(failure) if failure.is_capacity_refusal())
     }
@@ -376,6 +402,10 @@ impl AppError {
             Self::AuthorizerSaturated => "opa_saturated",
             Self::PluginUnavailable => "plugin_unavailable",
             Self::PluginSaturated => "plugin_saturated",
+            Self::GuardBlocked { .. } => "guard_blocked",
+            Self::GuardUnavailable => "guard_unavailable",
+            Self::GuardSaturated => "guard_saturated",
+            Self::GuardResponseUnreadable => "guard_unreadable_response",
             Self::AuthOverBudget => "auth_over_budget",
             Self::JwtUnauthorized { reason } | Self::JwtForbidden { reason } => reason,
             Self::JwtUnavailable => "jwks_unavailable",
@@ -406,6 +436,9 @@ impl AppError {
                 json!({ "error": self.to_string(), "conflicts": conflicts })
             }
             Self::WriterOwned { writer } => json!({ "error": self.to_string(), "writer": writer }),
+            Self::GuardBlocked {
+                category: Some(category),
+            } => json!({ "error": self.to_string(), "category": category }),
             _ => json!({ "error": self.to_string() }),
         }
     }

@@ -27,10 +27,10 @@ pub(super) const DEFAULT_MAX_CONCURRENT: u32 = 256;
 pub(super) const MAX_CONCURRENT: u32 = 65_536;
 
 /// Consecutive failed calls that open the circuit.
-pub(super) const CIRCUIT_AFTER: u32 = 5;
+pub(in crate::middleware) const CIRCUIT_AFTER: u32 = 5;
 
 /// How long an open circuit refuses calls before it lets one probe through.
-pub(super) const CIRCUIT_FOR: Duration = Duration::from_secs(5);
+pub(in crate::middleware) const CIRCUIT_FOR: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -44,7 +44,7 @@ enum State {
 
 /// What settling a call did to the circuit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Change {
+pub(in crate::middleware) enum Change {
     /// Nothing worth telling the operator.
     None,
     /// The circuit opened.
@@ -56,7 +56,7 @@ pub(super) enum Change {
 /// The circuit of one plugin: after a run of failures it opens, so a dead plugin costs one
 /// timeout per period instead of one per request, then lets exactly one probe through.
 #[derive(Debug)]
-pub(super) struct Circuit {
+pub(in crate::middleware) struct Circuit {
     state: Mutex<State>,
     threshold: u32,
     period: Duration,
@@ -67,14 +67,14 @@ pub(super) struct Circuit {
 /// in the probing state.
 #[derive(Debug)]
 #[must_use = "a call must be settled"]
-pub(super) struct Permit<'a> {
+pub(in crate::middleware) struct Permit<'a> {
     circuit: &'a Circuit,
     probe: bool,
     settled: bool,
 }
 
 impl Circuit {
-    pub(super) fn new(threshold: u32, period: Duration) -> Self {
+    pub(in crate::middleware) fn new(threshold: u32, period: Duration) -> Self {
         Self {
             state: Mutex::new(State::Closed { failures: 0 }),
             threshold,
@@ -87,12 +87,12 @@ impl Circuit {
     }
 
     /// Whether the circuit refuses calls now: open, or probing.
-    pub(super) fn is_open(&self) -> bool {
+    pub(in crate::middleware) fn is_open(&self) -> bool {
         !matches!(*self.lock(), State::Closed { .. })
     }
 
     /// Takes the right to call the plugin, or `None` while the circuit is open.
-    pub(super) fn admit(&self) -> Option<Permit<'_>> {
+    pub(in crate::middleware) fn admit(&self) -> Option<Permit<'_>> {
         let mut state = self.lock();
         let probe = match *state {
             State::Closed { .. } => false,
@@ -151,7 +151,7 @@ impl Circuit {
 
 impl Permit<'_> {
     /// Records how the call went.
-    pub(super) fn settle(mut self, ok: bool) -> Change {
+    pub(in crate::middleware) fn settle(mut self, ok: bool) -> Change {
         self.settled = true;
         self.circuit.settle(self.probe, ok)
     }
@@ -159,7 +159,7 @@ impl Permit<'_> {
     /// The call says nothing about the plugin (the request was refused before it was made, or
     /// the plugin is not the one at fault): a probe goes back to the open state without a
     /// verdict, so another probe can follow.
-    pub(super) fn forget(mut self) {
+    pub(in crate::middleware) fn forget(mut self) {
         self.settled = true;
         if self.probe {
             let mut state = self.circuit.lock();

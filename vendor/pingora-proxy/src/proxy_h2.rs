@@ -433,6 +433,12 @@ where
             }
         }
 
+        // podgate patch: the application may hold the batch back.
+        self.inner.hold_response(session, &mut tasks, ctx).await?;
+        if tasks.is_empty() {
+            return Ok(Some(false));
+        }
+
         /* run filters before sending to downstream */
         let mut filtered_tasks = Vec::with_capacity(TASK_BUFFER_SIZE);
         for mut t in tasks {
