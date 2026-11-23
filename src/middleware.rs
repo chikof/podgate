@@ -56,6 +56,7 @@ pub mod headers;
 pub mod in_flight_req;
 pub mod ip_allow_list;
 pub mod jwt_auth;
+pub mod lifecycle;
 pub(crate) mod limits;
 pub mod llm_guard;
 pub mod mcp;
@@ -594,16 +595,21 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
 /// built kind, `"type" => unbuilt,` for a planned one. Keep one entry per line, a blank line
 /// between entries, so parallel changes to different kinds never touch adjacent lines.
 macro_rules! kinds {
-    (@munch [$($built:tt)*] [$($unbuilt:tt)*]) => {
-        kinds!(@emit [$($built)*] [$($unbuilt)*]);
+    (@munch [$($built:tt)*] [$($unbuilt:tt)*] [$($declared:literal,)*]) => {
+        kinds!(@emit [$($built)*] [$($unbuilt)*] [$($declared,)*]);
     };
-    (@munch [$($built:tt)*] [$($unbuilt:tt)*] $ty:literal => unbuilt, $($rest:tt)*) => {
-        kinds!(@munch [$($built)*] [$($unbuilt)* $ty,] $($rest)*);
+    (@munch [$($built:tt)*] [$($unbuilt:tt)*] [$($declared:literal,)*] $ty:literal => unbuilt, $($rest:tt)*) => {
+        kinds!(@munch [$($built)*] [$($unbuilt)* $ty,] [$($declared,)*] $($rest)*);
     };
-    (@munch [$($built:tt)*] [$($unbuilt:tt)*] $ty:literal => $variant:ident($kind:ty), $($rest:tt)*) => {
-        kinds!(@munch [$($built)* ($ty, $variant, $kind)] [$($unbuilt)*] $($rest)*);
+    // A stage the compiler pushes itself: it has a variant and dispatch, but it is not a type a
+    // snapshot declares, so it stays out of `Stage::BUILT` and the schemas.
+    (@munch [$($built:tt)*] [$($unbuilt:tt)*] [$($declared:literal,)*] $ty:literal => builtin $variant:ident($kind:ty), $($rest:tt)*) => {
+        kinds!(@munch [$($built)* ($ty, $variant, $kind)] [$($unbuilt)*] [$($declared,)*] $($rest)*);
     };
-    (@emit [$(($ty:literal, $variant:ident, $kind:ty))*] [$($unbuilt:literal,)*]) => {
+    (@munch [$($built:tt)*] [$($unbuilt:tt)*] [$($declared:literal,)*] $ty:literal => $variant:ident($kind:ty), $($rest:tt)*) => {
+        kinds!(@munch [$($built)* ($ty, $variant, $kind)] [$($unbuilt)*] [$($declared,)* $ty,] $($rest)*);
+    };
+    (@emit [$(($ty:literal, $variant:ident, $kind:ty))*] [$($unbuilt:literal,)*] [$($declared:literal,)*]) => {
         /// A compiled middleware: one variant per built kind.
         #[derive(Debug)]
         pub enum Stage {
@@ -654,7 +660,7 @@ macro_rules! kinds {
             }
 
             /// Every built type name, as written in a snapshot.
-            pub const BUILT: &[&str] = &[ $($ty,)* ];
+            pub const BUILT: &[&str] = &[ $($declared,)* ];
 
             /// The type name, as written in a snapshot.
             #[must_use]
@@ -956,11 +962,13 @@ macro_rules! kinds {
         }
     };
     ($($body:tt)*) => {
-        kinds!(@munch [] [] $($body)*);
+        kinds!(@munch [] [] [] $($body)*);
     };
 }
 
 kinds! {
+    "lifecycle" => builtin Lifecycle(lifecycle::Guard),
+
     "wasm" => Wasm(wasm::Wasm),
 
     "add_prefix" => AddPrefix(add_prefix::AddPrefix),
@@ -1633,6 +1641,7 @@ mod test {
                 tcp: None,
                 udp: None,
                 forwarded: None,
+                apis: Vec::new(),
             };
             let mut engine = engine::Compiler::default();
             Stage::compile(

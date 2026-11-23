@@ -908,7 +908,7 @@ fn write_page<'a, X: Copy, T: Serialize>(
     clippy::too_many_arguments,
     reason = "one page writer serves tenants, certificates and apps, which differ in exactly these"
 )]
-fn write_page_from<'a, X: Copy, T: Serialize>(
+pub(crate) fn write_page_from<'a, X: Copy, T: Serialize>(
     out: &mut Vec<u8>,
     items: &[X],
     start: usize,

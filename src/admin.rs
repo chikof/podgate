@@ -7,6 +7,7 @@
 //! `Result<_, AppError>` so every error is `{"error": "..."}`.
 
 mod cache;
+mod catalog;
 mod events;
 pub(crate) mod explain;
 mod failures;
@@ -281,7 +282,7 @@ impl AppState {
         self.metrics_addr
     }
 
-    /// The slots that cap concurrent `GET /v1/overview` computations.
+    /// The slots that cap concurrent `GET /v1/overview` and `GET /v1/catalog` computations.
     #[must_use]
     pub fn overview_slots(&self) -> &Arc<Semaphore> {
         &self.overview_slots
@@ -306,7 +307,8 @@ async fn not_found() -> AppError {
 ///
 /// Routes: `GET /healthz`, `GET /readyz`, `GET /metrics`, `PUT /v1/snapshot`,
 /// `POST /v1/snapshot/validate`, `GET /v1/snapshot/version`, `GET /v1/schema`,
-/// `GET /v1/events`, `GET /v1/explain`, `GET /v1/overview`, `GET /v1/apps/{app}/failures`,
+/// `GET /v1/events`, `GET /v1/explain`, `GET /v1/overview`, `GET /v1/catalog`,
+/// `GET /v1/apps/{app}/failures`,
 /// `POST /v1/apps/{app}/failures/{id}/replay`, `POST /v1/cache/purge`;
 /// anything else is a JSON 404.
 ///
@@ -328,6 +330,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(explain::routes())
         .merge(failures::routes())
         .merge(overview::routes())
+        .merge(catalog::routes())
         .merge(schema::routes())
         .merge(validate::routes())
         .merge(writer::routes())

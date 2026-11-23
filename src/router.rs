@@ -138,6 +138,16 @@ impl CompiledRouter {
         self.chain_digest = digest;
     }
 
+    /// Puts the stage `stage` first in the chain, ahead of everything the tenant declared, and
+    /// folds `text`, what the stage is, into the chain's digest.
+    pub(crate) fn guard(&mut self, stage: usize, text: &str) {
+        let mut chain = Vec::with_capacity(self.chain.len() + 1);
+        chain.push(stage);
+        chain.extend_from_slice(&self.chain);
+        self.chain = chain.into_boxed_slice();
+        self.chain_digest = digest((self.chain_digest, text));
+    }
+
     /// Limits an unrestricted router to `list`, the entry points whose policy admits its tenant.
     pub(crate) fn narrow_entry_points(&mut self, list: Box<[Box<str>]>) {
         self.entry_points = Some(list);

@@ -20,6 +20,7 @@
 //! - [`EventFeed`] and [`Inflight`]: the event feed and the per-revision in-flight counters that
 //!   report drained revisions into it.
 //! - [`explain`]: why a request goes where it goes, behind `GET /v1/explain`.
+//! - [`catalog`]: the `apis` of an app, their versions and lifecycle, behind `GET /v1/catalog`.
 //! - [`overview`]: what is configured and how it is doing, behind `GET /v1/overview`.
 //! - [`wake`]: scale to zero: holds requests for a sleeping app, reports idle apps.
 //! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
@@ -49,6 +50,7 @@ pub mod admin;
 pub mod budget;
 pub mod cache;
 pub mod canary;
+pub mod catalog;
 pub mod client_ip;
 pub mod clientauth;
 pub mod compile;

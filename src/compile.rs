@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 use crate::acme::{Plan, alpn01, dns01};
 use crate::canary;
+use crate::catalog;
 use crate::client_ip::Trust;
 use crate::clientauth::ClientAuth;
 use crate::conflict;
@@ -244,6 +245,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         return Err(CompileError::Rejected(rejected));
     }
 
+    let links = catalog::Links::build(snapshot, &routers);
     let mut engine = engine::Compiler::default();
     let mut rejected = Vec::new();
     let mut parts = Vec::with_capacity(snapshot.apps.len());
@@ -257,7 +259,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                 .map_or(0, |tenant| tenant.budget.max_buffer_bytes),
             max_percent: context.cache_tenant_max_percent(),
         };
-        let stages = stages_of(
+        let mut stages = stages_of(
             app,
             app_routers,
             &mut engine,
@@ -266,6 +268,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             context.resolver(),
             snapshot.skew_secret.as_ref(),
         );
+        middleware::lifecycle::attach(app, &links, app_routers, &mut stages);
         reject_oidc_on_plain_entry_points(
             snapshot,
             context,
@@ -408,6 +411,13 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
     if !rejected.is_empty() {
         return Err(CompileError::Rejected(rejected));
     }
+    let entries: Vec<Vec<catalog::Api>> = snapshot
+        .apps
+        .iter()
+        .zip(&routers)
+        .zip(&parts)
+        .map(|((app, routers), (stages, _))| catalog::entries(app, routers, stages))
+        .collect();
     let apps: Vec<CompiledApp> = snapshot
         .apps
         .iter()
@@ -416,10 +426,14 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
         .zip(client_auth)
         .zip(tls_options)
         .zip(l4s)
+        .zip(entries)
         .map(
             |(
-                ((((app, routers), (stages, (services, revisions))), client_auth), tls_options),
-                l4,
+                (
+                    ((((app, routers), (stages, (services, revisions))), client_auth), tls_options),
+                    l4,
+                ),
+                apis,
             )| {
                 let digest = fingerprint(app, &routers, l4.tcp());
                 CompiledApp::assemble(
@@ -433,6 +447,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                         client_auth,
                         tls_options,
                         l4,
+                        apis,
                     },
                 )
             },
@@ -532,6 +547,7 @@ fn shape(snapshot: &Snapshot, context: &CompileContext, tenants: &HashSet<&str>)
     if let Some(invalid) = observe::reject(snapshot) {
         rejected.push(Rejected::snapshot("observability", invalid));
     }
+    rejected.extend(catalog::check::check(snapshot));
     let mut policies = HashSet::new();
     for policy in &snapshot.entry_points {
         let at = format!("entry point {}", policy.name);

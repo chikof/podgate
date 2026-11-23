@@ -34,6 +34,9 @@ pub enum AppError {
     /// No such route or resource: `404 Not Found`.
     #[error("not found")]
     NotFound,
+    /// The API the router belongs to is `retired` in the catalog: `410 Gone`.
+    #[error("api retired")]
+    ApiRetired,
     /// The request contradicts the current state: `409 Conflict`.
     #[error("{0}")]
     Conflict(Box<str>),
@@ -260,6 +263,7 @@ impl AppError {
             }
             Self::JwtUnauthorized { .. } | Self::OidcRejected { .. } => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::ApiRetired => StatusCode::GONE,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::WriterOwned { .. } => StatusCode::CONFLICT,
             Self::SnapshotRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -381,6 +385,7 @@ impl AppError {
             Self::TlsPolicy => "tls_policy",
             Self::ClientCertRequired => "client_cert_required",
             Self::NotFound => "no_route",
+            Self::ApiRetired => "api_retired",
             Self::Overloaded
             | Self::FilterOverBudget
             | Self::BufferingOverBudget

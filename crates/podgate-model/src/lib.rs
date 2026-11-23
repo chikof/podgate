@@ -137,6 +137,94 @@ pub struct App {
     /// [`Forwarded::default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded: Option<Forwarded>,
+    /// The APIs the app serves, as catalog entries with a version and a lifecycle.
+    /// Absent: the app declares none, and `GET /v1/catalog` lists nothing for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apis: Vec<Api>,
+}
+
+/// One API of an app: a catalog entry with a version and a lifecycle stage. The
+/// catalog describes and enforces the lifecycle on the routers it names; which version a request
+/// reaches stays the routers' decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Api {
+    /// The API's id, 1 to 128 bytes of `A-Z a-z 0-9 . _ -`. With `version` it is unique among
+    /// the tenant's APIs.
+    pub id: Box<str>,
+    /// The version, 1 to 64 bytes of `A-Z a-z 0-9 . _ + -`, such as `v2` or `2026-05-01`.
+    pub version: Box<str>,
+    /// A human title, at most 256 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<Box<str>>,
+    /// A description, at most 2048 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Box<str>>,
+    /// Where the API is in its life: it decides what the named routers answer.
+    pub lifecycle: Lifecycle,
+    /// The name of an `openapi` middleware of this app that describes the API. The catalog shows
+    /// the document's title, version and operation count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi: Option<Box<str>>,
+    /// The routers of this app that serve the API: one to 64, and no router is in two APIs.
+    pub routers: Vec<Box<str>>,
+    /// The tenant's consent to list the API on the developer portal. The operator's
+    /// catalog lists every API either way. Default `false`.
+    #[serde(default)]
+    pub published: bool,
+    /// The day the API is expected to stop answering, `YYYY-MM-DD`, UTC. Required for
+    /// `deprecated`, allowed for `retired`, refused for the other stages. Sent as `Sunset`
+    /// (RFC 8594) while the API is `deprecated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sunset: Option<Box<str>>,
+    /// The API that replaces this one, of the same tenant. Allowed for `deprecated` and
+    /// `retired`. Sent as a `Link` with `rel="successor-version"` when the successor has a router
+    /// with a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<ApiRef>,
+}
+
+/// A reference to another API of the same tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ApiRef {
+    /// The [`Api::id`].
+    pub id: Box<str>,
+    /// The [`Api::version`].
+    pub version: Box<str>,
+}
+
+/// Where an [`Api`] is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    /// Not released: the named routers answer `404`.
+    Draft,
+    /// Released for early use; the routers serve as they are.
+    Preview,
+    /// Released; the routers serve as they are.
+    Stable,
+    /// Still served, with `Deprecation`, `Sunset` and the successor `Link` on its responses.
+    Deprecated,
+    /// Ended: the named routers answer `410`.
+    Retired,
+}
+
+impl Lifecycle {
+    /// The name as it is written in a snapshot and shown by the catalog.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Preview => "preview",
+            Self::Stable => "stable",
+            Self::Deprecated => "deprecated",
+            Self::Retired => "retired",
+        }
+    }
 }
 
 /// The forwarding headers an app's upstreams receive. Every field is optional; an absent one has

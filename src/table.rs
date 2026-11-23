@@ -20,6 +20,7 @@ use tokio::sync::watch;
 
 use crate::acme::{Plan, PlanError};
 use crate::canary::{self, Runtime};
+use crate::catalog::Api;
 use crate::client_ip::Trust;
 use crate::clientauth::{self, ClientAuth};
 use crate::compile::{self, Rejected};
@@ -240,6 +241,7 @@ pub struct CompiledApp {
     canary: Option<Arc<Runtime>>,
     l4: l4::Compiled,
     fingerprint: u64,
+    apis: Box<[Api]>,
 }
 
 /// What the compile passes hand to [`CompiledApp::assemble`].
@@ -253,6 +255,7 @@ pub(crate) struct Parts {
     pub(crate) client_auth: Option<Arc<ClientAuth>>,
     pub(crate) tls_options: Option<Arc<Options>>,
     pub(crate) l4: l4::Compiled,
+    pub(crate) apis: Vec<Api>,
 }
 
 /// What the effective weights of an app's revisions add up to while it has a canary.
@@ -329,6 +332,7 @@ impl CompiledApp {
             canary,
             l4: parts.l4,
             fingerprint: parts.fingerprint,
+            apis: parts.apis.into_boxed_slice(),
             client_auth: parts.client_auth,
             tls_options: parts.tls_options,
         };
@@ -475,6 +479,12 @@ impl CompiledApp {
     #[must_use]
     pub fn scale_to_zero(&self) -> Option<ScaleToZero> {
         self.scale_to_zero
+    }
+
+    /// The app's catalog entries, in declaration order.
+    #[must_use]
+    pub fn apis(&self) -> &[Api] {
+        &self.apis
     }
 
     /// The app id.
