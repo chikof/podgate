@@ -1,0 +1,64 @@
+# Who owns a function's instructions, for scripts/bench-owners.sh.
+#
+# Columns, tab separated: kind, owner, regular expression (awk ERE). Rules of a kind are tried in
+# file order and the first match wins.
+#
+#   std   -      a path (`core::`, `alloc::`) that is skipped when looking for the crate a generic
+#                function belongs to: `core::ptr::drop_in_place<quinn_proto::frame::Frame>` is
+#                quinn's, `<alloc::vec::Vec<h2::frame::Data>>::push` is h2's.
+#   raw   owner  the whole demangled symbol; for libc and asm that have no Rust path. Tried first.
+#   path  owner  the first path in the symbol that is not `std`, e.g. `podgate::h3::bridge::send`.
+#   file  owner  the source file of an instruction line from the line tables (`--by file`). A line
+#                that no file rule matches, or has no file, takes the owner of its function; so
+#                inlined library code (`core`, `alloc`) stays with the function it was inlined into.
+#
+# An owner that no rule names is `other`. The spec's owner list, in the order it names them:
+# quinn, h3, podgate h3 (front, endpoint, limits), internal h2 hop, shared pipeline, tls, allocator,
+# other. The h1 codec only runs for the HTTPS reference. The kernel is not here: callgrind counts
+# guest instructions only, a system call is one instruction (see docs/benchmarks.md).
+std	-	^(core|alloc|std|hashbrown|compiler_builtins|std_detect|panic_unwind|gimli|addr2line|object|rustc_demangle)::
+
+# Owners that are library code any layer calls. `--inherit` charges them to the owners that call them.
+neutral	other	-
+neutral	allocator	-
+neutral	libc memory (memcpy, memset)	-
+neutral	libc system calls and locks	-
+
+raw	allocator	^_*(GI_)?(libc_)?(int_[a-z_]+|malloc[a-z_0-9]*|free|cfree|realloc|calloc|memalign|posix_memalign|aligned_alloc|sysmalloc|unlink_chunk[a-z._]*|alloc_perturb|tcache_[a-z_]+|mid_memalign|rust_alloc|rust_dealloc|rust_realloc|rust_alloc_zeroed|rdl_[a-z_]+|rg_[a-z_]+)(_nocancel)?$
+raw	libc memory (memcpy, memset)	^_*(GI_)?(memcpy|memmove|memset|memcmp|bcmp|memchr|strlen|mempcpy|rawmemchr|strnlen|strchr)(_[a-z0-9_]+)?$
+raw	libc system calls and locks	^_*(GI_)?(libc_)?(sendmsg|recvmsg|sendmmsg|recvmmsg|sendto|recvfrom|send|recv|read|write|readv|writev|epoll_wait|epoll_pwait|epoll_ctl|close|accept4|accept|connect|poll|ppoll|futex|syscall|clock_gettime|clock_nanosleep|nanosleep|getsockopt|setsockopt|ioctl|fcntl|eventfd|timerfd_settime|madvise|mmap|munmap|mprotect|sched_yield|getrandom|pthread_[a-z_]+|lll_lock_wait|lll_unlock_wake|futex_[a-z_]+|sem_[a-z_]+)(_nocancel|_cancel|@@[A-Za-z0-9_.]+)?$
+raw	tls (rustls, ring)	^_?ring_core_
+raw	tls (rustls, ring)	^ring::
+raw	internal h2 hop: client side (bridge.rs, h2 over the unix socket)	h2::.*UnixStream
+raw	internal h2 hop: server side (pingora, h2 over the accepted stream)	h2::.*pingora_core::protocols::IO
+
+path	quinn	^(quinn|quinn_proto|quinn_udp)::
+path	h3	^(h3|h3_quinn)::
+path	internal h2 hop: client side (bridge.rs, h2 over the unix socket)	^podgate::h3::bridge::
+path	podgate h3 (front, endpoint, limits)	^podgate::h3::
+path	internal h2 hop: PROXY v2 gate	^podgate::entry::proxy_protocol
+path	internal h2 hop: h2 crate, not told apart	^h2::
+path	internal h2 hop: server side (pingora, h2 over the accepted stream)	^pingora_core::protocols::http::v2::
+path	h1 downstream codec (HTTPS only)	^pingora_core::protocols::http::v1::server
+path	tls (rustls, ring)	^(rustls|ring|tokio_rustls|rustls_pki_types|webpki|untrusted|subtle)::
+path	tls (rustls, ring)	^pingora_core::protocols::tls::
+path	tls (rustls, ring)	^podgate::tls::
+path	tokio runtime	^(tokio|mio)::
+path	shared pipeline	^(podgate|podgate_[a-z]+|pingora[a-z_]*)::
+
+# File paths are matched with the repository root stripped, so the workspace's own files read
+# `src/h3/front.rs` and registry crates keep their absolute `~/.cargo/registry/src/.../name-1.2.3/`.
+file	quinn	/(quinn|quinn-proto|quinn-udp)-[0-9][^/]*/
+file	h3	/(h3|h3-quinn)-[0-9][^/]*/
+file	internal h2 hop: client side (bridge.rs, h2 over the unix socket)	^src/h3/bridge\.rs$
+file	podgate h3 (front, endpoint, limits)	^src/h3(/|\.rs$)
+file	internal h2 hop: PROXY v2 gate	^src/entry/proxy_protocol
+file	internal h2 hop: h2 crate, not told apart	/h2-[0-9][^/]*/
+file	internal h2 hop: server side (pingora, h2 over the accepted stream)	^vendor/pingora-core/src/protocols/http/v2/
+file	h1 downstream codec (HTTPS only)	^vendor/pingora-core/src/protocols/http/v1/server
+file	tls (rustls, ring)	/(rustls|ring|tokio-rustls|rustls-pki-types|webpki|untrusted|subtle)-[0-9][^/]*/
+file	tls (rustls, ring)	^vendor/pingora-core/src/protocols/tls/
+file	tls (rustls, ring)	^src/tls/
+file	tokio runtime	/(tokio|mio)-[0-9][^/]*/
+file	shared pipeline	/pingora[-a-z_]*-[0-9][^/]*/
+file	shared pipeline	^(src|crates|vendor)/
