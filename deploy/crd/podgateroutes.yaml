@@ -311,6 +311,15 @@ spec:
                     - type
                     - address
                   - properties:
+                      max_body_bytes:
+                        minimum: 0
+                      type:
+                        enum:
+                        - openapi
+                    required:
+                    - type
+                    - document
+                  - properties:
                       type:
                         enum:
                         - pass_tls_client_cert
@@ -619,6 +628,12 @@ spec:
                       minimum: 0
                       nullable: true
                       type: integer
+                    document:
+                      description: |-
+                        The OpenAPI 3.0 or 3.1 document, as a JSON object, at most 1 MiB. Only local `$ref`s
+                        (`#/...`) are followed, and a `$ref` cycle is refused.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     exclude_content_types:
                       items:
                         type: string
@@ -1345,6 +1360,7 @@ spec:
                       - mcp_gateway
                       - oidc
                       - opa
+                      - openapi
                       - pass_tls_client_cert
                       - plugin
                       - quota

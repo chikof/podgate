@@ -3145,6 +3145,40 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.openapi": {
+      "additionalProperties": false,
+      "description": "The configuration of an `openapi` middleware.",
+      "properties": {
+        "document": {
+          "additionalProperties": true,
+          "description": "The OpenAPI 3.0 or 3.1 document, as a JSON object, at most 1 MiB. Only local `$ref`s\n(`#/...`) are followed, and a `$ref` cycle is refused.",
+          "type": "object"
+        },
+        "max_body_bytes": {
+          "default": null,
+          "description": "Largest JSON body that is checked; a larger one is answered `413`. Default and at most\n65536.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "openapi"
+        }
+      },
+      "required": [
+        "document",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.pass_tls_client_cert": {
       "additionalProperties": false,
       "description": "The configuration of a `pass_tls_client_cert` middleware.",
@@ -5651,6 +5685,7 @@
       "mcp_gateway": "#/$defs/middleware.mcp_gateway",
       "oidc": "#/$defs/middleware.oidc",
       "opa": "#/$defs/middleware.opa",
+      "openapi": "#/$defs/middleware.openapi",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
       "plugin": "#/$defs/middleware.plugin",
       "quota": "#/$defs/middleware.quota",
