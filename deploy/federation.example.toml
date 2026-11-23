@@ -1,0 +1,37 @@
+# podgate-federation hub: example peers file. Run it where the operator reads the combined view:
+#   podgate-federation hub --config /etc/podgate/federation.toml
+# Check it first: podgate-federation check hub --config /etc/podgate/federation.toml
+# Reference: docs/ref/federation.md.
+
+[view]
+# The combined view: GET /v1/clusters and GET /v1/catalog, mutual TLS only.
+addr = "127.0.0.1:9444"
+cert_file = "/etc/podgate/federation/view.pem"
+key_file = "/etc/podgate/federation/view.key"
+# Who may read it: certificates this CA signed.
+client_ca_file = "/etc/podgate/federation/operators-ca.pem"
+max_connections = 8
+
+[client]
+# The hub's identity towards every peer.
+cert_file = "/etc/podgate/federation/hub.pem"
+key_file = "/etc/podgate/federation/hub.key"
+
+[pull]
+poll_secs = 30          # at least 5
+timeout_secs = 20       # one whole pull of one peer, 1 to 120
+stale_after_secs = 90   # default 3 x poll_secs; at least poll_secs + timeout_secs
+max_bytes = 8388608     # read from one peer per pull, 1 MiB to 64 MiB
+max_entries = 20000     # entries kept per peer
+
+# At most 32 peers. The name is the cluster label in the view; it comes from here and nowhere else.
+[[peer]]
+name = "eu-1"
+url = "https://export.eu-1.internal:9443"            # https only, no path, query or userinfo
+ca_file = "/etc/podgate/federation/eu-1-ca.pem"      # pins this peer; the platform roots are never used
+# server_name = "export.eu-1.internal"                # default: the host of url
+
+[[peer]]
+name = "us-2"
+url = "https://export.us-2.internal:9443"
+ca_file = "/etc/podgate/federation/us-2-ca.pem"

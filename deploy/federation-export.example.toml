@@ -1,0 +1,20 @@
+# podgate-federation export: example configuration. Run it beside a node's podgate, as a user that
+# can open the read socket and cannot open the admin socket:
+#   podgate-federation export --config /etc/podgate/federation-export.toml
+# Reference: docs/ref/federation.md.
+
+# The daemon's ADMIN_READ_SOCKET (and ADMIN_READ_SOCKET_MODE=0660 with a group directory, see the
+# reference). A path that serves the full admin API is refused.
+read_socket = "/run/podgate-read/read.sock"
+
+# Requests to the read socket at once, 1 to 4. The daemon has 8 overview slots shared with others.
+admin_slots = 2
+
+[serve]
+# Where hubs connect. Mutual TLS only: there is no plaintext mode.
+addr = "10.0.0.5:9443"
+cert_file = "/etc/podgate/federation/server.pem"
+key_file = "/etc/podgate/federation/server.key"
+# Who may read: certificates this CA signed. Use a CA that is used for federation only.
+client_ca_file = "/etc/podgate/federation/hub-ca.pem"
+max_connections = 8
