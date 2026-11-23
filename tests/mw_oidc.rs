@@ -2150,7 +2150,10 @@ async fn api_list(client: &Client) -> fake::Resp {
     client
         .send(
             "POST",
-            &[("Content-Type", "application/json"), ("Accept", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Accept", "application/json"),
+            ],
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
                 .to_string()
                 .as_bytes(),
