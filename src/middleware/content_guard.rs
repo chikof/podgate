@@ -13,16 +13,16 @@
 //! - **What is scanned.** The string values of a JSON body (every other part of the document is
 //!   copied byte for byte, so a redaction keeps the JSON valid). A body that cannot be scanned
 //!   (not JSON-typed, encoded, not valid JSON, over `max_body_bytes`) is refused, never passed
-//!   on: skipping it would be a bypass. See [`rules`] for the rule engine and its caps.
+//!   on: skipping it would be a bypass. See `rules` for the rule engine and its caps.
 //! - **Request.** Held whole before the upstream is chosen or dialled
-//!   ([`buffering::hold_body`]), scanned on the blocking pool, then blocked (`403`), rewritten
+//!   (`buffering::hold_body`), scanned on the blocking pool, then blocked (`403`), rewritten
 //!   (the upstream gets the redacted body and its exact `Content-Length`) or passed.
 //! - **Response.** Held whole and raw by the proxy before the client sees a byte of it
 //!   ([`Kind::response_hold`], docs/ref/pingora-patches.md section 6), scanned, then blocked,
 //!   rewritten or passed. Compression, the cache and the failed-request recorder only ever see
 //!   what it let through.
 //! - **Classifier.** `classifier` names an entry of `CONTENT_CLASSIFIERS_FILE` ([`Classifiers`]).
-//!   It is one [`guard::Endpoint`]: the same wire, address policy, circuit, permits and tenant
+//!   It is one `guard::Endpoint`: the same wire, address policy, circuit, permits and tenant
 //!   charge as an `llm_guard` guard. It sees the text the rules left, once per phase.
 //! - **What never leaves.** A matched value reaches no log line, metric, recorded failure,
 //!   mirror copy, cache entry or explain output: only rule names and categories do.
@@ -66,7 +66,7 @@ const MAX_BODY: usize = 64 * 1024;
 const MAX_CLASSIFIER_NAME: usize = 64;
 
 /// Posture change kinds this middleware reports, see [`Kind::posture`]. A classifier's own
-/// changes are the shared `guard_*` kinds of [`guard::kind`].
+/// changes are the shared `guard_*` kinds of `guard::kind`.
 pub mod kind {
     /// The middleware is gone: bodies are no longer scanned.
     pub const REMOVED: &str = "content_guard_removed";
