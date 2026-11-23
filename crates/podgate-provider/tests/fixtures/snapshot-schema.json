@@ -1658,8 +1658,8 @@
         },
         "max_prompt_bytes": {
           "default": null,
-          "description": "The most bytes of prompt that are held and judged (default and most 65536); a larger\nprompt is refused with `413`.",
-          "format": "uint32",
+          "description": "The most bytes of prompt that are held (default and most 65536); a larger prompt is\nrefused with `413`.",
+          "format": "uint",
           "minimum": 0,
           "type": [
             "integer",
@@ -3412,7 +3412,7 @@
         },
         "max_prompt_bytes": {
           "default": null,
-          "description": "The most bytes of prompt that are held and judged (default and most 65536); a larger\nprompt is refused with `413`.",
+          "description": "The most bytes of prompt that are held (default and most 65536); a larger prompt is\nrefused with `413`.",
           "format": "uint",
           "minimum": 0,
           "type": [

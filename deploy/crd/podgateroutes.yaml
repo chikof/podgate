@@ -1029,8 +1029,8 @@ spec:
                       type: integer
                     max_prompt_bytes:
                       description: |-
-                        The most bytes of prompt that are held and judged (default and most 65536); a larger
-                        prompt is refused with `413`.
+                        The most bytes of prompt that are held (default and most 65536); a larger prompt is
+                        refused with `413`.
                       minimum: 0
                       nullable: true
                       type: integer

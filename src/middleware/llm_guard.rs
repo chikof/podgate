@@ -71,8 +71,8 @@ pub(super) struct Config {
     /// 1 to 10000 (default 2000), and never more than `REQUEST_TIMEOUT_SECS`.
     #[serde(default)]
     timeout_ms: Option<u32>,
-    /// The most bytes of prompt that are held and judged (default and most 65536); a larger
-    /// prompt is refused with `413`.
+    /// The most bytes of prompt that are held (default and most 65536); a larger prompt is
+    /// refused with `413`.
     #[serde(default)]
     max_prompt_bytes: Option<usize>,
     /// The most bytes of answer that are held and judged (default 262144, at most 1048576); a

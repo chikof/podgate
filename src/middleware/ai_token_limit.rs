@@ -117,10 +117,10 @@ pub(super) struct Config {
     on_store_error: Option<Mode>,
     #[serde(default)]
     store_timeout_ms: Option<u16>,
-    /// The most bytes of prompt that are held and judged (default and most 65536); a larger
-    /// prompt is refused with `413`.
+    /// The most bytes of prompt that are held (default and most 65536); a larger prompt is
+    /// refused with `413`.
     #[serde(default)]
-    max_prompt_bytes: Option<u32>,
+    max_prompt_bytes: Option<usize>,
 }
 
 /// One compiled window and its counter.
@@ -631,12 +631,15 @@ impl Kind for AiTokenLimit {
                 "`store_timeout_ms` must be 1 to {MAX_TIMEOUT_MS}"
             )));
         }
-        let max_prompt_bytes = config.max_prompt_bytes.unwrap_or(MAX_PROMPT_BYTES);
-        if !(1..=MAX_PROMPT_BYTES).contains(&max_prompt_bytes) {
+        let max_prompt_bytes = config
+            .max_prompt_bytes
+            .map_or(Some(MAX_PROMPT_BYTES), |bytes| u32::try_from(bytes).ok())
+            .filter(|bytes| (1..=MAX_PROMPT_BYTES).contains(bytes));
+        let Some(max_prompt_bytes) = max_prompt_bytes else {
             return Err(invalid(format!(
                 "`max_prompt_bytes` must be 1 to {MAX_PROMPT_BYTES}: Pingora hands a body read ahead of the upstream request over through a 64 KiB replay buffer"
             )));
-        }
+        };
         let keying = Keying::compile(config.source, "ai_token_limit")?;
         let timeout = config
             .store_timeout_ms
