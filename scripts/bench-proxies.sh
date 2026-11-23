@@ -264,6 +264,11 @@ ticks() {
   [ -r "/proc/$1/stat" ] || die "process $1 ($(cat "/proc/$1/comm" 2>/dev/null)) vanished during a run"
   awk '{ print $14 + $15 }' "/proc/$1/stat"
 }
+# User and system ticks of a process ("utime stime"): the split of what `ticks` adds up.
+user_system_ticks() {
+  [ -r "/proc/$1/stat" ] || die "process $1 ($(cat "/proc/$1/comm" 2>/dev/null)) vanished during a run"
+  awk '{ print $14, $15 }' "/proc/$1/stat"
+}
 # Per-thread counters of a process, one line per thread: tid, name, CPU ticks, minor faults, voluntary and involuntary context switches.
 thread_ticks() {
   local t
@@ -460,8 +465,10 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
   # Steady-state window: skip the first and last 2 seconds of the run.
   sleep 2
   local threads0="" threads1="" w0 w1 p0=0 p1=0 b0 b1 o0 o1 cpu_p0 cpu_p1 cpu_l0 cpu_l1 cpu_all0 cpu_all1 split0 split1
+  local pu0=0 ps0=0 pu1=0 ps1=0
   w0=$(date +%s.%N)
   [ -z "$pid_p" ] || p0=$(ticks "$pid_p")
+  [ -z "$pid_p" ] || read -r pu0 ps0 < <(user_system_ticks "$pid_p")
   [ -z "$pid_p" ] || threads0=$(thread_ticks "$pid_p")
   b0=$(ticks "${PID[direct]}")
   o0=$(ticks "$oha_pid")
@@ -472,6 +479,7 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
   sleep $((DURATION - 4))
   w1=$(date +%s.%N)
   [ -z "$pid_p" ] || p1=$(ticks "$pid_p")
+  [ -z "$pid_p" ] || read -r pu1 ps1 < <(user_system_ticks "$pid_p")
   [ -z "$pid_p" ] || threads1=$(thread_ticks "$pid_p")
   b1=$(ticks "${PID[direct]}")
   o1=$(ticks "$oha_pid")
@@ -494,6 +502,7 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
     --argjson peak_kb "$peak_kb" --argjson hz "$CLK_TCK" \
     --argjson w "$(awk -v a="$w0" -v b="$w1" 'BEGIN { printf "%.3f", b - a }')" \
     --argjson p "$((p1 - p0))" --argjson b "$((b1 - b0))" --argjson o "$((o1 - o0))" \
+    --argjson pu "$((pu1 - pu0))" --argjson ps "$((ps1 - ps0))" \
     --argjson cpu_p "$((cpu_p1 - cpu_p0))" --argjson cpu_l "$((cpu_l1 - cpu_l0))" \
     --arg threads0 "$threads0" --arg threads1 "$threads1" \
     --arg split0 "$split0" --arg split1 "$split1" \
@@ -516,6 +525,9 @@ measure() { # scenario proxy run -> appends one JSON line to $OUT/runs.jsonl
         backend_requests: ($s1[1] - $s0[1]), backend_conns: ($s1[0] - $s0[0] - 1),
         proxy_cores: ($p / $hz / $w), oha_cores: ($o / $hz / $w), backend_cores: ($b / $hz / $w),
         cpu_s_per_100k: (if $p > 0 then ($p / $hz) / ($o_.summary.requestsPerSec * $w) * 100000 else null end),
+        proxy_user_cores: ($pu / $hz / $w), proxy_system_cores: ($ps / $hz / $w),
+        cpu_user_s_per_100k: (if $p > 0 then ($pu / $hz) / ($o_.summary.requestsPerSec * $w) * 100000 else null end),
+        cpu_system_s_per_100k: (if $p > 0 then ($ps / $hz) / ($o_.summary.requestsPerSec * $w) * 100000 else null end),
         peak_rss_mb: ($peak_kb / 1024),
         other_cores_before: ($busy | tonumber), load1: ($load1 | tonumber),
         other_cores_on_proxy_cpus: (($cpu_p - $p) / $hz / $w),
