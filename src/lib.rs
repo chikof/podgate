@@ -100,7 +100,7 @@ use pingora::services::background::background_service;
 use tracing_subscriber::EnvFilter;
 
 pub use acme::Acme;
-pub use admin::{AdminService, AppState};
+pub use admin::{AdminService, AppState, ReadService};
 pub use budget::Budgets;
 pub use cache::Cache;
 pub use canary::CanaryService;
@@ -350,6 +350,20 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         tracer: tracer.clone(),
         cache: cache.clone(),
     };
+    let read_listener = config
+        .admin_read_socket
+        .as_deref()
+        .map(|path| {
+            if config.admin_read_socket_mode & 0o007 != 0 {
+                tracing::warn!(
+                    mode = format_args!("{:04o}", config.admin_read_socket_mode),
+                    "ADMIN_READ_SOCKET_MODE gives other users access to the read socket"
+                );
+            }
+            admin::bind_with_mode(path, config.admin_read_socket_mode)
+                .with_context(|| format!("cannot bind ADMIN_READ_SOCKET {}", path.display()))
+        })
+        .transpose()?;
     if let Some(addr) = config.metrics_addr {
         let listener = observe::metrics::bind(addr)
             .with_context(|| format!("cannot bind METRICS_ADDR {addr}"))?;
@@ -439,6 +453,12 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             ),
         ),
     ));
+    if let Some(listener) = read_listener {
+        server.add_service(background_service(
+            "admin read socket",
+            ReadService::new(listener, admin_state.clone(), timeout),
+        ));
+    }
     server.add_service(background_service(
         "admin API",
         AdminService::new(admin_listener, admin_state, timeout),

@@ -15,6 +15,7 @@ mod health;
 mod metrics;
 pub(crate) mod overview;
 mod plan;
+mod read;
 pub(crate) mod schema;
 mod snapshot;
 mod validate;
@@ -39,6 +40,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+pub use self::read::ReadService;
 use self::writer::Writer;
 use crate::budget::Budgets;
 use crate::cache::Cache;
@@ -321,7 +323,7 @@ async fn not_found() -> AppError {
 ///    and an empty body. 408 is used for every timeout, so clients can tell it from the 503
 ///    readiness answer.
 pub fn router(state: AppState, timeout: Duration) -> Router {
-    Router::new()
+    let router = Router::new()
         .merge(health::routes())
         .merge(metrics::routes())
         .merge(snapshot::routes())
@@ -337,7 +339,13 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(cache::routes())
         .layer(events::poll_cap(timeout))
         .fallback(not_found)
-        .with_state(state)
+        .with_state(state);
+    layered(router, timeout)
+}
+
+/// The timeout, request id and trace layers every admin-side socket shares.
+fn layered(router: Router, timeout: Duration) -> Router {
+    router
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             timeout,
@@ -363,13 +371,22 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
 
 /// Binds the admin socket at `path` with mode `0600`, replacing a stale socket file.
 ///
+/// # Errors
+///
+/// As [`bind_with_mode`].
+pub fn bind(path: &Path) -> io::Result<StdUnixListener> {
+    bind_with_mode(path, 0o600)
+}
+
+/// Binds a unix socket at `path` with permission bits `mode`, replacing a stale socket file.
+///
 /// The socket is created under a temporary name, restricted, then renamed into place, so it is
 /// never reachable with looser permissions.
 ///
 /// # Errors
 ///
 /// Fails when the directory cannot be created or the socket cannot be bound or moved.
-pub fn bind(path: &Path) -> io::Result<StdUnixListener> {
+pub fn bind_with_mode(path: &Path, mode: u32) -> io::Result<StdUnixListener> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
@@ -382,7 +399,7 @@ pub fn bind(path: &Path) -> io::Result<StdUnixListener> {
         _ => {}
     }
     let listener = StdUnixListener::bind(staging)?;
-    std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(staging, std::fs::Permissions::from_mode(mode))?;
     listener.set_nonblocking(true)?;
     std::fs::rename(staging, path)?;
     Ok(listener)

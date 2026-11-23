@@ -78,6 +78,8 @@ const _: () =
 /// | `PROXY_ADDR` | `127.0.0.1:8080` | Shorthand for the entry point `web=<addr>/http`. |
 /// | `PROXY_TLS_ADDR` | unset | Shorthand for the entry point `websecure=<addr>/https`; unset means no TLS listener. |
 /// | `ADMIN_SOCKET` | `/run/podgate/admin.sock` | Unix socket of the admin API. |
+/// | `ADMIN_READ_SOCKET` | unset | Path of a second, read-only unix socket that serves `GET /v1/overview?section=summary` and nothing else. Unset: no socket, no file, no task. The same path as `ADMIN_SOCKET` is an error. Reference: `docs/ref/admin-tools.md`. |
+/// | `ADMIN_READ_SOCKET_MODE` | `0660` | Octal mode of the read socket, `0600` to `0666`; an execute bit or a non-octal value is an error. Only valid with `ADMIN_READ_SOCKET`. |
 /// | `REQUEST_TIMEOUT_SECS` | `30` | Admin request and upstream I/O limit, 1..=3600. |
 /// | `LOG_FORMAT` | `pretty` | `pretty` or `json`. |
 /// | `NODE_NAME` | unset | Name of this node; the node whose name equals the snapshot's `acme.issuer_node` orders certificates. |
@@ -142,6 +144,10 @@ pub struct Config {
     pub entry_points: Vec<EntryPoint>,
     /// Path of the admin API's unix socket.
     pub admin_socket: PathBuf,
+    /// Path of the read-only socket (`ADMIN_READ_SOCKET`). Absent: no such socket.
+    pub admin_read_socket: Option<PathBuf>,
+    /// Permission bits of the read socket (`ADMIN_READ_SOCKET_MODE`), `0o600..=0o666`.
+    pub admin_read_socket_mode: u32,
     /// Admin requests running longer than this many seconds get `408 Request Timeout`;
     /// connecting to, reading from and writing to an upstream each give up after it too.
     pub request_timeout_secs: NonZeroU16,
@@ -248,6 +254,8 @@ impl Default for Config {
         Self {
             entry_points: vec![EntryPoint::web(SocketAddr::from(([127, 0, 0, 1], 8080)))],
             admin_socket: PathBuf::from("/run/podgate/admin.sock"),
+            admin_read_socket: None,
+            admin_read_socket_mode: 0o660,
             request_timeout_secs: NonZeroU16::MIN.saturating_add(29),
             log_format: LogFormat::Pretty,
             wasm_max_concurrent: default_workers(),
@@ -330,6 +338,38 @@ fn check_dashboard(config: &Config) -> Result<(), ConfigError> {
         (None, None) if !config.dashboard_hosts.is_empty() => Err(ConfigError {
             var: "DASHBOARD_HOSTS",
             reason: "is set but DASHBOARD_ADDR is not; the dashboard is off without an address"
+                .into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn parse_read_socket_mode(raw: &str) -> Result<u32, ConfigError> {
+    let bad = |reason: String| ConfigError {
+        var: "ADMIN_READ_SOCKET_MODE",
+        reason: reason.into(),
+    };
+    let mode = u32::from_str_radix(raw.trim(), 8)
+        .map_err(|err| bad(format!("{raw:?} is not an octal mode like 0660 ({err})")))?;
+    if !(0o600..=0o666).contains(&mode) || mode & 0o111 != 0 {
+        return Err(bad(format!(
+            "{raw:?} is not a mode from 0600 to 0666 without an execute bit"
+        )));
+    }
+    Ok(mode)
+}
+
+/// The read socket is a second way into the daemon, so a path that would replace the admin socket
+/// and a mode for a socket that is off are mistakes worth stopping for.
+fn check_read_socket(config: &Config, mode_set: bool) -> Result<(), ConfigError> {
+    match &config.admin_read_socket {
+        Some(path) if *path == config.admin_socket => Err(ConfigError {
+            var: "ADMIN_READ_SOCKET",
+            reason: "is the same path as ADMIN_SOCKET; the read socket needs its own path".into(),
+        }),
+        None if mode_set => Err(ConfigError {
+            var: "ADMIN_READ_SOCKET_MODE",
+            reason: "is set but ADMIN_READ_SOCKET is not; the read socket is off without a path"
                 .into(),
         }),
         _ => Ok(()),
@@ -760,6 +800,12 @@ impl Config {
                 })?;
         }
         check_dashboard(&config)?;
+        config.admin_read_socket = non_empty("ADMIN_READ_SOCKET")?.map(PathBuf::from);
+        let read_mode = non_empty("ADMIN_READ_SOCKET_MODE")?;
+        if let Some(raw) = &read_mode {
+            config.admin_read_socket_mode = parse_read_socket_mode(raw)?;
+        }
+        check_read_socket(&config, read_mode.is_some())?;
         if let Some(raw) = non_empty("TLS_MIN_VERSION")? {
             config.tls_min_version = match raw.as_str() {
                 "1.2" => TlsVersion::V1_2,
@@ -827,6 +873,8 @@ mod test {
             ("PROXY_ADDR", "0.0.0.0:9000"),
             ("PROXY_TLS_ADDR", "0.0.0.0:9443"),
             ("ADMIN_SOCKET", "/tmp/admin.sock"),
+            ("ADMIN_READ_SOCKET", "/tmp/read.sock"),
+            ("ADMIN_READ_SOCKET_MODE", "0640"),
             ("REQUEST_TIMEOUT_SECS", "5"),
             ("LOG_FORMAT", "JSON"),
             ("WASM_MAX_CONCURRENT", "2"),
@@ -885,6 +933,8 @@ mod test {
                     EntryPoint::websecure(SocketAddr::from(([0, 0, 0, 0], 9443))),
                 ],
                 admin_socket: PathBuf::from("/tmp/admin.sock"),
+                admin_read_socket: Some(PathBuf::from("/tmp/read.sock")),
+                admin_read_socket_mode: 0o640,
                 request_timeout_secs: NonZeroU16::new(5).expect("5 is not zero"),
                 log_format: LogFormat::Json,
                 wasm_max_concurrent: NonZeroUsize::new(2).expect("2 is not zero"),
@@ -1010,6 +1060,9 @@ mod test {
             ("DASHBOARD_AUTH_FILE", "/etc/podgate/dashboard.htpasswd"),
             ("DASHBOARD_HOSTS", "a:80"),
             ("DASHBOARD_HOSTS", "dash.example"),
+            ("ADMIN_READ_SOCKET", " "),
+            ("ADMIN_READ_SOCKET_MODE", " "),
+            ("ADMIN_READ_SOCKET_MODE", "0660"),
             ("OTEL_EXPORTER_OTLP_ENDPOINT", "nope"),
             ("OTEL_MAX_SPANS_PER_SEC", "0"),
         ] {
@@ -1020,6 +1073,44 @@ mod test {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn read_socket_settings() {
+        let off = config(&[]).expect("defaults parse");
+        assert_eq!(off.admin_read_socket, None);
+        assert_eq!(off.admin_read_socket_mode, 0o660);
+        let on = config(&[("ADMIN_READ_SOCKET", "/tmp/read.sock")]).expect("parses");
+        assert_eq!(on.admin_read_socket, Some(PathBuf::from("/tmp/read.sock")));
+        assert_eq!(on.admin_read_socket_mode, 0o660);
+        for (raw, want) in [("0600", 0o600), ("640", 0o640), ("0666", 0o666)] {
+            let set = config(&[
+                ("ADMIN_READ_SOCKET", "/tmp/read.sock"),
+                ("ADMIN_READ_SOCKET_MODE", raw),
+            ])
+            .expect("parses");
+            assert_eq!(set.admin_read_socket_mode, want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn read_socket_refusals_name_the_variable() {
+        for mode in ["0777", "0610", "0601", "0500", "0000", "rw", "0680"] {
+            let err = config(&[
+                ("ADMIN_READ_SOCKET", "/tmp/read.sock"),
+                ("ADMIN_READ_SOCKET_MODE", mode),
+            ])
+            .expect_err("mode must be rejected");
+            assert_eq!(err.var, "ADMIN_READ_SOCKET_MODE", "{mode}");
+        }
+        let same = config(&[
+            ("ADMIN_SOCKET", "/tmp/a.sock"),
+            ("ADMIN_READ_SOCKET", "/tmp/a.sock"),
+        ])
+        .expect_err("same path");
+        assert_eq!(same.var, "ADMIN_READ_SOCKET");
+        let orphan = config(&[("ADMIN_READ_SOCKET_MODE", "0600")]).expect_err("orphan mode");
+        assert_eq!(orphan.var, "ADMIN_READ_SOCKET_MODE");
     }
 
     #[test]
