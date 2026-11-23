@@ -2828,6 +2828,76 @@
       "title": "Config",
       "type": "object"
     },
+    "middleware.mcp_gateway": {
+      "additionalProperties": false,
+      "description": "The configuration of an `mcp_gateway` middleware.",
+      "properties": {
+        "allowed_origins": {
+          "default": [],
+          "description": "Origins (`scheme://host[:port]`) that may call the endpoint from a browser besides its own\nhost. A request with any other `Origin` is `403`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "servers": {
+          "description": "The registered servers: 1 to 16, each with a unique name.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One registered server.",
+            "properties": {
+              "address": {
+                "description": "The server's MCP endpoint: an absolute `http://` or `https://` URL whose host is an IP\naddress or a name.",
+                "type": "string"
+              },
+              "max_concurrent": {
+                "default": null,
+                "description": "The most exchanges with the server at once, 1 to 1024. Default 32.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The name clients see before the tool: 1 to 32 characters of `a-z`, `0-9` and `-`,\nstarting and ending with a letter or digit.",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "default": null,
+                "description": "The time one exchange with the server may take, 100 to 600000. Default 30000.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "mcp_gateway"
+        }
+      },
+      "required": [
+        "servers",
+        "name",
+        "type"
+      ],
+      "title": "Config",
+      "type": "object"
+    },
     "middleware.oidc": {
       "additionalProperties": false,
       "description": "The configuration of an `oidc` middleware.",
@@ -5578,6 +5648,7 @@
       "in_flight_req": "#/$defs/middleware.in_flight_req",
       "ip_allow_list": "#/$defs/middleware.ip_allow_list",
       "jwt_auth": "#/$defs/middleware.jwt_auth",
+      "mcp_gateway": "#/$defs/middleware.mcp_gateway",
       "oidc": "#/$defs/middleware.oidc",
       "opa": "#/$defs/middleware.opa",
       "pass_tls_client_cert": "#/$defs/middleware.pass_tls_client_cert",
