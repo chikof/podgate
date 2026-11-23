@@ -5,7 +5,12 @@
 
 use prost::Message;
 
+use super::super::otlp::common;
 use super::span::{Kind, Span, Value};
+
+pub use super::super::otlp::common::{
+    AnyValue, ArrayValue, InstrumentationScope, KeyValue, Resource, any_value,
+};
 
 /// `ExportTraceServiceRequest`: the body of a `POST /v1/traces`.
 #[derive(Clone, PartialEq, Message)]
@@ -45,14 +50,6 @@ pub struct ResourceSpans {
     pub scope_spans: Vec<ScopeSpans>,
 }
 
-/// The producer of telemetry.
-#[derive(Clone, PartialEq, Message)]
-pub struct Resource {
-    /// `service.name` and friends.
-    #[prost(message, repeated, tag = "1")]
-    pub attributes: Vec<KeyValue>,
-}
-
 /// Spans of one instrumentation scope.
 #[derive(Clone, PartialEq, Message)]
 pub struct ScopeSpans {
@@ -62,17 +59,6 @@ pub struct ScopeSpans {
     /// The spans.
     #[prost(message, repeated, tag = "2")]
     pub spans: Vec<OtlpSpan>,
-}
-
-/// The library that made the spans.
-#[derive(Clone, PartialEq, Message)]
-pub struct InstrumentationScope {
-    /// Library name.
-    #[prost(string, tag = "1")]
-    pub name: String,
-    /// Library version.
-    #[prost(string, tag = "2")]
-    pub version: String,
 }
 
 /// One span.
@@ -118,75 +104,18 @@ pub struct Status {
     pub code: i32,
 }
 
-/// An attribute.
-#[derive(Clone, PartialEq, Message)]
-pub struct KeyValue {
-    /// Attribute name.
-    #[prost(string, tag = "1")]
-    pub key: String,
-    /// Attribute value.
-    #[prost(message, optional, tag = "2")]
-    pub value: Option<AnyValue>,
-}
-
-/// An attribute value.
-#[derive(Clone, PartialEq, Message)]
-pub struct AnyValue {
-    /// Which kind it is.
-    #[prost(oneof = "any_value::Value", tags = "1, 3, 5")]
-    pub value: Option<any_value::Value>,
-}
-
-/// The kinds of [`AnyValue`].
-pub mod any_value {
-    use prost::Oneof;
-
-    use super::ArrayValue;
-
-    /// A string, an integer or a list.
-    #[derive(Clone, PartialEq, Oneof)]
-    pub enum Value {
-        /// A string.
-        #[prost(string, tag = "1")]
-        String(String),
-        /// An integer.
-        #[prost(int64, tag = "3")]
-        Int(i64),
-        /// A list.
-        #[prost(message, tag = "5")]
-        Array(ArrayValue),
-    }
-}
-
-/// A list of values.
-#[derive(Clone, PartialEq, Message)]
-pub struct ArrayValue {
-    /// The elements.
-    #[prost(message, repeated, tag = "1")]
-    pub values: Vec<AnyValue>,
-}
-
-fn text(value: &str) -> AnyValue {
-    AnyValue {
-        value: Some(any_value::Value::String(value.to_owned())),
-    }
-}
-
 fn attribute(key: &str, value: &Value) -> KeyValue {
-    let value = match value {
-        Value::Str(value) => text(value),
-        Value::Int(value) => AnyValue {
-            value: Some(any_value::Value::Int(*value)),
+    match value {
+        Value::Str(value) => KeyValue::text(key, value),
+        Value::Int(value) => KeyValue::int(key, *value),
+        Value::Strs(values) => KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::Array(ArrayValue {
+                    values: values.iter().map(|value| AnyValue::string(value)).collect(),
+                })),
+            }),
         },
-        Value::Strs(values) => AnyValue {
-            value: Some(any_value::Value::Array(ArrayValue {
-                values: values.iter().map(|value| text(value)).collect(),
-            })),
-        },
-    };
-    KeyValue {
-        key: key.to_owned(),
-        value: Some(value),
     }
 }
 
@@ -220,14 +149,9 @@ fn convert(span: &Span) -> OtlpSpan {
 pub(super) fn encode(service_name: &str, spans: &[Span]) -> Vec<u8> {
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
-            resource: Some(Resource {
-                attributes: vec![attribute("service.name", &Value::Str(service_name.into()))],
-            }),
+            resource: Some(common::resource(service_name)),
             scope_spans: vec![ScopeSpans {
-                scope: Some(InstrumentationScope {
-                    name: "podgate".to_owned(),
-                    version: env!("CARGO_PKG_VERSION").to_owned(),
-                }),
+                scope: Some(common::scope()),
                 spans: spans.iter().map(convert).collect(),
             }],
         }],

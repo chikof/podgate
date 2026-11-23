@@ -1,8 +1,8 @@
 # Tracing over OTLP/gRPC
 
-Change 0112 adds a second wire to the span exporter of change 0067 (`docs/ref/tracing.md`): the unary `opentelemetry.proto.collector.trace.v1.TraceService/Export` call to a collector's gRPC port (4317 by default). The spans, the sampling, the per-node and per-tenant rate caps, the queue of 2048, the batch of 512 and the retry loop are 0067's and are shared; only the call that carries one encoded batch differs. Code: `src/observe/tracing/grpc.rs` (the channel), `src/observe/tracing/export.rs` (settings, the shared loop).
+Change 0112 adds a second wire to the span exporter of change 0067 (`docs/ref/tracing.md`): the unary `opentelemetry.proto.collector.trace.v1.TraceService/Export` call to a collector's gRPC port (4317 by default). The spans, the sampling, the per-node and per-tenant rate caps, the queue of 2048, the batch of 512 and the retry loop are 0067's and are shared; only the call that carries one encoded batch differs. Code: `src/observe/otlp/grpc.rs` (the channel), `src/observe/otlp/{collector,transport,batch}.rs` (the settings, the retry loop and the batch loop, shared by every signal since change 0124), `src/observe/tracing/export.rs` (`OTEL_MAX_SPANS_PER_SEC` and the span queue).
 
-The client is `h2` over `tokio-rustls`, with the OTLP messages already in `src/observe/tracing/otlp.rs`. No `tonic` and no new gRPC framework: one unary call needs a length-prefixed message, a few headers and trailers, which `h2` carries.
+The client is `h2` over `tokio-rustls`, with the OTLP messages already in `src/observe/tracing/otlp.rs` and `src/observe/otlp/common.rs`. No `tonic` and no new gRPC framework: one unary call needs a length-prefixed message, a few headers and trailers, which `h2` carries.
 
 ## Process configuration
 

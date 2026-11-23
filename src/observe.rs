@@ -4,6 +4,7 @@
 
 pub mod access_log;
 pub mod metrics;
+pub mod otlp;
 pub mod tracing;
 
 use crate::compile::Invalid;

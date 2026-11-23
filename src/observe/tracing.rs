@@ -12,8 +12,9 @@
 //!   when sampled, the request data its spans need, copied and length-capped at the start.
 //! - `tracer`: the handle the request path and the exporter share: the per-node rate cap, a
 //!   bounded queue that drops new spans when full, the counters.
-//! - `otlp` and `export`: the protobuf messages and the background service that batches the
-//!   queue and sends it over HTTP or, in `grpc`, gRPC; never on the request path.
+//! - `otlp` and `export`: the protobuf messages, the settings and the queue as a feed of the
+//!   shared transport (`crate::observe::otlp`), which batches it and sends it over HTTP or, in
+//!   `grpc`, gRPC; never on the request path.
 //!
 //! A request is traced when its router's effective [`Policy`] exists. The verdict: with
 //! `parent_based` (the default) a valid incoming `traceparent` decides by its sampled flag, but only
@@ -26,7 +27,6 @@
 
 mod context;
 mod export;
-mod grpc;
 mod otlp;
 mod policy;
 mod span;
@@ -48,7 +48,8 @@ use crate::route;
 use context::{SpanId, TraceId};
 use span::{Kind, Span, Value};
 
-pub use export::{ExportConfig, Protocol, TraceService};
+pub use crate::observe::otlp::Protocol;
+pub use export::{ExportConfig, TraceService};
 pub use policy::{Policy, compile, effective, router_override};
 pub use tracer::{DEFAULT_MAX_SPANS_PER_SEC, QUEUE_CAPACITY, Tracer};
 

@@ -983,7 +983,7 @@ mod test {
             ),
         ])
         .expect("parses");
-        assert_eq!(parsed.otel.headers.len(), 2);
+        assert_eq!(parsed.otel.collector.headers.len(), 2);
         for shown in [format!("{parsed:?}"), format!("{parsed:#?}")] {
             assert!(
                 !shown.contains("s3cret"),

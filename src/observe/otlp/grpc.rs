@@ -1,11 +1,11 @@
-//! The OTLP/gRPC wire: one unary `TraceService/Export` call on an HTTP/2 connection built on
+//! The OTLP/gRPC wire: one unary `<Signal>Service/Export` call on an HTTP/2 connection built on
 //! `h2`, so the exporter needs no gRPC framework.
 //!
-//! Only the wire differs from the OTLP/HTTP exporter (`export.rs`): the batch, the queue, the
+//! Only the wire differs from the OTLP/HTTP exporter (`transport.rs`): the batch, the queue, the
 //! caps and the retry loop are shared. [`Channel::export`] sends one encoded
-//! `ExportTraceServiceRequest` and maps the outcome onto [`Failure`]:
+//! `ExportXServiceRequest` and maps the outcome onto [`Failure`]:
 //!
-//! - `OK`: success; a partial success answer reports how many spans the collector refused.
+//! - `OK`: success; a partial success answer reports how many items the collector refused.
 //! - `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `DEADLINE_EXCEEDED`, a connection that fails or
 //!   breaks, an HTTP `429`, `502`, `503` or `504` from something in between: retry, after the
 //!   delay of the server's `google.rpc.RetryInfo` when it gave one.
@@ -34,12 +34,10 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
-use super::export::{ExportConfig, Failure, bad, roots};
-use super::otlp::ExportTraceServiceResponse;
+use super::collector::{Collector, bad};
+use super::common::PartialSuccessResponse;
+use super::transport::{Failure, roots};
 use crate::config::ConfigError;
-
-/// The method every export calls.
-const EXPORT_PATH: &str = "/opentelemetry.proto.collector.trace.v1.TraceService/Export";
 
 /// The most a collector's answer may weigh; anything past it is not read.
 const RESPONSE_MAX: usize = 1024 * 1024;
@@ -219,7 +217,7 @@ impl std::fmt::Debug for Channel {
     }
 }
 
-fn client_config(config: &ExportConfig) -> Result<TlsConnector, ConfigError> {
+fn client_config(config: &Collector) -> Result<TlsConnector, ConfigError> {
     let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -264,12 +262,17 @@ fn client_config(config: &ExportConfig) -> Result<TlsConnector, ConfigError> {
 }
 
 impl Channel {
-    /// The channel for `config`, whose endpoint is `http://` or `https://` without a path.
+    /// The channel for `config`, whose endpoint is `http://` or `https://` without a path, calling
+    /// the method `path` (`/opentelemetry.proto.collector.<signal>.v1.<Signal>Service/Export`).
     ///
     /// # Errors
     ///
     /// A [`ConfigError`] when a certificate or key cannot be loaded.
-    pub(super) fn new(config: &ExportConfig, endpoint: &Uri) -> Result<Self, ConfigError> {
+    pub(super) fn new(
+        config: &Collector,
+        endpoint: &Uri,
+        path: &'static str,
+    ) -> Result<Self, ConfigError> {
         let https = endpoint.scheme_str() == Some("https");
         let host = endpoint
             .host()
@@ -287,7 +290,7 @@ impl Channel {
         let uri = Uri::builder()
             .scheme(if https { "https" } else { "http" })
             .authority(authority)
-            .path_and_query(EXPORT_PATH)
+            .path_and_query(path)
             .build()
             .map_err(|err| bad("OTEL_EXPORTER_OTLP_ENDPOINT", err.to_string()))?;
         let tls = if https {
@@ -382,7 +385,7 @@ impl Channel {
         Ok(request)
     }
 
-    /// Sends one encoded `ExportTraceServiceRequest`. `Ok` is the number of spans the collector
+    /// Sends one encoded `ExportXServiceRequest`. `Ok` is the number of items the collector
     /// reported refusing.
     ///
     /// # Errors
@@ -468,9 +471,9 @@ impl Channel {
         };
         match code {
             0 => Ok(first_message(&received)
-                .and_then(|message| ExportTraceServiceResponse::decode(message).ok())
+                .and_then(|message| PartialSuccessResponse::decode(message).ok())
                 .and_then(|response| response.partial_success)
-                .map_or(0, |partial| partial.rejected_spans)),
+                .map_or(0, |partial| partial.rejected)),
             code if RETRYABLE.contains(&code) => Err(Failure::Retry(
                 format!("the collector answered {}", status_name(code)),
                 status.get("grpc-status-details-bin").and_then(retry_delay),
