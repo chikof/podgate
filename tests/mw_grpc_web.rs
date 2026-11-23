@@ -1281,6 +1281,7 @@ fn compile_stage() -> GrpcWeb {
         &mut CompileCx {
             app: &app,
             engine: &mut engine,
+            portal: None,
         },
     )
     .expect("compiles")

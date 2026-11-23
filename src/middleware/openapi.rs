@@ -973,6 +973,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
         };
@@ -1018,6 +1019,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
         };

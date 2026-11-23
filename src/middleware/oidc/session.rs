@@ -282,6 +282,57 @@ mod test {
         assert!(open(900, 7, 10_000).is_none(), "issued in the future");
     }
 
+    /// The claims the `oidc` stage hands to later stages (`opa`, the portal) are the ones of a
+    /// session that opened, so a cookie the client changed or made up yields none.
+    #[test]
+    fn oidc_claims_from_verified_session_only() {
+        let key = sealer(SESSION_LABEL, "a", "login");
+        let session = Session::new(7, 1000, 2000, claims(&json!({"tenant": "acme"})));
+        let (value, _) = session.seal(&key, "h").expect("sealed");
+        let open = |value: &str, key: &Sealer, host: &str, now: u64, policy: u64| {
+            Session::open(key, host, value, policy, now, 10_000)
+        };
+        let claims = open(&value, &key, "h", 1500, 7).expect("opens");
+        assert_eq!(claims.claims()["tenant"], "acme");
+
+        // A byte changed anywhere in the cookie.
+        let bytes = URL_SAFE_NO_PAD.decode(&value).expect("base64");
+        for at in [0, NONCE_LEN, bytes.len() / 2, bytes.len() - 1] {
+            let mut changed = bytes.clone();
+            changed[at] ^= 0x20;
+            assert!(
+                open(&URL_SAFE_NO_PAD.encode(&changed), &key, "h", 1500, 7).is_none(),
+                "{at}"
+            );
+        }
+        // A session sealed under another key, another middleware, another app or for another host.
+        for other in [
+            sealer(SESSION_LABEL, "b", "login"),
+            sealer(SESSION_LABEL, "a", "other"),
+            sealer(FLOW_LABEL, "a", "login"),
+        ] {
+            assert!(open(&value, &other, "h", 1500, 7).is_none());
+        }
+        assert!(open(&value, &key, "other-host", 1500, 7).is_none());
+        // One made up by the client from a plain claims object, whatever it looks like.
+        let plain =
+            serde_json::to_vec(&Session::new(7, 1000, 2000, claims_of_victim())).expect("json");
+        for forged in [
+            URL_SAFE_NO_PAD.encode(&plain),
+            String::from_utf8_lossy(&plain).into_owned(),
+            "x".repeat(NONCE_LEN + TAG_LEN + 8),
+        ] {
+            assert!(open(&forged, &key, "h", 1500, 7).is_none(), "{forged}");
+        }
+        // Another declaration of the middleware, and an expired session.
+        assert!(open(&value, &key, "h", 1500, 8).is_none());
+        assert!(open(&value, &key, "h", 2000, 7).is_none());
+    }
+
+    fn claims_of_victim() -> Map<String, Value> {
+        claims(&json!({"tenant": "globex"}))
+    }
+
     #[test]
     fn a_session_without_a_string_sub_is_refused() {
         let key = sealer(SESSION_LABEL, "a", "login");

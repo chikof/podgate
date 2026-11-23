@@ -1204,10 +1204,13 @@ impl TableHandle {
     /// A handle that compiles snapshots for a process with the entry points of `context`.
     #[must_use]
     pub fn with_context(context: CompileContext) -> Self {
-        Self {
+        let handle = Self {
             context: Arc::new(context),
             ..Self::default()
-        }
+        };
+        // The `portal` stages of this handle's tables read its live table, weakly.
+        handle.context.portal().bind(&handle.live);
+        handle
     }
 
     /// Reports and settles metrics through `metrics`, the registry [`crate::observe::metrics`]

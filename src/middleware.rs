@@ -68,6 +68,7 @@ pub mod openapi;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod plugin;
+pub mod portal;
 pub mod quota;
 pub mod rate_limit;
 pub mod redirect;
@@ -98,6 +99,9 @@ pub struct CompileCx<'a> {
     pub app: &'a App,
     /// The WASM engine shared by every module of this snapshot compile.
     pub engine: &'a mut engine::Compiler,
+    /// The operator's grant for this app, when `PORTAL_APPS` lists it: what the `portal` kind
+    /// needs to compile, and no other kind reads.
+    pub portal: Option<portal::pin::Grant<'a>>,
 }
 
 /// When the failed-request recorder and the mirrors copy a request body chunk.
@@ -642,6 +646,14 @@ pub trait Kind: Sized + fmt::Debug + Send + Sync + 'static {
         false
     }
 
+    /// How the stage verifies the claims it puts into [`RequestCx::claims`], for a kind that does:
+    /// the issuer it requires and where its keys come from. `None` means the stage fills no
+    /// claims. Every kind that sets `RequestCx::claims` must implement it: the developer portal
+    /// trusts those claims only when they come from the login the operator pinned.
+    fn login(&self) -> Option<portal::pin::Login> {
+        None
+    }
+
     /// What explain shows for this stage besides its type.
     fn describe(&self) -> Value {
         Value::Null
@@ -732,6 +744,14 @@ macro_rules! kinds {
             pub fn carries_identity(&self, name: &http::HeaderName) -> bool {
                 match self {
                     $( Self::$variant(kind) => $crate::middleware::Kind::carries_identity(kind, name), )*
+                }
+            }
+
+            /// How the stage verifies the login it hands to the stages after it, when it does.
+            #[must_use]
+            pub fn login(&self) -> Option<$crate::middleware::portal::pin::Login> {
+                match self {
+                    $( Self::$variant(kind) => $crate::middleware::Kind::login(kind), )*
                 }
             }
 
@@ -1126,6 +1146,8 @@ kinds! {
     "plugin" => Plugin(plugin::Plugin),
 
     "openapi" => Openapi(openapi::Openapi),
+
+    "portal" => Portal(portal::Portal),
 }
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built kind, whose
@@ -1211,6 +1233,8 @@ schemas! {
     "grpc_web" => grpc_web::Config,
 
     "openapi" => openapi::Config,
+
+    "portal" => portal::Config,
 }
 
 /// A compiled middleware and the name it was declared under.
@@ -1778,6 +1802,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
         }

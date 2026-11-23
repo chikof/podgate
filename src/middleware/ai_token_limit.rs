@@ -1226,6 +1226,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
         };
@@ -1259,6 +1260,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
             .err()
@@ -1306,6 +1308,7 @@ mod test {
             &mut CompileCx {
                 app: &app,
                 engine: &mut engine,
+                portal: None,
             },
         )
         .expect("compiles")
@@ -1347,6 +1350,7 @@ mod test {
                 &mut CompileCx {
                     app: &app,
                     engine: &mut engine,
+                    portal: None,
                 },
             )
             .expect("compiles")

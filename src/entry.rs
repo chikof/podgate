@@ -21,6 +21,7 @@ pub mod proxy_protocol;
 
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
+use std::sync::Arc;
 
 use pingora::http::RequestHeader;
 use pingora::proxy::Session;
@@ -283,6 +284,7 @@ pub struct CompileContext {
     spiffe: crate::spiffe::Spiffe,
     plugins: crate::middleware::plugin::Plugins,
     content_classifiers: crate::middleware::content_guard::Classifiers,
+    portal: Arc<crate::middleware::portal::pin::Grants>,
 }
 
 impl Default for CompileContext {
@@ -315,6 +317,7 @@ impl CompileContext {
             spiffe: crate::spiffe::Spiffe::default(),
             plugins: crate::middleware::plugin::Plugins::default(),
             content_classifiers: crate::middleware::content_guard::Classifiers::default(),
+            portal: Arc::default(),
         }
     }
 
@@ -505,6 +508,20 @@ impl CompileContext {
     #[must_use]
     pub fn content_classifiers(&self) -> &crate::middleware::content_guard::Classifiers {
         &self.content_classifiers
+    }
+
+    /// The apps that may declare a `portal` middleware, with the pin of each one's login
+    /// (`PORTAL_APPS`). Only the operator calls this; a snapshot cannot name an app into it.
+    #[must_use]
+    pub fn with_portal(mut self, apps: crate::middleware::portal::pin::Apps) -> Self {
+        self.portal = Arc::new(crate::middleware::portal::pin::Grants::new(apps));
+        self
+    }
+
+    /// The apps allowed a `portal` middleware, and the table those stages read.
+    #[must_use]
+    pub fn portal(&self) -> &crate::middleware::portal::pin::Grants {
+        &self.portal
     }
 
     /// Resolves servers named by host name from `resolver`'s answers. `run` installs the

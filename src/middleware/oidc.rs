@@ -59,6 +59,7 @@ use super::jwt_auth::claims::{Rules, header_text};
 use super::jwt_auth::jwks::{CHARGE, Cache, Demand, Fetch, FetchError, Flight, REFRESH_DEFAULT};
 use super::jwt_auth::verify::{Algorithm, Algorithms, Failure, KeySet, Token, verify};
 use super::jwt_auth::{Want, requirements, strip_cookie};
+use super::portal::pin::{Login, Source};
 use super::redirect::{self, Origin};
 use super::{CompileCx, Flow, Kind, RequestCx, Stage, forward_auth, state};
 use crate::budget::{Escaped, TenantBudget};
@@ -762,6 +763,10 @@ impl Oidc {
                     request.insert_header(header.clone(), value)?;
                 }
             }
+            // The claims of a session that opened: verified at login and sealed in the cookie, so
+            // nothing here came from a header or a field the client could change. Later stages
+            // (`opa`, `portal`) decide on them.
+            cx.claims = Some(session.claims().clone());
             // The upstream has no use for it, and it must not reach a log or a mirror there.
             strip_cookie(request, &self.0.cookie_name);
             state.authenticated = true;
@@ -1315,6 +1320,20 @@ impl Kind for Oidc {
         kinds
     }
 
+    /// The issuer this stage requires; its keys come from that issuer's discovery document. A
+    /// private `transport` (its CA and server name are part of where the keys come from) cannot
+    /// be pinned.
+    fn login(&self) -> Option<Login> {
+        Some(if self.0.transport_name.is_some() {
+            Login::Unpinnable
+        } else {
+            Login::Pinnable {
+                issuer: self.0.issuer.clone(),
+                source: Source::Discovery,
+            }
+        })
+    }
+
     /// The headers a claim is copied into: a mirror does not get them unless it is meant to carry
     /// credentials.
     fn carries_identity(&self, name: &HeaderName) -> bool {
@@ -1625,6 +1644,7 @@ mod test {
             &mut CompileCx {
                 app: &app,
                 engine: &mut compiler,
+                portal: None,
             },
         )
     }

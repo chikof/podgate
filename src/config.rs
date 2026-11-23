@@ -14,6 +14,7 @@ use crate::h3;
 use crate::middleware::basic_auth::Htpasswd;
 use crate::middleware::content_guard::Classifiers;
 use crate::middleware::plugin::Plugins;
+use crate::middleware::portal::pin::Apps;
 use crate::observe::access_log::LogsExporter;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
 use crate::observe::metrics::MetricsExportConfig;
@@ -91,6 +92,7 @@ const _: () =
 /// | `BASIC_AUTH_MAX_CONCURRENT` | available cores, at most 256 | `basic_auth` password verifications at once, 1..=256; one tenant may hold half of them. |
 /// | `HEALTH_MAX_CONCURRENT` | `64` | Active health probes in flight at once across all tenants, 1..=4096. |
 /// | `CATCH_ALL_TENANTS` | unset | Comma-separated tenant ids allowed catch-all routers on shared entry points. |
+/// | `PORTAL_APPS` | unset | Comma-separated `tenant/app=<issuer>\|<source>` entries: the apps that may declare a `portal` middleware (the developer portal, `docs/ref/portal.md`), each with the pin of the login stage the portal may stand behind. `<source>` is `jwks:<url>` (a `jwt_auth` with exactly that `jwks_uri`), `keys:<64 hex digits>` (a `jwt_auth` with exactly those inline keys) or `oidc` (an `oidc` stage of that issuer). A snapshot whose login does not match the pin exactly is refused. List only apps whose login you control. The pin lives only here: never in a snapshot, an answer, a log or an error. A malformed entry stops startup. Unset: no app may declare a portal. |
 /// | `UPSTREAM_POLICY_FILE` | unset | JSON file with the upstream address policy: which addresses each tenant's servers may have. Unset: loopback, link-local, metadata, unspecified and multicast are denied. |
 /// | `SPIFFE_ENDPOINT_SOCKET` | unset | The SPIFFE Workload API agent's unix socket (`/run/spire/sockets/agent.sock` or `unix:///...`). Needs `SPIFFE_POLICY_FILE`. Unset: no SPIFFE. |
 /// | `SPIFFE_POLICY_FILE` | unset | JSON file with the SPIFFE policy: per tenant its SVID hint, the server IDs it may talk to, the client trust domains it may verify. Needs `SPIFFE_ENDPOINT_SOCKET`. |
@@ -177,6 +179,10 @@ pub struct Config {
     /// Tenants the operator lets declare catch-all routers (a `host_regexp` or host-free router)
     /// on a shared entry point, so they can receive hosts nobody claims. Empty: none can.
     pub catch_all_tenants: Vec<Box<str>>,
+    /// The apps that may declare a `portal` middleware, each with the pin of the
+    /// login the portal may stand behind (`PORTAL_APPS`). Empty: no app may. Never part of a
+    /// snapshot, and never printed: its `Debug` shows a count.
+    pub portal_apps: Apps,
     /// File with the upstream address policy. Absent: the built-in deny list. Read once at
     /// startup by [`Config::upstream_policy`].
     pub upstream_policy_file: Option<PathBuf>,
@@ -271,6 +277,7 @@ impl Default for Config {
             acme_ca_file: None,
             acme_dns_zones: Vec::new(),
             catch_all_tenants: Vec::new(),
+            portal_apps: Apps::default(),
             upstream_policy_file: None,
             spiffe_endpoint_socket: None,
             spiffe_policy_file: None,
@@ -888,6 +895,12 @@ impl Config {
                 .map(Box::from)
                 .collect();
         }
+        if let Some(raw) = non_empty("PORTAL_APPS")? {
+            config.portal_apps = Apps::parse(&raw).map_err(|err| ConfigError {
+                var: "PORTAL_APPS",
+                reason: err.to_string().into(),
+            })?;
+        }
         if let Some(list) = lookup("OCSP_ALLOWED_HOSTS") {
             config.ocsp_allowed_hosts = list
                 .split(',')
@@ -968,6 +981,7 @@ mod test {
             ("DASHBOARD_HOSTS", "dash.example, Ops.Example"),
             ("TLS_MIN_VERSION", "1.3"),
             ("CATCH_ALL_TENANTS", "t1, t2,,"),
+            ("PORTAL_APPS", "ops/portal=https://idp.example|oidc"),
             ("CACHE_TENANT_MAX_PERCENT", "40"),
             ("OCSP_ALLOWED_HOSTS", "OCSP.Example.com, .Digicert.com,,"),
             ("H3_MAX_CONNECTIONS", "50"),
@@ -1028,6 +1042,8 @@ mod test {
                 otel_metrics: MetricsExportConfig::default(),
                 otel_logs: LogsExporter::default(),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
+                portal_apps: Apps::parse("ops/portal=https://idp.example|oidc")
+                    .expect("a valid pin"),
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),
                 dashboard_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9200))),

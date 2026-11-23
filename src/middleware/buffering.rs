@@ -489,6 +489,7 @@ mod test {
             &mut CompileCx {
                 app: &app,
                 engine: &mut engine,
+                portal: None,
             },
         )
     }

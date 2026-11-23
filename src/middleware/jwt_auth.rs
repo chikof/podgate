@@ -57,6 +57,7 @@ use serde_json::{Map, Value, json};
 use self::claims::{Rules, header_text};
 use self::jwks::{Cache, Demand, Fetch, FetchError, Flight, Target};
 use self::verify::{Algorithm, Algorithms, Failure, KeySet, MAX_TOKEN, Token, verify};
+use super::portal::pin::{self, Login};
 use super::{CompileCx, Flow, Kind, RequestCx, Stage, forward_auth, oidc, state};
 use crate::budget::{Escaped, TenantBudget};
 use crate::compile::{Invalid, Rejected};
@@ -530,6 +531,8 @@ struct Parts {
     resolver: Resolver,
     runtime: Arc<Runtime>,
     fingerprint: u64,
+    /// How the stage verifies, for the developer portal's pin.
+    login: Login,
 }
 
 /// A compiled `jwt_auth` middleware.
@@ -887,6 +890,28 @@ impl Kind for JwtAuth {
             .jwks_refresh_secs
             .unwrap_or(jwks::REFRESH_DEFAULT)
             .clamp(jwks::REFRESH_MIN, jwks::REFRESH_MAX);
+        let login = match config.issuer.as_deref() {
+            Some(issuer)
+                if !algorithms.iter().any(Algorithm::is_hmac)
+                    && !inline.has_symmetric()
+                    && config.transport.is_none() =>
+            {
+                match (&config.jwks_uri, &config.keys) {
+                    (Some(uri), None) => Login::Pinnable {
+                        issuer: issuer.into(),
+                        source: pin::Source::Jwks(uri.as_str().into()),
+                    },
+                    (None, Some(keys)) => {
+                        pin::fingerprint(keys).map_or(Login::Unpinnable, |hex| Login::Pinnable {
+                            issuer: issuer.into(),
+                            source: pin::Source::Keys(hex.into()),
+                        })
+                    }
+                    _ => Login::Unpinnable,
+                }
+            }
+            _ => Login::Unpinnable,
+        };
         Ok(Self(Box::new(Parts {
             algorithms,
             inline,
@@ -909,6 +934,7 @@ impl Kind for JwtAuth {
                 stats: Stats::default(),
             }),
             fingerprint: state::fingerprint(declared),
+            login,
         })))
     }
 
@@ -1039,6 +1065,13 @@ impl Kind for JwtAuth {
             kinds.push(plan::kind::UPSTREAM_TLS_VERIFICATION_DISABLED);
         }
         kinds
+    }
+
+    /// The issuer this stage requires and where its keys come from, for the developer portal's
+    /// pin. A stage with no `issuer`, a shared secret (`HS*`, an `oct` key), keys from two places
+    /// or a private `transport` has no login anyone can pin.
+    fn login(&self) -> Option<Login> {
+        Some(self.0.login.clone())
     }
 
     /// The headers a claim is copied into, and the header the token came in when it is not
@@ -1293,6 +1326,7 @@ mod test {
             &mut CompileCx {
                 app: &app,
                 engine: &mut compiler,
+                portal: None,
             },
         )
     }

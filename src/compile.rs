@@ -265,7 +265,7 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
             &mut engine,
             limits,
             &mut rejected,
-            context.resolver(),
+            context,
             snapshot.skew_secret.as_ref(),
         );
         middleware::lifecycle::attach(app, &links, app_routers, &mut stages);
@@ -820,9 +820,10 @@ fn stages_of(
     engine: &mut engine::Compiler,
     limits: crate::cache::Limits,
     rejected: &mut Vec<Rejected>,
-    resolver: &Resolver,
+    context: &CompileContext,
     skew_secret: Option<&SkewSecret>,
 ) -> Vec<middleware::Named> {
+    let resolver = context.resolver();
     let mut stages: Vec<middleware::Named> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
@@ -843,25 +844,32 @@ fn stages_of(
             }
             continue;
         }
-        let compiled =
-            Stage::compile(declared, &mut CompileCx { app, engine }).and_then(|mut stage| {
-                // The one kind whose limits depend on the tenant's budget and the operator.
-                if let middleware::Stage::Cache(cache) = &mut stage {
-                    cache.bind(limits)?;
-                }
-                // The kinds that dial a host name of their configuration, and the one that keys
-                // its cookies with the snapshot's `skew_secret`.
-                match &mut stage {
-                    middleware::Stage::ForwardAuth(auth) => auth.bind(resolver),
-                    middleware::Stage::Opa(opa) => opa.bind(resolver),
-                    middleware::Stage::LlmGuard(guard) => guard.bind(resolver),
-                    middleware::Stage::JwtAuth(auth) => auth.bind(resolver),
-                    middleware::Stage::Oidc(auth) => auth.bind(skew_secret, resolver)?,
-                    middleware::Stage::McpGateway(gateway) => gateway.bind(resolver),
-                    _ => {}
-                }
-                Ok(stage)
-            });
+        let compiled = Stage::compile(
+            declared,
+            &mut CompileCx {
+                app,
+                engine,
+                portal: context.portal().of(&app.tenant, &app.id),
+            },
+        )
+        .and_then(|mut stage| {
+            // The one kind whose limits depend on the tenant's budget and the operator.
+            if let middleware::Stage::Cache(cache) = &mut stage {
+                cache.bind(limits)?;
+            }
+            // The kinds that dial a host name of their configuration, and the one that keys
+            // its cookies with the snapshot's `skew_secret`.
+            match &mut stage {
+                middleware::Stage::ForwardAuth(auth) => auth.bind(resolver),
+                middleware::Stage::Opa(opa) => opa.bind(resolver),
+                middleware::Stage::LlmGuard(guard) => guard.bind(resolver),
+                middleware::Stage::JwtAuth(auth) => auth.bind(resolver),
+                middleware::Stage::Oidc(auth) => auth.bind(skew_secret, resolver)?,
+                middleware::Stage::McpGateway(gateway) => gateway.bind(resolver),
+                _ => {}
+            }
+            Ok(stage)
+        });
         match compiled {
             Ok(stage) => {
                 index.insert(&declared.name, stages.len());
@@ -928,6 +936,12 @@ fn stages_of(
     }
     rejected.extend(middleware::quota::bind_claims(app, &mut stages, &seen));
     rejected.extend(middleware::mcp::check_identity(app, &stages, &seen));
+    rejected.extend(middleware::portal::check_chains(
+        app,
+        &stages,
+        &seen,
+        context.portal(),
+    ));
     stages
 }
 

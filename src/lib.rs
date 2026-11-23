@@ -26,6 +26,7 @@
 //! - [`canary`]: ramps one revision up while its 5xx rate stays under the limit, pulls it back when not.
 //! - [`admin`]: the admin API router and its background service.
 //! - [`dashboard`]: the read-only web UI on `DASHBOARD_ADDR`, over the overview and explain APIs, with the assets compiled in.
+//! - [`middleware::portal`]: the developer portal: a stage that answers in the chain of an app listed in `PORTAL_APPS`, showing each viewer the published APIs of their own tenant.
 //! - [`observe::metrics`]: Prometheus series per entry point, router and service, with a series cap per tenant, rendered by `GET /metrics` on the admin socket and on `METRICS_ADDR`.
 //! - [`Failures`]: the per-app rings of failed requests, listed and replayed over the admin API.
 //! - [`Outcomes`]: per-revision response outcomes over a sliding window; [`plan`] diffs snapshots
@@ -170,6 +171,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_rate_limit_stores(rate_limit_stores.clone())
             .with_plugins(plugins.clone())
             .with_content_classifiers(content_classifiers)
+            .with_portal(config.portal_apps.clone())
             .with_resolver(resolver.clone())
             .with_spiffe(spiffe.clone()),
     )
