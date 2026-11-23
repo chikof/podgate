@@ -1254,6 +1254,9 @@ async fn guard_cache_stores_only_allowed_answers() {
     };
     let first = get("/v1/x").await;
     assert_eq!(first.status, 403, "{}", first.wire_text());
+    // The blocked answer's fetch ends with its request, just after the client has the 403. A
+    // request that starts before then follows that fetch and goes alone, storing nothing.
+    podgate.settled().await;
     let second = get("/v1/x").await;
     assert_eq!(second.status, 200, "{}", second.wire_text());
     assert!(

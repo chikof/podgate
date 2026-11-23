@@ -462,6 +462,33 @@ impl Podgate {
         exchange(&mut stream, &get_request("x", path)).await
     }
 
+    /// Waits until the proxy has dropped the state of every request it was serving.
+    ///
+    /// A client has the whole response before the request's state is dropped, and a cache fetch
+    /// (`Lead`) lives in that state until then: a request that starts in between finds the key
+    /// "being fetched" and goes to the upstream without storing. The gauge
+    /// `podgate_entry_point_open_connections` falls when the last field of that state is dropped,
+    /// after the fetch, so zero means every earlier fetch has ended.
+    pub async fn settled(&self) {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            let metrics = self.admin_get("/metrics").await.body;
+            let open: Vec<u64> = metrics
+                .lines()
+                .filter(|line| line.starts_with("podgate_entry_point_open_connections{"))
+                .filter_map(|line| line.rsplit(' ').next()?.parse().ok())
+                .collect();
+            if !open.is_empty() && open.iter().all(|open| *open == 0) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "requests still open after {IO_TIMEOUT:?}: {open:?}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// `PUT /v1/snapshot` with `body` as the raw request body.
     pub async fn push_snapshot_raw(&self, body: &str) -> Response {
         let mut stream = UnixStream::connect(&self.admin_socket)

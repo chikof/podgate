@@ -1481,6 +1481,9 @@ async fn cache_respects_request_cache_control_when_set() {
     )
     .await;
     get(&podgate, "/c").await;
+    // A forced request only refreshes the entry when it leads the fetch: the first request's
+    // fetch must be over, and it ends just after that client has the whole response.
+    podgate.settled().await;
     let forced = get_with(&podgate, "/c", &[("Cache-Control", "no-cache")]).await;
     assert_eq!((forced.result(), forced.text().as_str()), ("miss", "v1"));
     let after = get(&podgate, "/c").await;
