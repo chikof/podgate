@@ -215,10 +215,10 @@ mod test {
             ],
             "revisions": [{"id": "r1", "weight": 1, "state": "serving", "services": [
                 {"name": "web", "type": "loadbalancer", "servers": [{"url": "http://127.0.0.1:9"}]}]}],
-            "apis": apis,
         });
-        if let (Some(object), Some(extra)) = (app.as_object_mut(), extra.as_object()) {
-            object.extend(extra.clone());
+        app["apis"] = apis;
+        if let (Some(object), Value::Object(extra)) = (app.as_object_mut(), extra) {
+            object.extend(extra);
         }
         app
     }

@@ -2,7 +2,7 @@
 //!. Full reference: `docs/ref/catalog.md`.
 //!
 //! It is not a kind a snapshot declares. The compiler pushes one `lifecycle:<router>` stage per
-//! router an `apis` entry names, and puts it first in the router's chain ([`attach`]): first for
+//! router an `apis` entry names, and puts it first in the router's chain (`attach`): first for
 //! the request hook, so a stage of the tenant cannot answer before it, and therefore last for the
 //! response hooks, which run in reverse chain order, so no `headers` stage of the tenant can
 //! remove or overwrite what it set. A chain only names declared middlewares and the guard is in
