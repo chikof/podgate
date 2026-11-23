@@ -152,6 +152,30 @@ impl Front {
         Box::pin(self.run(&connection, &peer)).await;
         // The connection is over: wake whatever still waits on it, and free the reservation.
         connection.close(quinn::VarInt::from_u32(H3_NO_ERROR), b"");
+        #[cfg(feature = "h3-stats")]
+        Self::log_stats(&connection);
+    }
+
+    /// What QUIC loss recovery did on a connection, as one `podgate_h3_stats` event.
+    /// The counters of `quinn::ConnectionStats` have no probe timeout count: one shows as a ping
+    /// frame, or as stream frames sent a second time.
+    #[cfg(feature = "h3-stats")]
+    fn log_stats(connection: &quinn::Connection) {
+        let stats = connection.stats();
+        tracing::info!(
+            target: "podgate_h3_stats",
+            sent_packets = stats.path.sent_packets,
+            lost_packets = stats.path.lost_packets,
+            lost_bytes = stats.path.lost_bytes,
+            congestion_events = stats.path.congestion_events,
+            ping_frames_tx = stats.frame_tx.ping,
+            ping_frames_rx = stats.frame_rx.ping,
+            stream_frames_tx = stats.frame_tx.stream,
+            stream_frames_rx = stats.frame_rx.stream,
+            ack_frames_tx = stats.frame_tx.acks,
+            udp_datagrams_tx = stats.udp_tx.datagrams,
+            udp_datagrams_rx = stats.udp_rx.datagrams,
+        );
     }
 
     async fn run(&self, connection: &quinn::Connection, peer: &Arc<Peer>) {

@@ -79,6 +79,11 @@ h3-quinn = "0.0.10"
 rustls-platform-verifier = "0.7.1"
 podgate-rule = { version = "0.1.0", path = "crates/podgate-rule" }
 
+[features]
+# Logs what QUIC loss recovery did on each HTTP/3 connection when it ends, so a
+# callgrind run can be compared with a normal one. Off in every shipped build.
+h3-stats = []
+
 [lints]
 workspace = true
 
