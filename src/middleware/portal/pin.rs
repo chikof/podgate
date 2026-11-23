@@ -105,10 +105,13 @@ pub enum PinError {
     },
 }
 
+/// One listed app: its tenant, its id and the pin of its login.
+type Listed = (Box<str>, Box<str>, Pin);
+
 /// The apps that may declare a `portal` middleware, with their pins: what `PORTAL_APPS` says.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Apps {
-    entries: Box<[(Box<str>, Box<str>, Pin)]>,
+    entries: Box<[Listed]>,
 }
 
 impl fmt::Debug for Apps {
@@ -126,7 +129,7 @@ impl Apps {
     ///
     /// [`PinError`] for the first entry that is malformed or repeats an app.
     pub fn parse(raw: &str) -> Result<Self, PinError> {
-        let mut entries: Vec<(Box<str>, Box<str>, Pin)> = Vec::new();
+        let mut entries: Vec<Listed> = Vec::new();
         for (at, text) in raw
             .split(',')
             .map(str::trim)

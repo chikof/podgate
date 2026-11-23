@@ -96,7 +96,7 @@ impl Query {
 
     /// Whether `entry` matches the search: a case-insensitive part of its id, title or
     /// description.
-    fn matches(&self, entry: &Visible<'_>) -> bool {
+    fn matches(&self, entry: Visible<'_>) -> bool {
         let Some(search) = &self.search else {
             return true;
         };
@@ -156,6 +156,10 @@ struct Item<'a> {
     openapi: Option<Summary<'a>>,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` passes a reference"
+)]
 fn is_zero(count: &usize) -> bool {
     *count == 0
 }
@@ -169,7 +173,7 @@ pub(super) fn render(table: &RoutingTable, viewer: &Viewer, query: &Query) -> Ve
     };
     let entries: Vec<Visible<'_>> = visible(table, viewer)
         .into_iter()
-        .filter(|entry| query.matches(entry))
+        .filter(|entry| query.matches(*entry))
         .collect();
     let mut out = format!("{{\"total\":{},\"items\":[", entries.len()).into_bytes();
     let mut shown = 0_usize;
@@ -183,7 +187,7 @@ pub(super) fn render(table: &RoutingTable, viewer: &Viewer, query: &Query) -> Ve
         if after.is_some_and(|after| (entry.id(), entry.version()) <= after) {
             continue;
         }
-        let bytes = item_bytes(table, viewer, tenant, entry);
+        let bytes = item_bytes(table, viewer, tenant, *entry);
         if shown == query.limit || out.len() + 1 + bytes.len() + TAIL > MAX_PAGE_BYTES {
             more = true;
             break;
@@ -209,7 +213,7 @@ pub(super) fn render(table: &RoutingTable, viewer: &Viewer, query: &Query) -> Ve
 }
 
 /// The bytes of one entry's JSON.
-fn item_bytes(table: &RoutingTable, viewer: &Viewer, tenant: &str, entry: &Visible<'_>) -> Vec<u8> {
+fn item_bytes(table: &RoutingTable, viewer: &Viewer, tenant: &str, entry: Visible<'_>) -> Vec<u8> {
     let (description, description_cut) = entry.description().map_or((None, false), |text| {
         let (text, cut) = cut(text, MAX_DESCRIPTION);
         (Some(text), cut)

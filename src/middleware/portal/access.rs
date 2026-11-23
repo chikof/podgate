@@ -119,7 +119,7 @@ pub(super) fn find<'a>(
 pub(super) fn shown_successor<'a>(
     table: &'a RoutingTable,
     viewer: &Viewer,
-    entry: &Visible<'_>,
+    entry: Visible<'_>,
 ) -> Option<Visible<'a>> {
     let successor = entry.successor()?;
     find(table, viewer, &successor.id, &successor.version)
@@ -174,7 +174,10 @@ mod test {
     }
 
     /// A table of apps `(tenant, id, [(api id, version, lifecycle, published)])`.
-    fn table(apps: &[(&str, &str, &[(&str, &str, &str, bool)])]) -> RoutingTable {
+    type Entry<'a> = (&'a str, &'a str, &'a str, bool);
+    type AppSpec<'a> = (&'a str, &'a str, &'a [Entry<'a>]);
+
+    fn table(apps: &[AppSpec<'_>]) -> RoutingTable {
         let tenants: Vec<Value> = apps
             .iter()
             .map(|(tenant, _, _)| tenant)
