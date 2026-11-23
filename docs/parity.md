@@ -198,6 +198,7 @@ Model, for orientation: podgate is push-only. A control-plane writer (podkit's a
 | API catalog | Traefik Hub API management | none | built (`docs/ref/catalog.md`): `apis` on an app, `GET /v1/catalog` on the admin socket from the live table, filtered and paged by key, no secret and no OpenAPI document |
 | API versioning and lifecycle | Traefik Hub API management | none | built (`docs/ref/catalog.md`): `draft` is `404`, `deprecated` adds `Deprecation`, `Sunset` and the successor `Link`, `retired` is `410`, enforced by a guard stage a tenant cannot declare or undo; reopening an API is the plan's `api_reopened`; routing between versions stays the routers' job |
 | Per-tool authorization for MCP | Traefik Hub tool-based access control | none | built (`docs/ref/mw-mcp-gateway.md`) |
+| Multi-cluster view | Traefik Hub multi-cluster | none | built (`docs/ref/federation.md`): `podgate-federation` exports each cluster's catalog and status over mutual TLS from the daemon's opt-in read socket (`ADMIN_READ_SOCKET`), and a hub pulls the peers the operator lists and serves one view labelled by cluster, with stale clusters flagged and every peer capped and typed. Not built: cross-cluster routing, a web page, per-client scoping |
 
 ## Not planned, with a recommendation
 

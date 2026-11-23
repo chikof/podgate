@@ -40,6 +40,8 @@ An app has:
 - `middlewares`: `name`, `type`, and `config`, which is the kind's `describe()` output. A circuit breaker shows its `phase` there. The lifecycle guard of a `draft`, `deprecated` or `retired` API (`docs/ref/catalog.md`) shows as `lifecycle:<router>` of type `lifecycle`, and in that router's `chain`; the APIs themselves are listed by `GET /v1/catalog`.
 - `recent`: `window_secs` (300), `requests` and `errors_5xx` from the same counters auto-revert and the canary read.
 
+The `summary` section is read by the federation exporter (`docs/ref/federation.md`) over the read socket (`GET /v1/overview?section=summary`, `docs/ref/admin-tools.md`): `version`, `applied_at`, `boot_id`, `writer`, `tenants`, `apps`, `routers`, `services` and `servers` are only added to, never renamed or removed.
+
 A field of a feature that is not configured is absent, not `null`: a service without `health_check` has no `healthy`, an app without a canary has no `canary`, and a snapshot whose writer sent no name (or none yet) has no `summary.writer`.
 
 ## Bounds

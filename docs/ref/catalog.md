@@ -122,7 +122,7 @@ GET /v1/catalog?tenant=<id>&app=<id>&lifecycle=<word>&limit=<n>&after=<cursor>
 - Always present on an item: `tenant`, `app`, `declared_by`, `id`, `version`, `lifecycle`, `routers`, `hosts` (the literal hosts the named routers claim, sorted, `*.base` for a wildcard), `published`. Absent, never `null`, when not declared: `title`, `description`, `sunset`, `successor`, `openapi`.
 - Entries are sorted by `(tenant, id, version)` as text, which is unique, so it is the cursor: `next` and `after` are `<tenant>/<id>/<version>`. It is a key, not an offset: a swap between two pages never repeats or skips an entry that stays, and a cursor whose entry is gone still works. A cursor that is not three parts is `400`.
 - `truncated` and `next` appear together when the page ended before the selection did, by `limit` or by the cap.
-- Fields are only ever added. A reader ignores the ones it does not know.
+- Fields are only ever added. A reader ignores the ones it does not know. The federation exporter (`docs/ref/federation.md`) reads `version`, `total`, `items`, `truncated` and `next` and every item field above from this answer, on the read socket too (`docs/ref/admin-tools.md`, `## The read socket`), so a field is never renamed or removed.
 
 ### Bounds and what is never shown
 
