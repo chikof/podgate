@@ -126,6 +126,12 @@ impl Registry {
         }
     }
 
+    /// The series each tenant may own before new ones collapse into `other`.
+    #[must_use]
+    pub fn series_per_tenant(&self) -> usize {
+        self.per_tenant
+    }
+
     /// Reports removed objects for `retention` instead of [`RETENTION`].
     #[must_use]
     pub fn with_retention(mut self, retention: Duration) -> Self {

@@ -29,6 +29,7 @@
 //! both over `McpGateway::visible`, and the `Outcome` of `McpGateway::invoke` in `tools_call`
 //! (a result is known, before it is written).
 
+mod access;
 mod rpc;
 mod server;
 mod sessions;
@@ -37,7 +38,8 @@ mod tools;
 
 pub use sessions::Sessions;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,11 +53,12 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use super::{CompileCx, Flow, Kind, RequestCx, forward_auth, state};
-use crate::compile::Invalid;
+use crate::budget::Escaped;
+use crate::compile::{Invalid, Rejected};
 use crate::error::AppError;
 use crate::service::Transport;
 use crate::service::resolve::Resolver;
-use crate::table::CompiledApp;
+use crate::table::{CompiledApp, RoutingTable};
 use podgate_model::Declared;
 use rpc::{Answer, Message, Refused};
 use server::{Env, Failure, Health, Runtime, Spec};
@@ -97,6 +100,11 @@ pub(super) struct Config {
     /// host. A request with any other `Origin` is `403`.
     #[serde(default)]
     allowed_origins: Vec<String>,
+    /// Which tools a caller may see and call, by the claims of the token a `jwt_auth` stage
+    /// earlier in the chain verified. Absent: every tool of every healthy server is open. Present,
+    /// even as `[]`: a tool is open only when some rule lists it and the caller's claims hold.
+    #[serde(default)]
+    tool_access: Option<Vec<access::RuleConfig>>,
 }
 
 /// One registered server.
@@ -125,9 +133,8 @@ struct Parts {
     transport: Transport,
     origins: Box<[Box<str>]>,
     fingerprint: u64,
-    /// A tool the test filter hides, standing in for what per-tool authorization decides.
-    #[cfg(test)]
-    hidden: Option<(Box<str>, Box<str>)>,
+    /// `None`: no per-tool authorization.
+    access: Option<access::Access>,
 }
 
 /// A compiled `mcp_gateway` middleware.
@@ -257,13 +264,15 @@ impl McpGateway {
 }
 
 /// What a request is, to the hooks that decide about it: who asks, for which app, in which
-/// session, and the request head.
+/// session, and the request head. `claims` are those of the token a `jwt_auth` stage verified
+/// (`RequestCx::claims`), never a header: the one input of per-tool authorization.
 #[derive(Debug)]
 struct Caller<'a> {
     tenant: &'a str,
     app: &'a str,
     session: &'a str,
     head: &'a RequestHeader,
+    claims: Option<&'a serde_json::Map<String, Value>>,
 }
 
 /// Everything the methods of one request need.
@@ -278,8 +287,12 @@ struct Call<'a> {
 enum Unresolved {
     /// No registered server has that prefix. Nothing was dialled.
     UnknownServer,
-    /// The server is known and its catalog does not have the tool, or the caller may not see it.
+    /// The server is known and its catalog does not have the tool.
     UnknownTool,
+    /// The rules of `tool_access` refuse the caller the tool, or every tool of its server. It is
+    /// answered exactly as a name that leads nowhere ([`McpGateway::refusal`]); the variant only
+    /// lets the code that counts and logs tell them apart.
+    Denied,
     /// The server's catalog is not known and the server did not give it.
     Unavailable(Box<str>, Failure),
 }
@@ -556,6 +569,7 @@ impl McpGateway {
                 app: cx.app.id(),
                 session: &handle.id,
                 head,
+                claims: cx.claims.as_ref(),
             },
             env: Env {
                 client: cx.auth,
@@ -701,14 +715,23 @@ impl McpGateway {
                 "params must be an object and cursors are not supported",
             );
         }
+        let reachable: Vec<(usize, &Spec)> = self
+            .0
+            .servers
+            .iter()
+            .enumerate()
+            .filter(|(_, spec)| self.reaches(&call.caller, &spec.name))
+            .collect();
         let fetched = futures_util::future::join_all(
-            (0..self.0.servers.len()).map(|index| self.refresh(call, index)),
+            reachable
+                .iter()
+                .map(|(index, _)| self.refresh(call, *index)),
         )
         .await;
         let catalogs: Vec<(&str, Arc<[Tool]>)> = fetched
             .into_iter()
-            .zip(self.0.servers.iter())
-            .filter_map(|(fetched, spec)| Some((&*spec.name, fetched.ok()?)))
+            .zip(reachable)
+            .filter_map(|(fetched, (_, spec))| Some((&*spec.name, fetched.ok()?)))
             .collect();
         let listed = tools::merge(catalogs.iter().map(|(server, tools)| (*server, &**tools)));
         let shown = self.expose(&call.caller, listed);
@@ -731,7 +754,7 @@ impl McpGateway {
     ///
     /// # Errors
     ///
-    /// [`Unresolved::UnknownTool`] for a tool the caller may not call.
+    /// [`Unresolved::Denied`] for a tool the caller may not call.
     fn authorize(
         &self,
         caller: &Caller<'_>,
@@ -741,33 +764,70 @@ impl McpGateway {
         if self.visible(caller, tool) {
             Ok(())
         } else {
-            Err(Unresolved::UnknownTool)
+            self.denied(caller, &tools::qualify(&tool.server, &tool.tool));
+            Err(Unresolved::Denied)
         }
     }
 
-    /// The one rule behind [`Self::expose`] and [`Self::authorize`].
-    fn visible(&self, _caller: &Caller<'_>, tool: &ToolRef) -> bool {
-        !self.hides(tool)
-    }
-
-    #[cfg(test)]
-    fn hides(&self, tool: &ToolRef) -> bool {
+    /// The one rule behind [`Self::expose`] and [`Self::authorize`]: with `tool_access`, the
+    /// caller's verified claims must hold for a rule that lists the (server, tool) pair.
+    fn visible(&self, caller: &Caller<'_>, tool: &ToolRef) -> bool {
         self.0
-            .hidden
+            .access
             .as_ref()
-            .is_some_and(|(server, name)| **server == *tool.server && **name == *tool.tool)
+            .is_none_or(|access| access.allows(caller.claims, &tool.server, &tool.tool))
     }
 
-    #[cfg(not(test))]
-    fn hides(&self, _tool: &ToolRef) -> bool {
-        false
+    /// Whether `caller` may use some tool of `server`. A server it may use none of is, to it, a
+    /// server nobody registered: nothing is dialled for it.
+    fn reaches(&self, caller: &Caller<'_>, server: &str) -> bool {
+        self.0
+            .access
+            .as_ref()
+            .is_none_or(|access| access.reaches(caller.claims, server))
+    }
+
+    /// Whether a call of `tool` may be sent again by someone other than the caller who made it
+    /// (a replay, an audit): with `tool_access`, only when some rule lists it, whatever the
+    /// claims it asks for.
+    #[allow(
+        dead_code,
+        reason = "read by the audit of change 0134; covered by a unit test here"
+    )]
+    fn replayable(&self, tool: &ToolRef) -> bool {
+        self.0
+            .access
+            .as_ref()
+            .is_none_or(|access| access.lists(&tool.server, &tool.tool))
+    }
+
+    /// Counts and logs a call the rules refused.
+    fn denied(&self, caller: &Caller<'_>, name: &str) {
+        self.0.runtime.count_denied();
+        let sub = caller
+            .claims
+            .and_then(|claims| claims.get("sub"))
+            .and_then(Value::as_str)
+            .map(cut);
+        tracing::info!(
+            tenant = caller.tenant,
+            app = caller.app,
+            tool = ?cut(name),
+            sub = ?sub,
+            "mcp tool access denied"
+        );
     }
 
     /// The tool a client's qualified name leads to, from the registry alone: the prefix must be
-    /// a registered server's name and the rest a tool of that server's catalog.
+    /// a registered server's name the caller may use, and the rest a tool of that server's
+    /// catalog.
     async fn resolve(&self, call: &Call<'_>, qualified: &str) -> Result<ToolRef, Unresolved> {
         let (prefix, rest) = tools::split(qualified).ok_or(Unresolved::UnknownServer)?;
         let (index, spec) = self.index_of(prefix).ok_or(Unresolved::UnknownServer)?;
+        if !self.reaches(&call.caller, &spec.name) {
+            self.denied(&call.caller, qualified);
+            return Err(Unresolved::Denied);
+        }
         let tools = self
             .catalog(call, index)
             .await
@@ -782,10 +842,11 @@ impl McpGateway {
         })
     }
 
-    /// The answer to a name that leads nowhere.
+    /// The answer to a name that leads nowhere. A refusal by the rules is the same bytes as a
+    /// name nobody registered.
     fn refusal(id: &RawValue, why: &Unresolved) -> Reply {
         match why {
-            Unresolved::UnknownServer | Unresolved::UnknownTool => {
+            Unresolved::UnknownServer | Unresolved::UnknownTool | Unresolved::Denied => {
                 Reply::rpc(200, Some(id), rpc::INVALID_PARAMS, "unknown tool")
             }
             Unresolved::Unavailable(server, failure) => Self::failed(id, server, *failure),
@@ -933,6 +994,14 @@ impl Kind for McpGateway {
             .iter()
             .map(|raw| origin(raw))
             .collect::<Result<Vec<_>, _>>()?;
+        let access = config
+            .tool_access
+            .map(|rules| {
+                let names: Vec<&str> = servers.iter().map(|spec| &*spec.name).collect();
+                access::Access::compile(rules, &names)
+            })
+            .transpose()
+            .map_err(invalid)?;
         Ok(Self(Box::new(Parts {
             runtime: Arc::new(Runtime::new(&servers)),
             servers: servers.into_boxed_slice(),
@@ -940,8 +1009,7 @@ impl Kind for McpGateway {
             transport: Transport::default(),
             origins: origins.into_boxed_slice(),
             fingerprint: state::fingerprint(declared),
-            #[cfg(test)]
-            hidden: None,
+            access,
         })))
     }
 
@@ -990,7 +1058,20 @@ impl Kind for McpGateway {
                 view
             })
             .collect();
-        json!({"servers": servers, "allowed_origins": self.0.origins})
+        json!({
+            "servers": servers,
+            "allowed_origins": self.0.origins,
+            "tool_access": self.0.access.as_ref().map(access::Access::describe),
+        })
+    }
+
+    /// A `tool_access` that opens more than the one it replaces, and one that is gone.
+    fn posture(&self, new: Option<&Self>) -> Vec<&'static str> {
+        match (&self.0.access, new.map(|new| &new.0.access)) {
+            (Some(_), Some(None)) => vec![access::REMOVED],
+            (Some(old), Some(Some(new))) if new.widens(old) => vec![access::WIDENED],
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -1009,6 +1090,128 @@ impl Registry {
             }
             _ => None,
         });
+    }
+}
+
+/// The longest name or subject a denial logs.
+const LOGGED: usize = 128;
+
+/// `text` cut to at most [`LOGGED`] bytes at a character boundary.
+fn cut(text: &str) -> &str {
+    let mut end = text.len().min(LOGGED);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or_default()
+}
+
+impl McpGateway {
+    /// Whether the middleware has `tool_access`, and so needs an identity before it.
+    fn has_tool_access(&self) -> bool {
+        self.0.access.is_some()
+    }
+}
+
+/// Refuses a router whose chain runs a gateway with `tool_access` and no `jwt_auth` before it:
+/// the claims the rules read are the ones a `jwt_auth` stage verified, so without one every
+/// tool would be denied, or worse, someone would later add a way to fill them. `chains` are the
+/// routers of `app` with their effective chains (indices into `stages`).
+pub(crate) fn check_identity(
+    app: &podgate_model::App,
+    stages: &[super::Named],
+    chains: &[(&str, Vec<usize>)],
+) -> Vec<Rejected> {
+    let mut rejected = Vec::new();
+    for (router, chain) in chains {
+        for (position, &index) in chain.iter().enumerate() {
+            let Some(super::Named {
+                name,
+                stage: super::Stage::McpGateway(gateway),
+            }) = stages.get(index)
+            else {
+                continue;
+            };
+            if !gateway.has_tool_access() {
+                continue;
+            }
+            let verified = chain.get(..position).is_some_and(|before| {
+                before.iter().any(|earlier| {
+                    matches!(
+                        stages.get(*earlier),
+                        Some(super::Named {
+                            stage: super::Stage::JwtAuth(_),
+                            ..
+                        })
+                    )
+                })
+            });
+            if !verified {
+                rejected.push(Rejected::new(
+                    app,
+                    format!("router {router}"),
+                    invalid(format!(
+                        "middleware {name}: tool_access_requires_identity: `tool_access` reads the claims of a verified token and needs a `jwt_auth` earlier in the chain of router {router}"
+                    ))
+                    .with("reason", "tool_access_requires_identity"),
+                ));
+            }
+        }
+    }
+    rejected
+}
+
+/// The Prometheus exposition of the gateways of `live` that have `tool_access`:
+/// `podgate_mcp_denied_total{tenant,app}`, the calls the rules refused, summed over the
+/// gateways of an app. Each tenant gets `per_tenant` apps of its own; the rest of its apps
+/// are summed into `app="other"`.
+pub(crate) fn render(out: &mut String, live: &RoutingTable, per_tenant: usize) {
+    let mut rows: Vec<(&str, &str, u64)> = Vec::new();
+    for app in live.apps() {
+        let mut seen = false;
+        let mut count = 0_u64;
+        for named in app.stages() {
+            if let super::Stage::McpGateway(gateway) = &named.stage
+                && gateway.has_tool_access()
+            {
+                seen = true;
+                count = count.saturating_add(gateway.0.runtime.denied());
+            }
+        }
+        if seen {
+            rows.push((app.tenant(), app.id(), count));
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let mut own: HashMap<&str, usize> = HashMap::new();
+    let mut other: Vec<(&str, u64)> = Vec::new();
+    let _ = writeln!(
+        out,
+        "# HELP podgate_mcp_denied_total Calls of an mcp_gateway that its tool_access refused.\n# TYPE podgate_mcp_denied_total counter"
+    );
+    for (tenant, app, count) in rows {
+        let taken = own.entry(tenant).or_default();
+        if *taken < per_tenant {
+            *taken += 1;
+            let _ = writeln!(
+                out,
+                "podgate_mcp_denied_total{{tenant=\"{}\",app=\"{}\"}} {count}",
+                Escaped(tenant),
+                Escaped(app)
+            );
+        } else if let Some((_, sum)) = other.iter_mut().find(|(name, _)| *name == tenant) {
+            *sum = sum.saturating_add(count);
+        } else {
+            other.push((tenant, count));
+        }
+    }
+    for (tenant, count) in other {
+        let _ = writeln!(
+            out,
+            "podgate_mcp_denied_total{{tenant=\"{}\",app=\"other\"}} {count}",
+            Escaped(tenant)
+        );
     }
 }
 
@@ -1162,9 +1365,66 @@ mod test {
         assert!(!allowed(Some("https://app.example.com:444")));
     }
 
-    #[tokio::test]
-    async fn mcp_hidden_tool_is_unlisted_and_unknown_to_call() {
-        let mut gateway = compile(&two()).expect("compiled");
+    /// What a `Call` borrows, for a gateway whose two servers have the catalogs of [`stocked`].
+    struct Rig {
+        sessions: Sessions,
+        handle: Handle,
+        client: forward_auth::Client,
+        policy: UpstreamPolicy,
+        request: RequestHeader,
+    }
+
+    impl Rig {
+        fn new(gateway: &McpGateway) -> Self {
+            let sessions = Sessions::new();
+            let handle = sessions
+                .open("t1", "a", gateway.0.fingerprint, Instant::now())
+                .expect("a session");
+            Self {
+                sessions,
+                handle,
+                client: forward_auth::Client::new(Duration::from_secs(1)),
+                policy: UpstreamPolicy::builtin(),
+                request: head(None, "gw.example.com"),
+            }
+        }
+
+        fn call<'a>(
+            &'a self,
+            gateway: &'a McpGateway,
+            claims: Option<&'a serde_json::Map<String, Value>>,
+        ) -> Call<'a> {
+            let _ = &self.sessions;
+            Call {
+                caller: Caller {
+                    tenant: "t1",
+                    app: "a",
+                    session: &self.handle.id,
+                    head: &self.request,
+                    claims,
+                },
+                env: Env {
+                    client: &self.client,
+                    policy: &self.policy,
+                    resolver: &gateway.0.resolver,
+                    transport: &gateway.0.transport,
+                    tenant: "t1",
+                    budget: None,
+                    runtime: &gateway.0.runtime,
+                },
+                handle: &self.handle,
+            }
+        }
+    }
+
+    /// A gateway over `two()` with `tool_access` `rules` and catalogs: alpha has `search` and
+    /// `read`, beta has `search`.
+    fn stocked(rules: Option<Value>) -> McpGateway {
+        let mut config = two();
+        if let (Some(rules), Some(object)) = (rules, config.as_object_mut()) {
+            object.insert("tool_access".into(), rules);
+        }
+        let gateway = compile(&config).expect("compiled");
         let now = Instant::now();
         let tool = |name: &str| json!({"name": name, "inputSchema": {"type": "object"}});
         gateway.0.runtime.set_catalog(
@@ -1179,57 +1439,88 @@ mod test {
             .0
             .runtime
             .set_catalog(1, Some(tools::catalog("beta", vec![tool("search")], now)));
-        gateway.0.hidden = Some(("beta".into(), "search".into()));
+        gateway
+    }
 
-        let sessions = Sessions::new();
-        let handle = sessions
-            .open("t1", "a", gateway.0.fingerprint, now)
-            .expect("a session");
-        let client = forward_auth::Client::new(Duration::from_secs(1));
-        let policy = UpstreamPolicy::builtin();
-        let request = head(None, "gw.example.com");
-        let call = Call {
-            caller: Caller {
-                tenant: "t1",
-                app: "a",
-                session: &handle.id,
-                head: &request,
-            },
-            env: Env {
-                client: &client,
-                policy: &policy,
-                resolver: &gateway.0.resolver,
-                transport: &gateway.0.transport,
-                tenant: "t1",
-                budget: None,
-                runtime: &gateway.0.runtime,
-            },
-            handle: &handle,
-        };
+    fn claims(value: &Value) -> serde_json::Map<String, Value> {
+        value.as_object().expect("object").clone()
+    }
 
-        // The list drops exactly the hidden tool.
+    /// The qualified names `claims` is shown of the merged list.
+    fn shown(
+        gateway: &McpGateway,
+        rig: &Rig,
+        claims: Option<&serde_json::Map<String, Value>>,
+    ) -> Vec<String> {
+        let call = rig.call(gateway, claims);
         let alpha = gateway.0.runtime.fresh(0, CATALOG_TTL).expect("fresh");
         let beta = gateway.0.runtime.fresh(1, CATALOG_TTL).expect("fresh");
         let listed = tools::merge([("alpha", &*alpha), ("beta", &*beta)].into_iter());
-        assert_eq!(listed.len(), 3);
-        let shown = gateway.expose(&call.caller, listed);
-        let names: Vec<&str> = shown
+        gateway
+            .expose(&call.caller, listed)
             .iter()
-            .filter_map(|tool| tool.value["name"].as_str())
-            .collect();
-        assert_eq!(names, ["alpha__search", "alpha__read"]);
+            .filter_map(|tool| tool.value["name"].as_str().map(str::to_owned))
+            .collect()
+    }
 
-        // The call of the hidden tool is answered as a tool nobody owns.
+    fn roles() -> Value {
+        json!([
+            {"tools": ["alpha__*"], "allow": {"roles": ["dev", "admin"]}},
+            {"tools": ["beta__search"], "allow": {"roles": ["admin"]}},
+        ])
+    }
+
+    #[test]
+    fn tbac_list_filtered_by_claims() {
+        let gateway = stocked(Some(roles()));
+        let rig = Rig::new(&gateway);
+        let dev = claims(&json!({"roles": ["dev"]}));
+        let admin = claims(&json!({"roles": "admin"}));
+        assert_eq!(
+            shown(&gateway, &rig, Some(&dev)),
+            ["alpha__search", "alpha__read"]
+        );
+        assert_eq!(
+            shown(&gateway, &rig, Some(&admin)),
+            ["alpha__search", "alpha__read", "beta__search"]
+        );
+        assert!(shown(&gateway, &rig, Some(&claims(&json!({"roles": ["x"]})))).is_empty());
+        assert!(shown(&gateway, &rig, None).is_empty());
+        // No `tool_access`: everything, as in 0132.
+        let open = stocked(None);
+        let rig = Rig::new(&open);
+        assert_eq!(shown(&open, &rig, None).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn tbac_denied_equals_unknown() {
+        let gateway = stocked(Some(json!([
+            {"tools": ["alpha__read"], "allow": {"roles": ["dev"]}},
+            {"tools": ["beta__search"], "allow": {"roles": ["admin"]}},
+        ])));
+        let rig = Rig::new(&gateway);
+        let dev = claims(&json!({"roles": ["dev"]}));
+        let call = rig.call(&gateway, Some(&dev));
         let id = serde_json::from_str::<Box<RawValue>>("7").expect("id");
+        let body = |why: &Unresolved| McpGateway::refusal(&id, why).body;
+
+        // A tool of a server the caller reaches, which a rule does not list.
         let hidden = gateway
-            .resolve(&call, "beta__search")
+            .resolve(&call, "alpha__search")
             .await
             .expect("resolved");
         let denied = gateway
             .authorize(&call.caller, &hidden, None)
             .expect_err("hidden");
+        assert_eq!(denied, Unresolved::Denied);
+        // A server the caller has no rule for is denied before its catalog is asked for.
+        let unreached = gateway
+            .resolve(&call, "beta__search")
+            .await
+            .expect_err("denied");
+        assert_eq!(unreached, Unresolved::Denied);
         let missing_tool = gateway
-            .resolve(&call, "beta__nothing")
+            .resolve(&call, "alpha__nothing")
             .await
             .expect_err("no such tool");
         let missing_server = gateway
@@ -1240,20 +1531,157 @@ mod test {
             .resolve(&call, "search")
             .await
             .expect_err("no prefix");
-        let body = |why: &Unresolved| McpGateway::refusal(&id, why).body;
-        assert_eq!(denied, Unresolved::UnknownTool);
-        assert_eq!(body(&denied), body(&missing_tool));
-        assert_eq!(body(&denied), body(&missing_server));
-        assert_eq!(body(&denied), body(&unprefixed));
-
-        // Every other tool stays callable.
-        for name in ["alpha__search", "alpha__read"] {
-            let tool = gateway.resolve(&call, name).await.expect("resolved");
-            assert!(
-                gateway.authorize(&call.caller, &tool, None).is_ok(),
-                "{name}"
-            );
+        for why in [&unreached, &missing_tool, &missing_server, &unprefixed] {
+            assert_eq!(body(&denied), body(why), "{why:?}");
         }
+
+        // What the rules list stays callable.
+        let read = gateway
+            .resolve(&call, "alpha__read")
+            .await
+            .expect("resolved");
+        assert!(gateway.authorize(&call.caller, &read, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn tbac_unreachable_server_is_not_dialled() {
+        // No catalog is cached and the addresses lead nowhere: a caller that reaches no tool of
+        // beta is refused without a fetch, so the answer is `Denied`, never `Unavailable`.
+        let config = json!({
+            "servers": two()["servers"],
+            "tool_access": [{"tools": ["alpha__read"], "allow": {"roles": ["dev"]}}],
+        });
+        let gateway = compile(&config).expect("compiled");
+        let rig = Rig::new(&gateway);
+        let dev = claims(&json!({"roles": ["dev"]}));
+        let call = rig.call(&gateway, Some(&dev));
+        assert_eq!(
+            gateway.resolve(&call, "beta__search").await.err(),
+            Some(Unresolved::Denied)
+        );
+        assert_eq!(
+            gateway.resolve(&call, "beta__anything").await.err(),
+            Some(Unresolved::Denied)
+        );
+    }
+
+    #[tokio::test]
+    async fn tbac_denied_counted() {
+        let gateway = stocked(Some(roles()));
+        let rig = Rig::new(&gateway);
+        let dev = claims(&json!({"roles": ["dev"], "sub": "ann"}));
+        let call = rig.call(&gateway, Some(&dev));
+        assert_eq!(gateway.0.runtime.denied(), 0);
+        gateway
+            .resolve(&call, "beta__search")
+            .await
+            .expect_err("denied");
+        assert_eq!(gateway.0.runtime.denied(), 1);
+        // A name that leads nowhere for everyone is not a denial.
+        gateway
+            .resolve(&call, "gamma__x")
+            .await
+            .expect_err("unknown");
+        gateway
+            .resolve(&call, "alpha__nothing")
+            .await
+            .expect_err("unknown");
+        assert_eq!(gateway.0.runtime.denied(), 1);
+        let tool = ToolRef {
+            server: "alpha".into(),
+            tool: "search".into(),
+        };
+        let dev_only = stocked(Some(json!([
+            {"tools": ["alpha__read"], "allow": {"roles": ["dev"]}}
+        ])));
+        let rig = Rig::new(&dev_only);
+        let call = rig.call(&dev_only, Some(&dev));
+        dev_only
+            .authorize(&call.caller, &tool, None)
+            .expect_err("denied");
+        assert_eq!(dev_only.0.runtime.denied(), 1);
+    }
+
+    #[test]
+    fn tbac_replayable() {
+        let tool = |server: &str, name: &str| ToolRef {
+            server: server.into(),
+            tool: name.into(),
+        };
+        let open = stocked(None);
+        assert!(open.replayable(&tool("gamma", "anything")));
+        let gateway = stocked(Some(json!([
+            {"tools": ["alpha__read"], "allow": {"roles": ["dev"]}},
+            {"tools": ["beta__*"], "allow": {"roles": ["admin"]}},
+        ])));
+        assert!(gateway.replayable(&tool("alpha", "read")));
+        assert!(gateway.replayable(&tool("beta", "anything")));
+        assert!(!gateway.replayable(&tool("alpha", "search")));
+        assert!(!stocked(Some(json!([]))).replayable(&tool("alpha", "read")));
+    }
+
+    #[test]
+    fn tbac_requires_claims_for_every_tool() {
+        let gateway = stocked(Some(roles()));
+        let rig = Rig::new(&gateway);
+        let call = rig.call(&gateway, None);
+        for (server, name) in [("alpha", "search"), ("beta", "search")] {
+            let tool = ToolRef {
+                server: server.into(),
+                tool: name.into(),
+            };
+            assert!(!gateway.visible(&call.caller, &tool), "{server}__{name}");
+        }
+    }
+
+    #[test]
+    fn tbac_posture_follows_the_rules() {
+        let narrow = json!([{"tools": ["alpha__read"], "allow": {"roles": ["dev"]}}]);
+        let wide =
+            json!([{"tools": ["alpha__read", "alpha__search"], "allow": {"roles": ["dev"]}}]);
+        let kinds = |old: Option<Value>, new: Option<Value>| {
+            let (old, new) = (stocked(old), stocked(new));
+            old.posture(Some(&new))
+        };
+        assert_eq!(
+            kinds(Some(narrow.clone()), Some(wide.clone())),
+            ["mcp_tool_access_widened"]
+        );
+        assert!(kinds(Some(wide), Some(narrow.clone())).is_empty());
+        assert!(kinds(None, Some(narrow.clone())).is_empty());
+        assert_eq!(
+            kinds(Some(narrow.clone()), None),
+            ["mcp_tool_access_removed"]
+        );
+        assert_eq!(kinds(Some(json!([])), None), ["mcp_tool_access_removed"]);
+        assert!(kinds(None, None).is_empty());
+        // A gateway that is gone relaxes nothing.
+        assert!(stocked(Some(narrow)).posture(None).is_empty());
+    }
+
+    #[test]
+    fn tbac_describe_shows_rules() {
+        let shown = stocked(Some(roles())).describe();
+        assert_eq!(
+            shown["tool_access"],
+            json!([
+                {"tools": ["alpha__*"], "allow": {"roles": ["dev", "admin"]}},
+                {"tools": ["beta__search"], "allow": {"roles": ["admin"]}},
+            ])
+        );
+        assert_eq!(stocked(None).describe()["tool_access"], Value::Null);
+    }
+
+    #[test]
+    fn tbac_rules_are_checked_against_the_registry() {
+        let mut config = two();
+        config["tool_access"] = json!([{"tools": ["gamma__x"], "allow": {"roles": ["dev"]}}]);
+        assert_eq!(code(&config), "invalid_middleware");
+        config["tool_access"] =
+            json!([{"tools": ["alpha__x"], "allow": {"roles": ["dev"]}, "extra": 1}]);
+        assert_eq!(code(&config), "invalid_middleware");
+        config["tool_access"] = json!([]);
+        assert!(compile(&config).is_ok());
     }
 
     #[tokio::test]
@@ -1286,6 +1714,7 @@ mod test {
                 app: "a",
                 session: &handle.id,
                 head: &request,
+                claims: None,
             },
             env: Env {
                 client: &client,

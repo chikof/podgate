@@ -11,6 +11,7 @@
 //! holds the answer, see [`super::sse`]). A server that answers anything else, or something that
 //! is not the answer to the request, has failed.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -153,10 +154,12 @@ struct Slot {
 }
 
 /// What outlives a snapshot push for the servers of one `mcp_gateway`: their permits, health and
-/// catalogs, one slot per declared server in declaration order.
+/// catalogs, one slot per declared server in declaration order, and the count of calls its
+/// `tool_access` refused.
 #[derive(Debug)]
 pub(super) struct Runtime {
     slots: Box<[Slot]>,
+    denied: AtomicU64,
 }
 
 impl Runtime {
@@ -169,7 +172,18 @@ impl Runtime {
                     state: Mutex::new(State::default()),
                 })
                 .collect(),
+            denied: AtomicU64::new(0),
         }
+    }
+
+    /// Counts one call the rules refused.
+    pub(super) fn count_denied(&self) {
+        self.denied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The calls the rules refused since the declaration last changed.
+    pub(super) fn denied(&self) -> u64 {
+        self.denied.load(Ordering::Relaxed)
     }
 
     fn state(&self, index: usize) -> Option<std::sync::MutexGuard<'_, State>> {

@@ -914,6 +914,7 @@ fn stages_of(
         }
     }
     rejected.extend(middleware::quota::bind_claims(app, &mut stages, &seen));
+    rejected.extend(middleware::mcp::check_identity(app, &stages, &seen));
     stages
 }
 

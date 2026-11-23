@@ -37,7 +37,7 @@ fn number(claims: &Map<String, Value>, name: &str) -> Result<Option<f64>, Failur
 
 /// Whether the claim `have` is one of `want`, or, when it is a list (roles, scopes as an
 /// array), holds one of them.
-fn matches(have: &Value, want: &[Value]) -> bool {
+pub(in crate::middleware) fn matches(have: &Value, want: &[Value]) -> bool {
     match have {
         Value::Array(items) => items.iter().any(|item| want.contains(item)),
         other => want.contains(other),
