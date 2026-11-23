@@ -320,6 +320,12 @@ fn attrs(span: &OtlpSpan) -> BTreeMap<String, Attr> {
                         })
                         .collect(),
                 ),
+                Some(any_value::Value::Double(number)) => {
+                    panic!(
+                        "span attribute {} is a double ({number}): podgate sends none",
+                        pair.key
+                    )
+                }
                 None => panic!("attribute {} has no value", pair.key),
             };
             (pair.key.clone(), value)

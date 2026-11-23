@@ -41,7 +41,7 @@ pub struct KeyValue {
 #[derive(Clone, PartialEq, Message)]
 pub struct AnyValue {
     /// Which kind it is.
-    #[prost(oneof = "any_value::Value", tags = "1, 3, 5")]
+    #[prost(oneof = "any_value::Value", tags = "1, 3, 4, 5")]
     pub value: Option<any_value::Value>,
 }
 
@@ -51,7 +51,7 @@ pub mod any_value {
 
     use super::ArrayValue;
 
-    /// A string, an integer or a list.
+    /// A string, an integer, a floating point number or a list.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Value {
         /// A string.
@@ -60,6 +60,9 @@ pub mod any_value {
         /// An integer.
         #[prost(int64, tag = "3")]
         Int(i64),
+        /// A floating point number.
+        #[prost(double, tag = "4")]
+        Double(f64),
         /// A list.
         #[prost(message, tag = "5")]
         Array(ArrayValue),
@@ -126,6 +129,17 @@ impl KeyValue {
             }),
         }
     }
+
+    /// A floating point attribute.
+    #[must_use]
+    pub fn double(key: &str, value: f64) -> Self {
+        Self {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::Double(value)),
+            }),
+        }
+    }
 }
 
 /// The resource of every export: the one attribute `service.name`.
@@ -148,6 +162,17 @@ pub fn scope() -> InstrumentationScope {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn otlp_any_value_double_round_trips() {
+        let pair = KeyValue::double("http.server.request.duration", 0.125);
+        let decoded = KeyValue::decode(pair.encode_to_vec().as_slice()).expect("decodes");
+        assert_eq!(decoded, pair);
+        assert_eq!(
+            decoded.value.and_then(|value| value.value),
+            Some(any_value::Value::Double(0.125))
+        );
+    }
 
     #[test]
     fn otlp_text_and_int_attributes_round_trip() {
