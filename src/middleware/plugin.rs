@@ -52,13 +52,12 @@ use http::{HeaderName, HeaderValue, Method};
 use pingora::http::{RequestHeader, ResponseHeader};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::time::timeout;
 
 use self::client::{Answered, CallError, frame};
 use self::limits::{Busy, Change, Permit, Slot, Slots};
 use self::registry::{Entry, Outcome};
 use self::wire::{Action, Call, Decision, Header, Phase};
-use super::{CompileCx, Flow, Kind, Named, RequestCx, Stage, StageState, headers};
+use super::{CompileCx, Flow, Kind, Named, RequestCx, Stage, StageState, buffering, headers};
 use crate::budget::{BufferGuard, TenantBudget};
 use crate::client_ip::{ForwardedView, UNKNOWN};
 use crate::compile::{Invalid, Rejected};
@@ -78,9 +77,6 @@ const MAX_NAMES: usize = 64;
 
 /// The largest `body.max_bytes`.
 const MAX_BODY: usize = 1 << 20;
-
-/// How long the client has to send the body a `request_body` call waits for.
-const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Posture change kinds this middleware reports, see [`Kind::posture`].
 pub mod kind {
@@ -759,46 +755,7 @@ impl Parts {
             return Ok(Err(AppError::PluginSaturated));
         };
         state.held.push(guard);
-        if !*cx.body_held {
-            if expects {
-                session.write_continue_response().await?;
-                session
-                    .req_header_mut()
-                    .remove_header(&http::header::EXPECT);
-            }
-            session.enable_retry_buffering();
-            let read = timeout(REQUEST_BODY_DEADLINE, async {
-                let mut total = 0_u64;
-                while let Some(chunk) = session.read_request_body().await? {
-                    total = total.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                    if total > max64 {
-                        return Ok(Err(AppError::PayloadTooLarge));
-                    }
-                }
-                Ok::<_, Box<pingora::Error>>(Ok(()))
-            })
-            .await;
-            match read {
-                Ok(read) => {
-                    if let Err(refusal) = read? {
-                        return Ok(Err(refusal));
-                    }
-                }
-                Err(_) => return Ok(Err(AppError::RequestTimeout)),
-            }
-            if session.retry_buffer_truncated() {
-                return Err(pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    "request body does not fit the replay buffer",
-                ));
-            }
-            *cx.body_held = true;
-        }
-        let body = session.get_retry_buffer().unwrap_or_default();
-        if body.len() > max {
-            return Ok(Err(AppError::PayloadTooLarge));
-        }
-        Ok(Ok(body))
+        buffering::hold_body(session, cx.body_held, max64).await
     }
 
     /// Applies the request-changing part of a decision to the request.

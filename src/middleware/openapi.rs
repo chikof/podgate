@@ -32,18 +32,16 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use pingora::ErrorType::InternalError;
 use pingora::http::ResponseHeader;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tokio::time::timeout;
 
 pub use document::Document;
 pub use schema::Dialect;
 
 use self::document::{MAX_APP_BYTES, MAX_DOCUMENT_BYTES, MAX_PER_APP, serialized_len};
 use self::request::{Head, Refusal, Violation, parse_cost};
-use super::buffering::{REQUEST_BODY_DEADLINE, declared_length, expects_continue, read_body};
+use super::buffering::{self, declared_length, expects_continue};
 use super::{CompileCx, Flow, Kind, RequestCx};
 use crate::budget::BufferGuard;
 use crate::compile::Invalid;
@@ -124,47 +122,18 @@ impl Openapi {
         declared: Option<u64>,
     ) -> pingora::Result<Result<Bytes, Stop>> {
         let max = u64::from(self.max_body);
-        if *cx.body_held {
-            // An earlier stage read the body and charged for it.
-            let body = cx.session.get_retry_buffer().unwrap_or_default();
-            if u64::try_from(body.len()).unwrap_or(u64::MAX) > max {
-                return Ok(Err(read_failed(&AppError::PayloadTooLarge)));
-            }
-            return Ok(Ok(body));
-        }
-        if let Some(tenant) = cx.tenant {
+        // An earlier stage that read the body already charged for it.
+        if !*cx.body_held
+            && let Some(tenant) = cx.tenant
+        {
             let Some(guard) = tenant.reserve_buffering(declared.unwrap_or(max)) else {
                 *cx.capacity_refusal = true;
                 return Ok(Err(Stop::Answer(AppError::BufferingOverBudget)));
             };
             state.held = Some(guard);
         }
-        if expects_continue(cx.session.req_header()) {
-            // The client waits for this before it sends the body; the upstream gets the body
-            // complete, so it never sees the expectation.
-            cx.session.write_continue_response().await?;
-            cx.session
-                .req_header_mut()
-                .remove_header(&http::header::EXPECT);
-        }
-        cx.session.enable_retry_buffering();
-        let read = timeout(REQUEST_BODY_DEADLINE, read_body(cx.session, max)).await;
-        match read {
-            Ok(read) => {
-                if let Err(err) = read? {
-                    return Ok(Err(read_failed(&err)));
-                }
-            }
-            Err(_) => return Ok(Err(read_failed(&AppError::RequestTimeout))),
-        }
-        if cx.session.retry_buffer_truncated() {
-            return Err(pingora::Error::explain(
-                InternalError,
-                "request body does not fit the replay buffer",
-            ));
-        }
-        *cx.body_held = true;
-        Ok(Ok(cx.session.get_retry_buffer().unwrap_or_default()))
+        let held = buffering::hold_body(cx.session, cx.body_held, max).await?;
+        Ok(held.map_err(|err| read_failed(&err)))
     }
 }
 

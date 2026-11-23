@@ -26,14 +26,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{CONTENT_ENCODING, CONTENT_TYPE, EXPECT, UPGRADE};
+use http::header::{CONTENT_ENCODING, CONTENT_TYPE, UPGRADE};
 use http::{HeaderMap, Method};
 use pingora::http::RequestHeader;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::time::timeout;
 
-use super::buffering::{declared_length, expects_continue};
+use super::buffering::{self, declared_length, expects_continue};
 use super::guard::{self, Armed, Endpoint, EndpointSpec, Env, OnError, Phase, Runtimes};
 use super::{CompileCx, Flow, HeldCx, Hold, Kind, RequestCx, ResponseCx, state};
 use crate::budget::BufferGuard;
@@ -61,8 +60,6 @@ const MAX_CONCURRENT: u32 = 4096;
 const MAX_GUARDS: usize = 8;
 /// The longest guard name.
 const MAX_NAME: usize = 32;
-/// How long a client has to send the prompt that is being held.
-const BODY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The configuration of an `llm_guard` middleware.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -165,10 +162,6 @@ fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
-}
-
-fn len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).unwrap_or(u64::MAX)
 }
 
 /// A body or header that says the body is encoded: the guard could not read it.
@@ -339,8 +332,8 @@ impl LlmGuard {
             .collect()
     }
 
-    /// Holds the request body (up to `max_prompt_bytes`) and returns it, the way `plugin` does:
-    /// when another stage already held it, it is read back from the replay buffer.
+    /// Holds the request body (up to `max_prompt_bytes`) and returns it: when another stage
+    /// already held it, it is read back from the replay buffer ([`buffering::hold_body`]).
     async fn hold_prompt(
         &self,
         cx: &mut RequestCx<'_>,
@@ -367,45 +360,7 @@ impl LlmGuard {
             return Ok(Err(AppError::GuardSaturated));
         };
         state.request_charge = Some(charge);
-        if !*cx.body_held {
-            let session = &mut *cx.session;
-            if expects {
-                session.write_continue_response().await?;
-                session.req_header_mut().remove_header(&EXPECT);
-            }
-            session.enable_retry_buffering();
-            let read = timeout(BODY_DEADLINE, async {
-                let mut total = 0_u64;
-                while let Some(chunk) = session.read_request_body().await? {
-                    total = total.saturating_add(len(&chunk));
-                    if total > max {
-                        return Ok(Err(AppError::PayloadTooLarge));
-                    }
-                }
-                Ok::<_, Box<pingora::Error>>(Ok(()))
-            })
-            .await;
-            match read {
-                Ok(read) => {
-                    if let Err(refusal) = read? {
-                        return Ok(Err(refusal));
-                    }
-                }
-                Err(_) => return Ok(Err(AppError::RequestTimeout)),
-            }
-            if session.retry_buffer_truncated() {
-                return Err(pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    "request body does not fit the replay buffer",
-                ));
-            }
-            *cx.body_held = true;
-        }
-        let body = cx.session.get_retry_buffer().unwrap_or_default();
-        if len(&body) > max {
-            return Ok(Err(AppError::PayloadTooLarge));
-        }
-        Ok(Ok(body))
+        buffering::hold_body(cx.session, cx.body_held, max).await
     }
 
     /// Judges the prompt of the request on `cx`.

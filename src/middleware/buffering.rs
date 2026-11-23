@@ -58,7 +58,7 @@ use podgate_model::Declared;
 pub const MAX_BUFFERED_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// How long a client has to send a request body that is being held.
-pub(super) const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
+const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Granularity of the charge for a response of unknown length: Pingora reads an upstream body in
 /// chunks of at most this size, so the charge stays ahead of the allocation without one guard
@@ -239,10 +239,7 @@ fn has_body(request: &RequestHeader, status: StatusCode) -> bool {
 }
 
 /// Reads the whole request body, so Pingora's replay buffer holds it.
-pub(super) async fn read_body(
-    session: &mut Session,
-    max: u64,
-) -> pingora::Result<Result<(), AppError>> {
+async fn read_body(session: &mut Session, max: u64) -> pingora::Result<Result<(), AppError>> {
     let mut total = 0_u64;
     while let Some(chunk) = session.read_request_body().await? {
         total = total.saturating_add(len(&chunk));
@@ -251,6 +248,53 @@ pub(super) async fn read_body(
         }
     }
     Ok(Ok(()))
+}
+
+/// Holds the request body, at most `max` bytes, in Pingora's replay buffer and returns it: the
+/// one place a stage that must see the whole body before the upstream is dialled reads it.
+///
+/// When `body_held` is already set an earlier stage read the body, and it is only read back from
+/// the buffer. Otherwise a pending `Expect: 100-continue` is answered here and removed (the
+/// upstream gets a complete body, so it never sees the expectation), the body is read under
+/// [`REQUEST_BODY_DEADLINE`] and `body_held` is set. The inner `Err` is the refusal to write:
+/// `413` past `max`, `408` when the client is too slow. The caller charges the tenant first.
+///
+/// # Errors
+///
+/// A read failure, or a body that does not fit the replay buffer (an internal error: callers
+/// keep `max` within [`MAX_BUFFERED_REQUEST_BYTES`]).
+pub(super) async fn hold_body(
+    session: &mut Session,
+    body_held: &mut bool,
+    max: u64,
+) -> pingora::Result<Result<Bytes, AppError>> {
+    if !*body_held {
+        if expects_continue(session.req_header()) {
+            session.write_continue_response().await?;
+            session.req_header_mut().remove_header(&EXPECT);
+        }
+        session.enable_retry_buffering();
+        match timeout(REQUEST_BODY_DEADLINE, read_body(session, max)).await {
+            Ok(read) => {
+                if let Err(refusal) = read? {
+                    return Ok(Err(refusal));
+                }
+            }
+            Err(_) => return Ok(Err(AppError::RequestTimeout)),
+        }
+        if session.retry_buffer_truncated() {
+            return Err(Error::explain(
+                InternalError,
+                "request body does not fit the replay buffer",
+            ));
+        }
+        *body_held = true;
+    }
+    let body = session.get_retry_buffer().unwrap_or_default();
+    if len(&body) > max {
+        return Ok(Err(AppError::PayloadTooLarge));
+    }
+    Ok(Ok(body))
 }
 
 impl Buffering {
@@ -277,28 +321,10 @@ impl Buffering {
             };
             state.request_charge = Some(guard);
         }
-        if expects_continue(cx.session.req_header()) {
-            // The client waits for this before it sends the body; the upstream never sees the
-            // expectation, because the body is complete when its request starts.
-            cx.session.write_continue_response().await?;
-            cx.session.req_header_mut().remove_header(&EXPECT);
-        }
-        cx.session.enable_retry_buffering();
-        let refusal = match timeout(REQUEST_BODY_DEADLINE, read_body(cx.session, max)).await {
-            Ok(read) => read?.err(),
-            Err(_) => Some(AppError::RequestTimeout),
-        };
-        if let Some(refusal) = refusal {
+        if let Err(refusal) = hold_body(cx.session, cx.body_held, max).await? {
             respond::write_error(cx.session, &refusal).await?;
             return Ok(Flow::Respond);
         }
-        if cx.session.retry_buffer_truncated() {
-            return Err(Error::explain(
-                InternalError,
-                "request body does not fit the replay buffer",
-            ));
-        }
-        *cx.body_held = true;
         Ok(Flow::Continue)
     }
 }
