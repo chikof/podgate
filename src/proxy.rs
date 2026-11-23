@@ -193,6 +193,7 @@ pub struct Gateway {
     node: Option<HeaderValue>,
     cache: Cache,
     auth_client: middleware::forward_auth::Client,
+    mcp_sessions: middleware::mcp::Sessions,
     rate_limit_stores: crate::ratelimit_store::Stores,
     alt_svc: Option<AltSvc>,
 }
@@ -221,6 +222,7 @@ impl Gateway {
             access_log: None,
             page_fetcher: errors::fetch::Fetcher::default(),
             auth_client: middleware::forward_auth::Client::new(upstream_timeout),
+            mcp_sessions: middleware::mcp::Sessions::new(),
             rate_limit_stores: crate::ratelimit_store::Stores::default(),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
@@ -424,6 +426,7 @@ impl Gateway {
             events: &self.events,
             hashing: &self.basic_auth,
             auth: &self.auth_client,
+            sessions: &self.mcp_sessions,
             stores: &self.rate_limit_stores,
             policy: &self.upstream_policy,
             body_held: &mut ctx.body_held,

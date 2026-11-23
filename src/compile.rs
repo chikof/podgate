@@ -307,6 +307,15 @@ pub(crate) fn build(snapshot: &Snapshot, context: &CompileContext) -> Result<Bui
                     invalid,
                 ));
             }
+            if let Stage::McpGateway(gateway) = &named.stage
+                && let Err(invalid) = gateway.check_budget(&app.tenant, max_buffer_bytes)
+            {
+                rejected.push(Rejected::new(
+                    app,
+                    format!("middleware {}", named.name),
+                    invalid,
+                ));
+            }
         }
         let transports = transports_of(app, context.spiffe(), &mut rejected);
         let services = services_of(
@@ -811,6 +820,7 @@ fn stages_of(
                     middleware::Stage::Opa(opa) => opa.bind(resolver),
                     middleware::Stage::JwtAuth(auth) => auth.bind(resolver),
                     middleware::Stage::Oidc(auth) => auth.bind(skew_secret, resolver)?,
+                    middleware::Stage::McpGateway(gateway) => gateway.bind(resolver),
                     _ => {}
                 }
                 Ok(stage)

@@ -35,7 +35,7 @@
 mod client;
 
 pub use client::Client;
-pub(super) use client::{ALLOWANCE, Parsed, REQUEST_LIMIT, Route, parse_url};
+pub(super) use client::{ALLOWANCE, Answer, Parsed, REQUEST_LIMIT, Route, Stop, parse_url};
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -56,6 +56,7 @@ pub mod in_flight_req;
 pub mod ip_allow_list;
 pub mod jwt_auth;
 pub(crate) mod limits;
+pub mod mcp;
 pub mod oidc;
 pub mod opa;
 pub mod pass_tls_client_cert;
@@ -114,6 +115,8 @@ pub struct RequestCx<'a> {
     pub hashing: &'a basic_auth::Pool,
     /// Dials the auth service of a `forward_auth` stage.
     pub auth: &'a forward_auth::Client,
+    /// The sessions of every `mcp_gateway` stage, bounded per tenant.
+    pub sessions: &'a mcp::Sessions,
     /// The shared stores of cluster-scope `rate_limit` middlewares.
     pub stores: &'a crate::ratelimit_store::Stores,
     /// The operator's rule for the addresses the proxy may dial.
@@ -901,6 +904,8 @@ kinds! {
 
     "errors" => Errors(errors::Errors),
 
+    "mcp_gateway" => McpGateway(mcp::McpGateway),
+
     "pass_tls_client_cert" => PassTlsClientCert(pass_tls_client_cert::PassTlsClientCert),
 
     "grpc_web" => GrpcWeb(grpc_web::GrpcWeb),
@@ -975,6 +980,8 @@ schemas! {
     "compress" => compress::Config,
 
     "errors" => errors::Config,
+
+    "mcp_gateway" => mcp::Config,
 
     "respond" => respond::Config,
 

@@ -30,7 +30,9 @@ use pingora::protocols::l4::socket::SocketAddr as PeerAddr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use crate::middleware::errors::fetch::{Failure, Framing, HEAD_LIMIT, READ, fill, find, read_body};
+use crate::middleware::errors::fetch::{
+    Failure, Framing, HEAD_LIMIT, READ, fill, find, read_body, read_body_until,
+};
 use crate::service::resolve::{Resolver, is_host_name};
 use crate::service::upstream_policy::UpstreamPolicy;
 use crate::service::{Server, Transport, Upstream};
@@ -222,6 +224,27 @@ impl Client {
         max_body: usize,
         wait: Duration,
     ) -> Result<Answer, Failure> {
+        self.call_until(route, request, max_body, wait, |_, _| None)
+            .await
+    }
+
+    /// Like [`Self::call`], but `until` sees the status and headers of the answer and may hand
+    /// back a predicate that is asked after every piece of the body that arrives: the first
+    /// `true` ends the read, and the body is what was read by then. It is how an answer that is
+    /// an event stream is read to the message the caller waits for while the server keeps the
+    /// stream open. `None` reads the body to its end.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::call`].
+    pub(in crate::middleware) async fn call_until(
+        &self,
+        route: &Route<'_>,
+        request: &[u8],
+        max_body: usize,
+        wait: Duration,
+        until: impl FnOnce(u16, &HeaderMap) -> Option<Stop> + Send,
+    ) -> Result<Answer, Failure> {
         let wait = wait.min(self.ceiling);
         let exchange = async {
             // The exact address about to be dialled, every time; a name resolves here and
@@ -239,7 +262,7 @@ impl Client {
             let mut stream = Box::pin(self.connector.new_stream(&peer))
                 .await
                 .map_err(|err| Failure::Connect(err.to_string().into()))?;
-            exchange(&mut stream, request, max_body).await
+            exchange(&mut stream, request, max_body, until).await
         };
         timeout(wait, exchange)
             .await
@@ -247,8 +270,16 @@ impl Client {
     }
 }
 
+/// What ends the read of a body early: asked with the body read so far after every piece.
+pub(in crate::middleware) type Stop = Box<dyn FnMut(&[u8]) -> bool + Send>;
+
 /// Sends `request` over `stream` and reads the answer.
-async fn exchange<S>(stream: &mut S, request: &[u8], max_body: usize) -> Result<Answer, Failure>
+async fn exchange<S>(
+    stream: &mut S,
+    request: &[u8],
+    max_body: usize,
+    until: impl FnOnce(u16, &HeaderMap) -> Option<Stop>,
+) -> Result<Answer, Failure>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -265,7 +296,10 @@ where
     };
     let (status, headers, framing) = parse_head(&buffer[..head_end])?;
     buffer.drain(..head_end);
-    let body = read_body(stream, buffer, framing, max_body).await?;
+    let body = match until(status, &headers) {
+        Some(mut stop) => read_body_until(stream, buffer, framing, max_body, &mut stop).await?,
+        None => read_body(stream, buffer, framing, max_body).await?,
+    };
     Ok(Answer {
         status,
         headers,
@@ -358,7 +392,7 @@ mod test {
             drop(server.write_all(&answer).await);
             drop(server.shutdown().await);
         });
-        exchange(&mut client, b"GET / HTTP/1.1\r\n\r\n", cap).await
+        exchange(&mut client, b"GET / HTTP/1.1\r\n\r\n", cap, |_, _| None).await
     }
 
     #[test]

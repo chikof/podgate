@@ -509,6 +509,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     plants.push(oidc_secret.clone());
     let plugin_secret = plant("plugin-config-token");
     plants.push(plugin_secret.clone());
+    let mcp_key = plant("mcp-server-key");
+    plants.push(mcp_key.clone());
 
     let kinds = vec![
         (
@@ -604,6 +606,11 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
         (
             "plugin",
             json!({"plugin": "demo", "config": {"token": plugin_secret}}),
+        ),
+        (
+            "mcp_gateway",
+            json!({"servers": [{"name": "search", "address": format!("http://10.0.0.7:8080/mcp?key={mcp_key}")}],
+                   "allowed_origins": ["https://app.example.com"]}),
         ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
@@ -728,6 +735,8 @@ fn planted(upstream: SocketAddr) -> (Value, Vec<String>) {
         "on_store_error": "allow", "local_fallback": {"average": 2, "burst": 4},
     }));
     let mut pushed = snapshot(1, &[a]);
+    // An `mcp_gateway` stage needs a budget that holds one `tools/call`.
+    pushed["tenants"][0]["budget"]["max_buffer_bytes"] = json!(64 * 1024 * 1024);
     pushed["certificates"] = json!([cert.entry(&["a.test"])]);
     pushed["skew_secret"] = json!(skew);
     // The `oidc` stage needs TLS in front of a plain entry point.

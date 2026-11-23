@@ -295,9 +295,26 @@ fn parse_head(raw: &[u8]) -> Result<Head, Failure> {
 /// Reads the body, which starts with `buffer` (what the head read brought in beyond the head).
 pub(crate) async fn read_body<S>(
     stream: &mut S,
+    buffer: Vec<u8>,
+    framing: Framing,
+    cap: usize,
+) -> Result<Vec<u8>, Failure>
+where
+    S: AsyncRead + Unpin,
+{
+    read_body_until(stream, buffer, framing, cap, |_| false).await
+}
+
+/// Like [`read_body`], but `done` sees the whole body read so far after every piece that
+/// arrives, and a `true` ends the read there: the caller has what it came for, whatever the
+/// framing still promises (an event stream a server leaves open after its answer). The body
+/// returned is what was read, still bounded by `cap`.
+pub(crate) async fn read_body_until<S>(
+    stream: &mut S,
     mut buffer: Vec<u8>,
     framing: Framing,
     cap: usize,
+    mut done: impl FnMut(&[u8]) -> bool,
 ) -> Result<Vec<u8>, Failure>
 where
     S: AsyncRead + Unpin,
@@ -315,6 +332,9 @@ where
                 let take = buffer.len().min(length - body.len());
                 body.extend_from_slice(&buffer[..take]);
                 buffer.drain(..take);
+                if done(&body) {
+                    break;
+                }
             }
             Ok(body)
         }
@@ -325,6 +345,9 @@ where
                     return Err(Failure::TooLarge);
                 }
                 body.append(&mut buffer);
+                if done(&body) {
+                    return Ok(body);
+                }
                 let mut chunk = vec![0_u8; READ];
                 match stream.read(&mut chunk).await? {
                     0 => return Ok(body),
@@ -332,7 +355,7 @@ where
                 }
             }
         }
-        Framing::Chunked => read_chunked(stream, buffer, cap).await,
+        Framing::Chunked => read_chunked(stream, buffer, cap, done).await,
     }
 }
 
@@ -348,6 +371,7 @@ async fn read_chunked<S>(
     stream: &mut S,
     mut buffer: Vec<u8>,
     cap: usize,
+    mut done: impl FnMut(&[u8]) -> bool,
 ) -> Result<Vec<u8>, Failure>
 where
     S: AsyncRead + Unpin,
@@ -381,6 +405,9 @@ where
                 let take = buffer.len().min(remaining);
                 body.extend_from_slice(&buffer[..take]);
                 buffer.drain(..take);
+                if done(&body) {
+                    return Ok(body);
+                }
                 match remaining - take {
                     0 => Chunk::DataEnd,
                     left => Chunk::Data(left),
@@ -463,6 +490,48 @@ mod test {
     async fn get(answer: &[u8], close: bool, cap: usize) -> Result<Fetched, Failure> {
         let mut client = serve(answer.to_vec(), close);
         exchange(&mut client, &QUERY, cap).await
+    }
+
+    /// Reads a body the server leaves open after `wire`, until `needle` is in it.
+    async fn until(framing: Framing, wire: &[u8], needle: &'static [u8]) -> Vec<u8> {
+        let (mut client, mut server) = duplex(64 * 1024);
+        let wire = wire.to_vec();
+        tokio::spawn(async move {
+            drop(server.write_all(&wire).await);
+            std::future::pending::<()>().await;
+        });
+        timeout(
+            Duration::from_secs(5),
+            read_body_until(&mut client, Vec::new(), framing, 1024, |body| {
+                find(body, needle).is_some()
+            }),
+        )
+        .await
+        .expect("the read stopped by itself")
+        .expect("a body")
+    }
+
+    #[tokio::test]
+    async fn a_body_read_stops_once_the_caller_has_what_it_wants() {
+        let wire = b"abc-needle-def";
+        assert_eq!(until(Framing::Length(100), wire, b"needle").await, wire);
+        assert_eq!(until(Framing::Close, wire, b"needle").await, wire);
+        let chunked = b"7\r\nabc-nee\r\n6\r\ndle-de\r\n";
+        assert_eq!(
+            until(Framing::Chunked, chunked, b"needle").await,
+            b"abc-needle-de"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_body_read_is_still_capped() {
+        let (mut client, mut server) = duplex(64 * 1024);
+        tokio::spawn(async move {
+            drop(server.write_all(&[b'x'; 2048]).await);
+            std::future::pending::<()>().await;
+        });
+        let read = read_body_until(&mut client, Vec::new(), Framing::Close, 1024, |_| false).await;
+        assert!(matches!(read, Err(Failure::TooLarge)), "{read:?}");
     }
 
     #[tokio::test]
