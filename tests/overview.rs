@@ -511,6 +511,8 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
     plants.push(plugin_secret.clone());
     let mcp_key = plant("mcp-server-key");
     plants.push(mcp_key.clone());
+    let openapi_secret = plant("openapi-description-secret");
+    plants.push(openapi_secret.clone());
 
     let kinds = vec![
         (
@@ -611,6 +613,12 @@ fn every_kind(plants: &mut Vec<String>) -> Vec<(&'static str, Value)> {
             "mcp_gateway",
             json!({"servers": [{"name": "search", "address": format!("http://10.0.0.7:8080/mcp?key={mcp_key}")}],
                    "allowed_origins": ["https://app.example.com"]}),
+        ),
+        (
+            "openapi",
+            json!({"document": {"openapi": "3.1.0",
+                   "info": {"title": "Pets", "version": "1", "description": openapi_secret},
+                   "paths": {"/p": {"get": {}}}}}),
         ),
     ];
     let mut declared: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();

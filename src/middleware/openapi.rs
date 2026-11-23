@@ -15,7 +15,7 @@
 //! The answer is `{"error": "request does not match the API description", "violations": [...]}`,
 //! at most 10 violations, none of them repeating a value from the request.
 //!
-//! Tenant-supplied input, so everything is bounded: the caps are constants in [`document`], only
+//! Tenant-supplied input, so everything is bounded: the caps are constants in `openapi/document.rs`, only
 //! a local `$ref` is followed, a `$ref` cycle and a schema keyword the validator cannot enforce
 //! are refused when the snapshot compiles, a JSON body is held in memory (at most
 //! `max_body_bytes`, charged to the tenant's `max_buffer_bytes` before it is read), and a request
