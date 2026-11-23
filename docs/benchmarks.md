@@ -273,6 +273,74 @@ Forwarding on costs 21% more CPU per request in this series (1.692 against 1.398
 
 The full `scripts/bench-proxies.sh` run of change 0116 was not repeated. The verdict tables above describe a build close to the B variant, and N is 3.4% faster at `h1-c64` by the medians here. That changes no verdict except possibly `h1-16k` against Traefik, where the page says "inconclusive" and a few percent could make it "faster".
 
+### Where an HTTP/3 request spends its CPU
+
+Change 0121 measured `h3-c64` at 3.1 CPU s per 100k requests against 1.4 for HTTP/1.1, about twice. This section splits that cost by owner, to show whether it sits in podgate's bridge or in the QUIC library. The tool is the callgrind of change 0120, so it counts user-space instructions only; the kernel part is in the last table. `scripts/bench-callgrind.sh` takes `LOAD=h3` (HTTP/3 through the `;http3` front, `examples/load_bench h3-count`) or `LOAD=tls-h1` (HTTP/1.1 keep-alive over TLS 1.3 through the same podgate without `;http3`, `load_bench tls-count`). Every connection is made and every handshake done first, then 10000 requests warm the process, then the counters are zeroed through files in a sync directory, 50000 requests are counted, and the counters are dumped, so the count holds requests and nothing else. Forwarding headers are off, as in 0120. `scripts/bench-owners.sh` adds up each function's own instructions by owner (`bench/owners.tsv`: the crate named in the symbol, with `core::`/`alloc::` generics resolved to the crate inside them; `--by file` uses the source file of each line instead). A second view (`--inherit`) charges library code that every layer calls (allocator, `memcpy`, the `http`, `bytes` and `std` leaf functions) to the owners that call it, in proportion to the inclusive cost of each caller edge. That weighting is an approximation. The two views agree within 10% on the large owners (`quinn` 14118 against 15587 by file, the hop 31368 against 31653) and differ by 1100 instructions on podgate's own `src/h3/` (3566 against 2473); the `--by file` table is in `bench/results/2026-11-22-0123/`.
+
+**QUIC recovery must not inflate the count.** Under callgrind podgate runs 20 to 50 times slower while quinn's timers keep wall-clock time, so quinn may send acknowledgements or probes that a normal run does not, and those instructions would be quinn's. A podgate built with the new `h3-stats` feature (off in every shipped build) logs `quinn::ConnectionStats` of each HTTP/3 connection when it ends, and `load_bench` reports the client's. quinn does not count probe timeouts, so a timeout shows only as a ping frame or as stream frames sent twice. Per request, over the warm-up and the counted requests of every connection, podgate's side:
+
+|Run|Connections|Packets sent|Packets lost|Congestion events|Ping frames|Stream frames sent|ACK frames sent|Datagrams received|
+|---|---|---|---|---|---|---|---|---|
+|callgrind, c64|64|1.969|0|0|0.0043|1.004|1.465|1.114|
+|normal run 1, c64|64|1.096|0|0|0.0043|1.004|1.006|1.097|
+|normal run 2, c64|64|1.096|0|0|0.0043|1.004|1.008|1.096|
+|callgrind, c4, run 1|4|1.079|0|0|0.0003|1.0004|1.0004|1.079|
+|callgrind, c4, run 2|4|1.079|0|0|0.0003|1.0005|1.0004|1.079|
+|normal run, c4|4|1.079|0|0|0.0003|1.0004|1.0004|1.079|
+
+At 64 connections callgrind does not match the normal run: podgate sends 0.87 more packets per request (1.969 against 1.096), 0.46 more of them ACK frames, while nothing is lost and no congestion event happens. Its quinn share is 17173 instructions per request there against 14118 at 4 connections, 22% more, with 2300 (1.3%) more in total. That is the bias the check exists for, so the 64 connection callgrind run is not used. At 4 connections the two agree to three decimals on every counter, with no lost packet, no congestion event and the same ACK, stream and datagram counts, so the c4 runs count what a normal run does. The client's own counters (also in `quic-stats.jsonl`) show the same. `LOAD=tls-h1` has no such bias because TCP recovery runs in the kernel, outside callgrind; its c4 and c64 runs are within 1.3% of each other.
+
+**Instructions per request** (50000 counted, forwarding off, 4 proxy threads on `taskset` CPUs):
+
+|Load|Connections|Runs|Spread|
+|---|---|---|---|
+|HTTPS, `tls-h1` shape|4|88736, 88133|0.7%|
+|HTTPS, `tls-h1` shape|64|89318, 89244|0.1%|
+|HTTP/3, `h3-c64` shape, QUIC recovery checked|4|176226, 176280|0.03%|
+|HTTP/3, 64 connections, not used (inflated)|64|178526|n/a|
+
+An HTTP/3 request costs 1.99 times the instructions of an HTTPS one at the same connection count (176226 against 88736). Both pairs of runs agree within 1%. The split, HTTP/3 and HTTPS at 4 connections (first run of each), own instructions per request, then with library code charged to its callers:
+
+|Owner|HTTP/3|HTTPS|HTTP/3 minus HTTPS|Charged to callers: HTTP/3|HTTPS|Difference|
+|---|---|---|---|---|---|---|
+|`quinn`, `quinn-proto`|14118|0|+14118|16065|0|+16065|
+|`h3`, `h3-quinn`|14821|0|+14821|23919|0|+23919|
+|podgate `src/h3/` (front, endpoint, limits)|3566|0|+3566|10302|0|+10302|
+|Internal HTTP/2 hop, total|31368|0|+31368|43131|0|+43131|
+|of which the `h2` crate, both sides|23458|0|+23458|31754|0|+31754|
+|of which Pingora's h2 server side|4933|0|+4933|7568|0|+7568|
+|of which `bridge.rs`, the client side|2977|0|+2977|3809|0|+3809|
+|Pingora h1 server codec|0|2206|-2206|0|5007|-5007|
+|Shared pipeline (podgate and Pingora)|24573|27034|-2461|52518|64378|-11860|
+|`rustls`, `ring`|2969|6916|-3947|3124|7642|-4518|
+|tokio runtime|20523|9411|+11112|27167|11709|+15458|
+|Allocator|20887|15854|+5033|in the callers|||
+|libc `memcpy`, `memset`|12875|4636|+8239|in the callers|||
+|libc system calls and locks|1408|731|+677|in the callers|||
+|Other (`http`, `bytes`, `std`, `tracing`, ...)|29119|21947|+7171|in the callers|||
+|Total|176226|88736|+87490|176226|88736|+87490|
+
+The `h2` crate does not say which side it serves, so its 23458 cannot be split between the client in `bridge.rs` and the server in Pingora. The two typed parts (`UnixStream` against the accepted stream) are small. The files with the table, the top functions and the owner rules are in `bench/results/2026-11-22-0123/` and `bench/owners.tsv`.
+
+**User against system CPU, `h3-c64` and `tls-h1`: INCONCLUSIVE.** `scripts/bench-user-system.sh` ran 10 fresh starts of each, interleaved, 15 s runs after a 2 s warm-up, with the release profile, reading podgate's user and system ticks from `/proc/<pid>/stat` over the steady window. Another agent compiled Rust on this machine outside the build lock, so the foreign cores on the proxy CPUs were 0.32 to 1.90 in the HTTP/3 starts and -0.03 to 0.56 in the HTTPS ones, and 0.95 to 9.4 on the whole machine. Only 1 HTTP/3 start (0.32) and 9 of 10 HTTPS starts had at most 0.5 foreign cores on the proxy CPUs, and the plan asked for at least 5 quiet starts, so the absolute numbers below are the loaded ones and are not a result:
+
+|Load|Starts|req/s|CPU s/100k|User s/100k|System s/100k|System share of the process's CPU|Softirq share of the proxy CPUs' busy time|
+|---|---|---|---|---|---|---|---|
+|`h3-c64`|10|71.5 k (47.2 k to 88.0 k)|3.115 (2.636 to 3.878)|2.358 (1.978 to 2.977)|0.757 (0.660 to 0.903)|24.7% (23.3% to 26.0%)|6.2% (5.2% to 7.7%)|
+|`tls-h1`|10|165.8 k (140.3 k to 183.2 k)|1.826 (1.734 to 1.908)|1.321 (1.260 to 1.359)|0.506 (0.474 to 0.549)|27.9% (26.8% to 28.8%)|12.8% (11.9% to 13.5%)|
+
+What the loaded runs do show is the shape. The share of system time in the process's CPU is the same to within 2 points in every start of both loads (23.3% to 26.0% for HTTP/3, 26.8% to 28.8% for HTTPS), so the split does not move with the load, although the throughput of HTTP/3 fell to 71 k from the 112 k of change 0121. So the process spends about a quarter of its CPU in the kernel for either protocol, and the HTTP/3 request costs 0.25 CPU s per 100k more of it (0.757 against 0.506) and 1.04 CPU s per 100k more of user time (2.358 against 1.321). That user ratio (1.79) is below the instruction ratio (1.99). [INFERENCE] The kernel work of HTTP/3 is one `sendmsg` and one `recvmsg` per datagram, 1.1 datagrams each way per request, with no batching to gain from at one request in flight per connection. A quiet rerun is needed before these numbers are quoted: `flock ~/.cache/podgate-cargo.lock scripts/bench-user-system.sh`, with the machine idle.
+
+**What the split says about the bridge and the QUIC library.** Of the 87490 extra instructions an HTTP/3 request costs over an HTTPS one, charged to the owners that call the library code:
+
+- The internal HTTP/2 hop, 43131 (49%), is the largest single owner. It is podgate's own design: the request is encoded as HTTP/2 headers and frames by the `h2` client in `bridge.rs`, sent over a unix socket, decoded by the `h2` server inside Pingora, and the response goes back the same way. HTTPS has none of it, its downstream codec costs 5007 less.
+- The QUIC library and the HTTP/3 layer together, 39984 (46%): `quinn` and `quinn-proto` 16065 (18%), `h3` and `h3-quinn` 23919 (27%). The largest `h3` function is QPACK string encoding (`h3::qpack::prefix_string::encode`, about 4200 own instructions per request); the largest `quinn` functions are `poll_transmit` (about 1000) and the UDP `poll_recv` (about 400).
+- podgate's own `src/h3/` code (front, endpoint, limits), 10302 (12%) with the allocation and copies it causes, of which only 3566 is its own functions.
+- The tokio runtime, 15458 (18%): the QUIC endpoint and the extra tasks per request (the request task, the bridge's connection task, wake-ups) cost scheduler work that a single HTTP/1.1 connection task does not. [INFERENCE] The task counts were not measured.
+- Offsetting these, the shared pipeline costs 11860 less (the cause was not traced), TLS 4518 less (the QUIC packet protection costs less than the TLS record layer; not traced either) and the h1 codec 5007 less.
+
+So the cost is not in one place. The bridge (the hop plus the front's glue, 53433, 61% of the extra) is bigger than the QUIC library with the HTTP/3 layer (39984, 46%), and the QUIC library on its own (`quinn`, 16065, 18% of the extra, 9% of an HTTP/3 request) is the smallest of the three. Replacing `quinn` with `quiche` would at best change that 9% of the request, and `quiche` brings its own HTTP/3 layer, so the 27% of `h3` would change with it, not the hop. [INFERENCE] The part of HTTP/3 speed that podgate controls is the hop: serving the request to the pipeline without re-encoding it as HTTP/2 over a socket would remove up to 43131 instructions, 24% of an HTTP/3 request (half of the extra), and costs a Pingora session that takes its request from the front directly; Pingora has no such entry today. Nothing in `bridge.rs` or `front.rs` is cheap to remove on its own: their own functions are 2977 and 3566 instructions in all (2% of the request together), so halving them gains 2%. 
+
 ## What limited each result
 
 Why not double? Each number has a limiter, measured and not assumed.
@@ -366,3 +434,5 @@ Change 0121's passes are in `bench/results/2026-11-22-0121/`: `udp-pool-a.jsonl`
 The charts in `docs/benchmarks/` come from the same result files. `scripts/bench-charts.sh` redraws them from the newest `bench/results/<date>/runs.jsonl` (and the `attribution.jsonl` next to it, or the newest one there is), `scripts/bench-charts.sh <results dir>` from another run, and `scripts/bench-charts.sh --check` (part of `check`) fails when a chart no longer matches its results.
 
 Instructions per request, which machine load does not disturb: build with symbols in a target directory of its own (`CARGO_TARGET_DIR=target/cg CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --bin podgate --example fast_upstream`), then `PODGATE_BIN=target/cg/release/podgate UPSTREAM_BIN=target/cg/release/examples/fast_upstream flock ~/.cache/podgate-cargo.lock scripts/bench-callgrind.sh` inside `devenv shell`. It prints the instructions per request and writes the dump and the `callgrind_annotate` listings to `OUT`; the data of the 0120 timing series is in `bench/results/2026-11-22-0120/` (`series-1.jsonl` and `series-2.jsonl`, one line per fresh start, labelled `variant` and `start`; neither file is named `runs.jsonl`, so the charts ignore them).
+
+Where an HTTP/3 request spends its CPU: build with `--features h3-stats` and `--example bench_cert --example load_bench` added to the command above, set `CERT_BIN` and `LOAD_BIN` to the `target/cg` examples, and run `LOAD=h3 CONNECTIONS=4 scripts/bench-callgrind.sh` and `LOAD=tls-h1 CONNECTIONS=4 scripts/bench-callgrind.sh` under the lock. `LOAD=h3 NATIVE=1 CONNECTIONS=4 scripts/bench-callgrind.sh` is the same load without valgrind; compare its `quic.json` with the callgrind run's before trusting a `quinn` share. `scripts/bench-owners.sh --inherit <tls out dir> <h3 out dir>` prints the split. The user and system CPU runs are `flock ~/.cache/podgate-cargo.lock scripts/bench-user-system.sh` with a release build. The data of change 0123 is in `bench/results/2026-11-22-0123/` (`timing.jsonl` is not named `runs.jsonl` so that `scripts/bench-charts.sh` does not draw it).

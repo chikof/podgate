@@ -1,0 +1,47 @@
+dump 1: h3-c4-a (50000 requests, owners by sym)
+dump 2: h3-c4-b (50000 requests, owners by sym)
+
+owner                                       ir/req 1     % 1    ir/req 2     % 2     2 minus 1 of dump 1
+internal h2 hop                                31368   17.8%       31432   17.8%           +64      0.0%
+  h2 crate, not told apart                     23458   13.3%       23508   13.3%           +50      0.0%
+  server side (pingora, h2 over the accepted stream)        4933    2.8%        4949    2.8%           +17      0.0%
+  client side (bridge.rs, h2 over the unix socket)        2977    1.7%        2975    1.7%            -3     -0.0%
+other                                          29119   16.5%       29123   16.5%            +5      0.0%
+shared pipeline                                24573   13.9%       24683   14.0%          +110      0.1%
+allocator                                      20887   11.9%       20668   11.7%          -219     -0.1%
+tokio runtime                                  20523   11.6%       20657   11.7%          +134      0.1%
+h3                                             14821    8.4%       14795    8.4%           -26     -0.0%
+quinn                                          14118    8.0%       14092    8.0%           -26     -0.0%
+libc memory (memcpy, memset)                   12875    7.3%       12871    7.3%            -4     -0.0%
+podgate h3 (front, endpoint, limits)            3566    2.0%        3566    2.0%            -0     -0.0%
+tls (rustls, ring)                              2969    1.7%        2968    1.7%            -1     -0.0%
+libc system calls and locks                     1408    0.8%        1424    0.8%           +16      0.0%
+total                                         176226  100.0%      176280  100.0%           +54      0.0%
+
+dump 1: instructions per request of calls into libc, by the owner that called (inclusive)
+caller                                    allocator  libc system calls and locks  libc memory (memcpy, memset)
+shared pipeline                                 6303           7        3690
+other                                           8791         911         365
+h3                                              3882           0         414
+internal h2 hop: h2 crate, not told apart         469           0        3798
+podgate h3 (front, endpoint, limits)             626           0        2686
+tokio runtime                                   1664         511          32
+quinn                                            288         133         581
+internal h2 hop: server side (pingora, h2 over the accepted stream)          44           0         784
+internal h2 hop: client side (bridge.rs, h2 over the unix socket)           0           0         370
+tls (rustls, ring)                                 0           0         155
+allocator                                          0           0           0
+
+dump 2: instructions per request of calls into libc, by the owner that called (inclusive)
+caller                                    allocator  libc system calls and locks  libc memory (memcpy, memset)
+shared pipeline                                 6383           7        3674
+other                                           8513         924         357
+h3                                              3857           0         414
+internal h2 hop: h2 crate, not told apart         470           0        3826
+podgate h3 (front, endpoint, limits)             637           0        2686
+tokio runtime                                   1667         514          32
+quinn                                            282         132         575
+internal h2 hop: server side (pingora, h2 over the accepted stream)          45           0         784
+internal h2 hop: client side (bridge.rs, h2 over the unix socket)           0           0         370
+tls (rustls, ring)                                 0           0         155
+allocator                                          0           0           0

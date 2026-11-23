@@ -1,0 +1,8 @@
+run	load	connections	instructions_per_request	total_ir
+h3-c4-a	h3	4	176226	8811302553
+h3-c4-b	h3	4	176280	8813984505
+h3-c64-a	h3	64	178526	8926298508
+tls-c4-a	tls-h1	4	88736	4436788115
+tls-c4-b	tls-h1	4	88133	4406654389
+tls-c64-a	tls-h1	64	89318	4465906164
+tls-c64-b	tls-h1	64	89244	4462187938

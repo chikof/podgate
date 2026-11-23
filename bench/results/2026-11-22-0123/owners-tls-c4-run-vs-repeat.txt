@@ -1,0 +1,31 @@
+dump 1: tls-c4-a (50000 requests, owners by sym)
+dump 2: tls-c4-b (50000 requests, owners by sym)
+
+owner                                       ir/req 1     % 1    ir/req 2     % 2     2 minus 1 of dump 1
+shared pipeline                                27034   30.5%       26909   30.5%          -124     -0.1%
+other                                          21947   24.7%       21921   24.9%           -26     -0.0%
+allocator                                      15854   17.9%       15564   17.7%          -290     -0.3%
+tokio runtime                                   9411   10.6%        9278   10.5%          -133     -0.2%
+tls (rustls, ring)                              6916    7.8%        6899    7.8%           -17     -0.0%
+libc memory (memcpy, memset)                    4636    5.2%        4636    5.3%            -0     -0.0%
+h1 downstream codec (HTTPS only)                2206    2.5%        2201    2.5%            -4     -0.0%
+libc system calls and locks                      731    0.8%         724    0.8%            -7     -0.0%
+total                                          88736  100.0%       88133  100.0%          -603     -0.7%
+
+dump 1: instructions per request of calls into libc, by the owner that called (inclusive)
+caller                                    allocator  libc system calls and locks  libc memory (memcpy, memset)
+shared pipeline                                 7518           5        3915
+other                                           7172         487         263
+tokio runtime                                   1261         316           0
+h1 downstream codec (HTTPS only)                 783           0         148
+tls (rustls, ring)                               287           0         310
+allocator                                          0           0           0
+
+dump 2: instructions per request of calls into libc, by the owner that called (inclusive)
+caller                                    allocator  libc system calls and locks  libc memory (memcpy, memset)
+shared pipeline                                 7282           4        3915
+other                                           7136         482         263
+tokio runtime                                   1239         314           0
+h1 downstream codec (HTTPS only)                 767           0         148
+tls (rustls, ring)                               284           0         310
+allocator                                          0           0           0
