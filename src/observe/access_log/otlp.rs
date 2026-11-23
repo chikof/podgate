@@ -87,6 +87,11 @@ pub struct LogRecord {
     pub event_name: String,
 }
 
+// 176: a batch of 512 holds them while it is encoded; the `Vec`s and `String`s are 24 each, the
+// body and the timestamps the rest.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<LogRecord>() == 176);
+
 const INFO: (i32, &str) = (9, "INFO");
 const WARN: (i32, &str) = (13, "WARN");
 const ERROR: (i32, &str) = (17, "ERROR");

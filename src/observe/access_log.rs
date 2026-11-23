@@ -196,6 +196,12 @@ pub struct Record {
     trace: Option<Ids>,
 }
 
+// 512: it is queued behind two `Arc`s, so the size is paid once per logged request. The strings
+// are `Box<str>` (16 each, 14 of them with the optional ones), three `Vec`s (24 each), the
+// socket address (32), the times and durations, the client address (17) and the trace ids.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Record>() == 512);
+
 /// Cuts `value` to [`FIELD_MAX`] bytes at a character boundary; the flag says it was cut.
 fn clip(value: &str) -> (&str, bool) {
     if value.len() <= FIELD_MAX {
