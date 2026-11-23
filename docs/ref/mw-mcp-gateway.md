@@ -27,6 +27,7 @@ Put it on a router of its own (`{"path": "/mcp"}`, say) and declare the stages t
 | `servers[].max_concurrent` | Exchanges with the server at once. Default 32, 1 to 1024. |
 | `allowed_origins` | At most 16 origins (`scheme://host[:port]`, lower-cased) that may call the endpoint from a browser besides its own host. |
 | `tool_access` | Optional list of rules that say which tools a caller may see and call, by the claims of the caller's verified JWT. Absent: every tool is open. Present, even `[]`: a tool is closed unless a rule opens it. See `## Tool access`. |
+| `record_arguments` | Optional, default `false`. Keep the `arguments` of every `tools/call` in the audit log, secrets redacted. See `## Audit`. |
 
 Unknown fields are `invalid_middleware`. A tenant whose `max_buffer_bytes` is below what one `tools/call` reserves (6 MiB and 48 KiB: the largest client body, the request to the server, the largest result and the exchange's buffers) is refused when the snapshot compiles, naming the tenant and the bytes.
 
@@ -126,3 +127,7 @@ The table holds at most 1024 sessions per tenant and expires a session after 30 
 ## Overview
 
 `GET /v1/overview` shows the registry in the `middlewares` of the app: each server with its `name`, `address` (without its query), `timeout_ms`, `max_concurrent` and `health`, and `tools` and `skipped_tools` once a catalog is known. `health` is what the last real exchange showed: `unknown` before any, `healthy` after a good answer, `down` with a `reason` after a failure. There is no background probe; a server nobody asked about stays `unknown`. A push that leaves the declaration as it was keeps the health and the catalogs; a changed one starts over.
+
+## Audit
+
+Every `tools/call` leaves a record for the operator (who, which server and tool, the outcome, the time it took), listed on the admin socket and, with `MCP_AUDIT_FILE`, appended to a file; the operator can also send a recorded call again. Nothing changes for a client. `record_arguments: true` also keeps the call's `arguments`, up to 16 KiB, with every value under a key that looks secret replaced by `[redacted]`; results are never kept. Reference: `docs/ref/mcp-audit.md`.
