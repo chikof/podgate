@@ -303,6 +303,11 @@ spec:
                           required:
                           - name
                           - address
+                      tool_access:
+                        items:
+                          required:
+                          - tools
+                          - allow
                       type:
                         enum:
                         - mcp_gateway
@@ -1344,6 +1349,37 @@ spec:
                             description: The authentication scheme of a `header`; `Bearer` for `authorization`.
                             nullable: true
                             type: string
+                        type: object
+                      nullable: true
+                      type: array
+                    tool_access:
+                      description: |-
+                        Which tools a caller may see and call, by the claims of the token a `jwt_auth` stage
+                        earlier in the chain verified. Absent: every tool of every healthy server is open. Present,
+                        even as `[]`: a tool is open only when some rule lists it and the caller's claims hold.
+                      items:
+                        description: One rule as declared.
+                        properties:
+                          allow:
+                            additionalProperties:
+                              items:
+                                type: string
+                              type: array
+                            description: |-
+                              The claims of the caller's verified token that open them: every claim named here must
+                              hold one of its values (a string claim equal to it, or an array claim with such an
+                              item). 1 to 8 claims, 1 to 32 non-empty values each.
+                            type: object
+                          tools:
+                            description: |-
+                              The tools the rule opens: `<server>__<tool>` as the client sees the name, or
+                              `<server>__*` for every tool of that server. 1 to 64 entries.
+                            items:
+                              type: string
+                            type: array
+                        required:
+                        - tools
+                        - allow
                         type: object
                       nullable: true
                       type: array
