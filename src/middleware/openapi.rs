@@ -647,6 +647,16 @@ mod test {
     }
 
     #[test]
+    fn openapi_document_keeps_source() {
+        let paths = json!({"/pets": {"get": {"summary": "list \u{e9}"}}});
+        let document = api("3.1.0", &paths, &json!({}));
+        let compiled = Document::compile(&document).expect("compiles");
+        let again: Value = serde_json::from_str(compiled.source()).expect("source is JSON");
+        assert_eq!(again, Value::Object(document));
+        assert!(!compiled.source().contains('\n'), "compact text");
+    }
+
+    #[test]
     fn openapi_document_caps() {
         let compile = |document: Map<String, Value>| Document::compile(&document);
         // Nesting: a schema chain deeper than the cap.

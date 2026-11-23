@@ -1,6 +1,7 @@
 //! The parsed OpenAPI document of an `openapi` middleware: the one type change 0135 (the API
-//! catalog) reads. It holds what request validation needs and nothing of the original text:
-//! `info`, the path templates with their operations, and the compiled schemas.
+//! catalog) reads. It holds what request validation needs (`info`, the path templates with
+//! their operations, the compiled schemas) and the compact text of the document, which only
+//! the developer portal reads.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -267,8 +268,10 @@ impl PathTemplate {
 }
 
 /// A parsed OpenAPI document: what an `openapi` middleware enforces and what the API catalog
-/// shows. It keeps no copy of the document text.
+/// shows. It keeps the compact text of the document for the developer portal
+///, at most [`MAX_DOCUMENT_BYTES`].
 pub struct Document {
+    source: Box<str>,
     title: Box<str>,
     version: Box<str>,
     dialect: Dialect,
@@ -291,6 +294,13 @@ impl fmt::Debug for Document {
 }
 
 impl Document {
+    /// The document as compact JSON, as declared. Only the developer portal's projection
+    /// may show any of it to anyone.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     /// `info.title`.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -411,7 +421,10 @@ impl Document {
             templates.push(compiled);
         }
         templates.sort_by_key(PathTemplate::templated);
+        let source = serde_json::to_string(document)
+            .map_err(|err| bad("#", format!("the document cannot be written: {err}")))?;
         Ok(Self {
+            source: source.into_boxed_str(),
             title,
             version,
             dialect,
