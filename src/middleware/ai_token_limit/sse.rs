@@ -84,7 +84,7 @@ fn mentions_usage(event: &[u8]) -> bool {
                 .iter()
                 .skip_while(|byte| byte.is_ascii_whitespace());
             rest.next() == Some(&b':')
-                && rest.skip_while(|b| b.is_ascii_whitespace()).next() == Some(&b'{')
+                && rest.find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{')
         }
     })
 }

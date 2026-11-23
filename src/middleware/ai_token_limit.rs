@@ -1163,8 +1163,8 @@ mod test {
             streamed.response_bytes = len(body.as_bytes());
             assert_eq!(streamed.charge(), Some(held), "{usage}");
         }
-        let events = format!(
-            "data: {{\"choices\":[{{\"delta\":{{}}}}],\"usage\":null}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}}}\n\ndata: [DONE]\n\n"
+        let events = String::from(
+            "data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}\n\ndata: [DONE]\n\n",
         );
         let held = held_charge(
             Shape::Events,
@@ -1290,11 +1290,12 @@ mod test {
     }
 
     fn compiled(limits: Value, mode: &str) -> AiTokenLimit {
-        let declared: Declared = serde_json::from_value(json!({
-            "name": "t", "type": "ai_token_limit", "limits": limits,
+        let mut config = json!({
+            "name": "t", "type": "ai_token_limit",
             "source": {"header": "x-key"}, "store": "main", "on_store_error": mode,
-        }))
-        .expect("declared");
+        });
+        config["limits"] = limits;
+        let declared: Declared = serde_json::from_value(config).expect("declared");
         let app = test_app();
         let mut engine = crate::wasm::Compiler::default();
         AiTokenLimit::compile(
