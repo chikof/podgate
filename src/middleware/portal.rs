@@ -13,14 +13,14 @@
 //! listed in `PORTAL_APPS`, whose login stage verifies with exactly the issuer and key source the
 //! operator pinned ([`pin`]), compiles it; anything else refuses the whole snapshot.
 //!
-//! What a viewer sees is decided in [`access`], the only file that reads the catalog: the entries
+//! What a viewer sees is decided in `access.rs`, the only file that reads the catalog: the entries
 //! of the viewer's own tenant that are published and `preview`, `stable` or `deprecated`.
 //!
 //! | Request | Answer |
 //! |---|---|
 //! | `GET /`, `/app.js`, `/style.css` | the files of `portal/`, compiled in |
-//! | `GET /api/catalog?limit=&after=&q=` | the viewer's entries ([`list`]) |
-//! | `GET /api/catalog/{tenant}/{id}/{version}/openapi` | the portal's view of the document ([`document`]) |
+//! | `GET /api/catalog?limit=&after=&q=` | the viewer's entries (`list.rs`) |
+//! | `GET /api/catalog/{tenant}/{id}/{version}/openapi` | the portal's view of the document (`document.rs`) |
 //! | any other path | `404 {"error":"not found"}` |
 //! | another method on those paths | `405` with `allow: GET, HEAD` |
 //!

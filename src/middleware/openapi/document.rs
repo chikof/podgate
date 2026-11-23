@@ -269,7 +269,7 @@ impl PathTemplate {
 
 /// A parsed OpenAPI document: what an `openapi` middleware enforces and what the API catalog
 /// shows. It keeps the compact text of the document for the developer portal
-///, at most [`MAX_DOCUMENT_BYTES`].
+///, at most 1 MiB.
 pub struct Document {
     source: Box<str>,
     title: Box<str>,
