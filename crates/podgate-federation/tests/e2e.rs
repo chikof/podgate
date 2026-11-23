@@ -252,14 +252,26 @@ async fn federation_export_reads_live_summary() {
 }
 
 #[tokio::test]
-#[ignore = "needs 0135's GET /v1/catalog on the read socket"]
 async fn federation_export_reads_live_daemon() {
     let daemon = podgate();
     wait_for_sockets(&daemon).await;
+    let router = |name: &str, prefix: &str| json!({"name": name, "match": {"all": [{"host": "a.test"}, {"path_prefix": prefix}]}, "service": "web"});
     let snapshot = json!({
         "version": 1,
         "tenants": [{"id": "acme", "weight": 1, "budget": {"max_inflight": 10, "max_buffer_bytes": 1_048_576}}],
-        "apps": []
+        "apps": [{
+            "id": "pets", "tenant": "acme", "declared_by": "tests/pets", "tls": {"mode": "acme"},
+            "routers": [router("v1", "/v1"), router("v2", "/v2")],
+            "apis": [
+                {"id": "pets", "version": "1", "lifecycle": "deprecated", "routers": ["v1"],
+                 "sunset": "2027-03-01", "successor": {"id": "pets", "version": "2"},
+                 "title": "<script>alert(1)</script>"},
+                {"id": "pets", "version": "2", "lifecycle": "stable", "routers": ["v2"], "published": true}
+            ],
+            "revisions": [{"id": "r1", "state": "serving", "weight": 100, "services": [
+                {"name": "web", "type": "loadbalancer", "servers": [{"url": "http://203.0.113.7:80"}]}
+            ]}]
+        }]
     });
     let (status, body) =
         unix_request(&daemon.admin, "PUT", "/v1/snapshot", &snapshot.to_string()).await;
@@ -274,11 +286,37 @@ async fn federation_export_reads_live_daemon() {
     let (_, direct) = unix_request(&daemon.admin, "GET", "/v1/catalog?limit=500", "").await;
     let direct: Value = serde_json::from_slice(&direct).unwrap();
     let viewed = get(addr, &chain.op, "/v1/catalog?limit=500").await.json();
+    assert_eq!(direct["total"], 2, "{direct}");
     assert_eq!(viewed["total"], direct["total"]);
-    assert_eq!(
-        viewed["items"].as_array().unwrap().len(),
-        direct["items"].as_array().unwrap().len()
+    let (viewed_items, direct_items) = (
+        viewed["items"].as_array().unwrap(),
+        direct["items"].as_array().unwrap(),
     );
+    assert_eq!(viewed_items.len(), direct_items.len());
+    for (view, daemon) in viewed_items.iter().zip(direct_items) {
+        assert_eq!(view["cluster"], "live");
+        for field in [
+            "tenant",
+            "app",
+            "declared_by",
+            "id",
+            "version",
+            "lifecycle",
+            "routers",
+            "hosts",
+            "published",
+            "title",
+            "sunset",
+            "successor",
+        ] {
+            assert_eq!(view[field], daemon[field], "{field}");
+        }
+    }
+    assert_eq!(
+        viewed_items[0]["title"], "<script>alert(1)</script>",
+        "tenant text is a string, unchanged"
+    );
+    assert_eq!(viewed["items"][0]["lifecycle"], "deprecated");
     let (_, local) = unix_request(&daemon.admin, "GET", "/v1/overview", "").await;
     assert!(
         !String::from_utf8_lossy(&local).contains("\"cluster\""),

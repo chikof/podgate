@@ -190,7 +190,6 @@ async fn admin_read_socket_serves_only_two_gets() {
 }
 
 #[tokio::test]
-#[ignore = "needs 0135's /v1/catalog"]
 async fn admin_read_socket_catalog_route() {
     let (podgate, socket) = start_with_read_socket(&[]).await;
     let reply = call(&socket, "GET", "/v1/catalog", "").await;
@@ -202,10 +201,12 @@ async fn admin_read_socket_catalog_route() {
 #[tokio::test]
 async fn admin_read_socket_refuses_writes() {
     let (podgate, socket) = start_with_read_socket(&[]).await;
-    for method in ["PUT", "POST", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
-        let reply = call(&socket, method, SUMMARY, "").await;
-        assert_eq!(reply.status, 405, "{method}");
-        assert_eq!(reply.header("allow"), Some("GET"), "{method}");
+    for target in [SUMMARY, "/v1/catalog"] {
+        for method in ["PUT", "POST", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
+            let reply = call(&socket, method, target, "").await;
+            assert_eq!(reply.status, 405, "{method} {target}");
+            assert_eq!(reply.header("allow"), Some("GET"), "{method} {target}");
+        }
     }
     let before = podgate.admin_get("/v1/snapshot/version").await;
     assert_eq!(before.status, 200, "{}", before.body);

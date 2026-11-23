@@ -1,4 +1,4 @@
-//! The read socket: a second unix socket that serves one read route of the admin API and nothing
+//! The read socket: a second unix socket that serves two read routes of the admin API and nothing
 //! else, so a reader of it can see the fleet's counts and cannot change or probe the daemon.
 //!
 //! # Adding a route
@@ -19,7 +19,7 @@ use pingora::services::background::BackgroundService;
 use serde::Deserialize;
 use tokio::net::UnixListener;
 
-use super::{AppState, layered, not_found, overview};
+use super::{AppState, catalog, layered, not_found, overview};
 use crate::error::AppError;
 
 #[derive(Debug, Deserialize)]
@@ -43,11 +43,12 @@ async fn summary_only(request: Request, next: Next) -> Result<Response, AppError
     Ok(next.run(request).await)
 }
 
-/// Builds the read router: `GET /v1/overview?section=summary`; anything else is a JSON 404, a
+/// Builds the read router: `GET /v1/overview?section=summary` and `GET /v1/catalog`; anything else is a JSON 404, a
 /// non-`GET` method on the route is `405`, and the admin layers apply.
 pub(super) fn router(state: AppState, timeout: Duration) -> Router {
     let router = Router::new()
         .merge(overview::routes().route_layer(from_fn(summary_only)))
+        .merge(catalog::routes())
         .fallback(not_found)
         .with_state(state);
     layered(router, timeout)
