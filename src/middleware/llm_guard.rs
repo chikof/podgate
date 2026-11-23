@@ -70,7 +70,9 @@ const BODY_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) struct Config {
     /// The guards, one to eight, called in parallel.
     guards: Vec<GuardConfig>,
-    /// One bound for every call of a phase, in milliseconds (default 2000, at most 10000).
+    // One bound for every call of a phase, in milliseconds (default 2000, at most 10000). No doc
+    // comment: the CRD merges same-named properties of every kind, and the `plugin` description
+    // of `timeout_ms` must stay (deploy/crd may only gain entries).
     #[serde(default)]
     timeout_ms: Option<u64>,
     /// The most bytes of prompt that are held and judged (default and most 65536); a larger

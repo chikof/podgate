@@ -114,12 +114,7 @@ impl Gateway {
 
     /// Looks at the first batch: when it starts with the response head and a stage of the chain
     /// asks to hold, the stash to fill.
-    fn ask(
-        &self,
-        session: &Session,
-        tasks: &[HttpTask],
-        ctx: &mut Ctx,
-    ) -> Result<Held, AppError> {
+    fn ask(&self, session: &Session, tasks: &[HttpTask], ctx: &mut Ctx) -> Result<Held, AppError> {
         let Some(HttpTask::Header(head, false)) = tasks.first() else {
             return Ok(Held::Off);
         };
