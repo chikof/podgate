@@ -37,7 +37,7 @@ An app has:
 - `routers`: `name`, `declared_by`, `entry_points` (absent: every HTTP entry point), `match` (the matcher tree as written), `priority`, `chain` (middleware names, in order), `service`.
 - `revisions`: `id`, `state`, `weight`, `effective_weight` (what the picker uses now, as in explain), `inflight`, `recent`.
 - `services`: `name`, `revision` (absent for a service every revision shares), `type`, `algorithm`, `servers`. Per server: `url`, `weight`, `available`, `active` (requests in flight to it), and, only when the feature is configured, `healthy` (the active health check's verdict, with `health_check: true` on the service) and `ejected_for_ms` (while passive outlier detection holds it out, with `outlier_detection: true`).
-- `middlewares`: `name`, `type`, and `config`, which is the kind's `describe()` output. A circuit breaker shows its `phase` there.
+- `middlewares`: `name`, `type`, and `config`, which is the kind's `describe()` output. A circuit breaker shows its `phase` there. The lifecycle guard of a `draft`, `deprecated` or `retired` API (`docs/ref/catalog.md`) shows as `lifecycle:<router>` of type `lifecycle`, and in that router's `chain`; the APIs themselves are listed by `GET /v1/catalog`.
 - `recent`: `window_secs` (300), `requests` and `errors_5xx` from the same counters auto-revert and the canary read.
 
 A field of a feature that is not configured is absent, not `null`: a service without `health_check` has no `healthy`, an app without a canary has no `canary`, and a snapshot whose writer sent no name (or none yet) has no `summary.writer`.
