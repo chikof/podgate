@@ -58,6 +58,23 @@ pub struct Sources {
     pub cache: Cache,
 }
 
+impl Sources {
+    /// The exposition of these sources: what `GET /metrics` returns and what the OTLP exporter
+    /// converts.
+    #[must_use]
+    pub fn render(&self) -> String {
+        render(
+            &self.table,
+            &self.budgets,
+            &self.backends,
+            &self.upstream_policy,
+            &self.access_log,
+            &self.tracer,
+            &self.cache,
+        )
+    }
+}
+
 /// Serves `GET /metrics` on a bound TCP listener. Run it as a Pingora background service.
 ///
 /// Read-only by construction: the only route is `GET /metrics` (and `HEAD`); every other path is
@@ -94,18 +111,7 @@ impl MetricsService {
 }
 
 async fn scrape(State(sources): State<Arc<Sources>>) -> impl IntoResponse {
-    (
-        [(CONTENT_TYPE, TEXT_FORMAT)],
-        render(
-            &sources.table,
-            &sources.budgets,
-            &sources.backends,
-            &sources.upstream_policy,
-            &sources.access_log,
-            &sources.tracer,
-            &sources.cache,
-        ),
-    )
+    ([(CONTENT_TYPE, TEXT_FORMAT)], sources.render())
 }
 
 #[async_trait]

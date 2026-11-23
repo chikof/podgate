@@ -1,5 +1,5 @@
 //! The wire to the collector for one signal: an OTLP/HTTP client or an OTLP/gRPC channel
-//! ([`grpc`](super::grpc)), the timeout, and the retry loop with backoff. A signal hands it one
+//! (`grpc.rs`), the timeout, and the retry loop with backoff. A signal hands it one
 //! encoded `ExportXServiceRequest` and learns how many items the collector refused, or why the
 //! export failed; what is batched and what is dropped on failure is the signal's.
 

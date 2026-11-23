@@ -15,8 +15,11 @@
 //! The reference for operators is `docs/ref/metrics.md`.
 
 mod entry;
+mod export;
 mod listener;
+mod otlp;
 mod registry;
+mod scrape;
 mod series;
 mod table;
 mod text;
@@ -30,10 +33,16 @@ use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::TableHandle;
 
 pub use entry::{EntrySeries, InFlight};
+pub use export::{MetricsExportConfig, MetricsExportService};
 pub use listener::{MetricsService, Sources, bind};
 pub use registry::{DEFAULT_SERIES_PER_TENANT, RETENTION, Registry};
 pub use series::Series;
 pub use table::{RouteSeries, TableSeries};
+
+/// The OTLP metrics messages the exporter sends, for a collector that decodes them.
+pub mod proto {
+    pub use super::otlp::*;
+}
 
 /// The `Content-Type` of the text exposition.
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -78,6 +87,7 @@ pub fn render(
     crate::l4::udp::render(&mut out);
     out.push_str(&crate::middleware::oidc::render(&live));
     crate::h3::render(&mut out);
+    export::render(&mut out);
     table.metrics().render(&mut out, &live);
     out
 }

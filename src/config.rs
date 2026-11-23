@@ -14,6 +14,7 @@ use crate::h3;
 use crate::middleware::basic_auth::Htpasswd;
 use crate::middleware::plugin::Plugins;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
+use crate::observe::metrics::MetricsExportConfig;
 use crate::observe::tracing::ExportConfig;
 use crate::ratelimit_store::Stores;
 use crate::service::health;
@@ -104,6 +105,8 @@ const _: () =
 /// | `OTEL_EXPORTER_OTLP_COMPRESSION` | `none` | `gzip` or `none`; `grpc` only. |
 /// | `OTEL_EXPORTER_OTLP_INSECURE` | `false` | `true` allows a plaintext `grpc` endpoint that is not on loopback (logged at warn level at startup); `grpc` only. |
 /// | `OTEL_EXPORTER_OTLP_TIMEOUT` | `3000` | Milliseconds one export may take, connecting included, 1..=10000. |
+/// | `OTEL_METRICS_EXPORTER` | `none` | `none` or `otlp`. With `otlp` every series `GET /metrics` renders is also pushed to the collector of `OTEL_EXPORTER_OTLP_*` (HTTP `POST <endpoint>/v1/metrics`, or the gRPC `MetricsService/Export` call), which must be set. Never part of a snapshot. Reference: `docs/ref/metrics.md`. |
+/// | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Milliseconds between pushes, 100..=3600000. A push that fails is skipped and counted in `podgate_otlp_metrics_failed_total`; the next one carries everything. |
 /// | `OTEL_SERVICE_NAME` | `podgate` | The `service.name` of exported spans. |
 /// | `OTEL_MAX_SPANS_PER_SEC` | `1000` | Spans a second this node lets be traced, whoever asks (a traced request is two spans), 1..=1000000. Each tenant may use half of it. Requests over either cap are not traced. |
 /// | `STATIC_ROOTS_FILE` | unset | JSON file with the directories static services may serve, `{"<tenant id>": {"<root name>": "/absolute/dir"}}`, read and opened once at startup; a bad entry stops startup. Unset: no tenant has a static root. A snapshot names a root; it never supplies a path. |
@@ -193,6 +196,9 @@ pub struct Config {
     /// Where traces go and how many a node allows; see [`ExportConfig`]. No endpoint: nothing is
     /// exported.
     pub otel: ExportConfig,
+    /// Whether the metrics are also pushed over OTLP, and how often; see [`MetricsExportConfig`].
+    /// Off by default.
+    pub otel_metrics: MetricsExportConfig,
     /// File with the directories of static services, per tenant. Absent: none. Read once at
     /// startup by [`Config::static_roots`].
     pub static_roots_file: Option<PathBuf>,
@@ -254,6 +260,7 @@ impl Default for Config {
             dashboard_hosts: Vec::new(),
             tls_min_version: TlsVersion::V1_2,
             otel: ExportConfig::default(),
+            otel_metrics: MetricsExportConfig::default(),
             static_roots_file: None,
             fastcgi_file: None,
             backend_limiter_file: None,
@@ -737,6 +744,7 @@ impl Config {
             };
         }
         config.otel = ExportConfig::from_lookup(&lookup)?;
+        config.otel_metrics = MetricsExportConfig::from_lookup(&lookup, &config.otel.collector)?;
         config.static_roots_file = non_empty("STATIC_ROOTS_FILE")?.map(PathBuf::from);
         config.fastcgi_file = non_empty("FASTCGI_FILE")?.map(PathBuf::from);
         config.backend_limiter_file = non_empty("BACKEND_LIMITER_FILE")?.map(PathBuf::from);
@@ -876,6 +884,7 @@ mod test {
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
                 tls_min_version: TlsVersion::V1_3,
                 otel: ExportConfig::default(),
+                otel_metrics: MetricsExportConfig::default(),
                 catch_all_tenants: vec!["t1".into(), "t2".into()],
                 metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9100))),
                 metrics_series_per_tenant: NonZeroU32::new(50).expect("50 is not zero"),

@@ -28,6 +28,7 @@ Names carry the `podgate_` prefix. `code_class` is `1xx` to `5xx`.
 |`service_server_up`|gauge|`app`, `revision`, `service`, `server`|
 |`tls_cert_not_after_seconds`|gauge|`host`|
 |`snapshot_version`|gauge||
+|`otlp_metrics_failed_total`|counter||
 |`snapshot_applied_timestamp_seconds`|gauge||
 |`snapshot_rejected_total`|counter|`code`|
 |`metrics_collapsed_total`|counter|`tenant`|
@@ -81,3 +82,46 @@ The series live in a registry beside the routing table, not in it. When a table 
 ## Cost on the request path
 
 The handles are resolved when the table compiles (`TableSeries`, one `Arc<Series>` per router and service, indexed by the router the request matched). Recording a finished request is a handful of relaxed atomic increments per series (the status class, one histogram bucket, the latency sum): no lookup, no lock and no allocation (`metrics_hot_path_allocates_nothing` counts allocations with a counting global allocator). The registry's lock is taken when a snapshot lands and when a scrape renders, never by a request.
+
+## Export over OTLP
+
+An operator who sets `OTEL_METRICS_EXPORTER=otlp` gets every series `GET /metrics` renders pushed to an OTLP collector as well, with the same names, labels and values. This matches Traefik's `metrics.otlp`; Caddy has no such option. Code: `src/observe/metrics/{scrape,otlp,export}.rs`, on the transport every signal shares (`src/observe/otlp/`, `docs/ref/tracing-grpc.md`).
+
+### Settings
+
+Process environment only. A snapshot cannot turn the exporter on, name a collector, change the interval or reach the transport.
+
+|Variable|Default|Meaning|
+|---|---|---|
+|`OTEL_METRICS_EXPORTER`|`none`|`none` or `otlp`. Anything else (`prometheus`, `console`, a list) stops startup naming the variable, because an ignored exporter would leave the operator without metrics they believe they have. `otlp` needs `OTEL_EXPORTER_OTLP_ENDPOINT`: podgate has no default collector address.|
+|`OTEL_METRIC_EXPORT_INTERVAL`|`60000`|Milliseconds between pushes, 100..=3600000. Checked even when the exporter is `none`, so a typo is found before it is switched on.|
+
+The collector is the one the span exporter uses: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf` or `grpc`), `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_INSECURE`, `OTEL_EXPORTER_OTLP_TIMEOUT` and `OTEL_SERVICE_NAME` (the `service.name` resource attribute). They behave exactly as for spans, including the plaintext-off-loopback rule for gRPC. HTTP goes to `<endpoint>/v1/metrics` as protobuf; gRPC calls `opentelemetry.proto.collector.metrics.v1.MetricsService/Export`. There is no per-signal endpoint variable (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is not read), so the plaintext and loopback checks live in one place.
+
+### What is sent
+
+Every interval the service renders the same text `GET /metrics` serves, reads it back into families and encodes one `ExportMetricsServiceRequest` (split in halves if it would pass 4 MiB). Converting the scrape, instead of keeping a second view of the registry, means the exported names, types, labels and values are the scrape's by construction. One resource (`service.name`) and one scope (`podgate`, the crate version).
+
+|Prometheus|OTLP|
+|---|---|
+|counter|`Sum`, monotonic, cumulative temporality (`as_int` when the text is an integer)|
+|gauge, or a sample with no `# TYPE`|`Gauge`|
+|histogram|`Histogram`, cumulative temporality, explicit bounds `0.005 ... 10` seconds, 13 bucket counts (the last is the overflow), `sum` in seconds, `count`|
+
+Names are the Prometheus names, `_total` and `_seconds` included, so a dashboard or an alert written against one reads the other. `description` is the `# HELP` text and `unit` is empty. Labels are string attributes with the same keys and values. `start_time_unix_nano` is when the process started counting (counters restart at zero with the process, which is what a collector needs to know) and `time_unix_nano` is when the text was rendered.
+
+The series cap holds. The registry applies `METRICS_SERIES_PER_TENANT` and the `other` collapse before the text exists, and the exporter keeps no copy of a label, so a tenant that invents router names cannot raise the exported series count past what a scrape shows.
+
+### A collector that is down
+
+Metrics are cumulative, so a skipped interval loses nothing: the next one carries everything. Each interval therefore makes one attempt (no retry loop, which would still be running when the next interval starts), bounded by `OTEL_EXPORTER_OTLP_TIMEOUT`. A failed interval (a timeout, a refused or broken connection, `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, an HTTP `429`, `502`, `503` or `504`, any refusal, a metric too large for one message) adds one to `podgate_otlp_metrics_failed_total` and logs a warning with the reason, never the collector's own text and never a header value. An interval that is still running when the next one is due makes that one skipped, not queued. A partial success is a warning, not a failure. The counter is present with value 0 when the exporter is off, so an alert needs no existence check.
+
+There is no `exported_total`: it would change on every interval and so make the exported values differ from a scrape taken a moment later.
+
+### Cost
+
+One `render`, one parse and one encode every interval, on the blocking pool, and one connection to the collector. A scrape does the same work. A request never touches the exporter: the registry's atomics are read exactly as a scrape reads them, so a slow or dead collector costs exported points and nothing else (`otlp_metrics_collector_down_does_not_slow_requests`). On a planned stop the service sends the last interval once more.
+
+### Tests
+
+`tests/otlp_metrics.rs`, through the real binary against `tests/common/otlp.rs` (a collector that records raw OTLP calls over HTTP and gRPC, with optional mutual TLS): `otlp_metrics_match_prometheus_http`, `otlp_metrics_match_prometheus_grpc`, `otlp_metrics_grpc_tls`, `otlp_metrics_collector_down_does_not_slow_requests`, `otlp_metrics_recover`, `otlp_metrics_respect_series_cap`, `otlp_metrics_off_by_default`, `otlp_metrics_bad_settings_stop_startup`. Unit tests: `prometheus_text_*` (`scrape.rs`), `otlp_metrics_encode_*` (`otlp.rs`), `otlp_metrics_settings_*` (`export.rs`).

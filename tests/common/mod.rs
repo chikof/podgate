@@ -19,6 +19,7 @@
 pub mod dns;
 pub mod fcgi;
 pub mod grpc;
+pub mod otlp;
 pub mod pebble;
 pub mod plugin;
 pub mod valkey;

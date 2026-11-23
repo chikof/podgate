@@ -334,24 +334,21 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     }
     let admin_listener = admin::bind(&config.admin_socket)
         .with_context(|| format!("cannot bind admin socket {}", config.admin_socket.display()))?;
+    let metrics_sources = || observe::metrics::Sources {
+        table: table.clone(),
+        budgets: budgets.clone(),
+        backends: backends.clone(),
+        upstream_policy: upstream_policy.clone(),
+        access_log: access_log.clone(),
+        tracer: tracer.clone(),
+        cache: cache.clone(),
+    };
     if let Some(addr) = config.metrics_addr {
         let listener = observe::metrics::bind(addr)
             .with_context(|| format!("cannot bind METRICS_ADDR {addr}"))?;
         server.add_service(background_service(
             "metrics",
-            observe::metrics::MetricsService::new(
-                listener,
-                observe::metrics::Sources {
-                    table: table.clone(),
-                    budgets: budgets.clone(),
-                    backends: backends.clone(),
-                    upstream_policy: upstream_policy.clone(),
-                    access_log: access_log.clone(),
-                    tracer: tracer.clone(),
-                    cache: cache.clone(),
-                },
-                timeout,
-            ),
+            observe::metrics::MetricsService::new(listener, metrics_sources(), timeout),
         ));
     }
     server.add_service(background_service("acme issuer", acme));
@@ -364,6 +361,13 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     ));
     if let Some(exporter) = observe::tracing::TraceService::new(&tracer, &config.otel)? {
         server.add_service(background_service("trace exporter", exporter));
+    }
+    if let Some(exporter) = observe::metrics::MetricsExportService::new(
+        metrics_sources(),
+        &config.otel.collector,
+        config.otel_metrics,
+    )? {
+        server.add_service(background_service("metrics exporter", exporter));
     }
     server.add_service(background_service(
         "scale to zero",
