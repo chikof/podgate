@@ -23,6 +23,16 @@
 //! together. The status is the one the client got, read in `logging` from the written response;
 //! compression never changes it.
 //!
+//! # Guarded request bodies
+//!
+//! A request body is captured as the client sent it, before the middleware chain's chunk hooks.
+//! A request whose chain guards the body (`content_guard`, which redacts it) is captured after
+//! them instead, so the record holds the body the upstream received and never what the guard
+//! removed. [`replay`] sends that record straight to the upstream, never through the chain, so a
+//! redacted body is replayed once and never transformed again. A response held by a stage
+//! reaches the capture only after the stage let it through, so a blocked or refused answer is
+//! not in a record.
+//!
 //! # Cost on the hot path
 //!
 //! [`Capture`] copies body chunks as they stream past; it never holds one back, so streaming to
