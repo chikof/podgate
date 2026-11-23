@@ -43,7 +43,10 @@ use crate::sni;
 pub use export::{LogService, LogsExporter};
 use format::FIELD_MAX;
 pub use policy::{Action, Field, Format, HeaderAction, Mask, Policy};
-pub use sink::{AccessLog, AccessLogService, FileSink, LineSink, QUEUE_CAPACITY, StdoutSink};
+pub use sink::{
+    AccessLog, AccessLogService, FileSink, LineQueue, LineService, LineSink, QUEUE_CAPACITY,
+    Render, StdoutSink,
+};
 
 /// The OTLP log messages the exporter sends, for a collector that decodes them.
 pub mod proto {

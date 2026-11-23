@@ -28,19 +28,31 @@ use tokio::sync::Notify;
 
 use super::Record;
 
+/// What a [`LineService`] writes for each queued item.
+pub trait Render {
+    /// Appends the item's line, newline included, to `out`.
+    fn render(&self, out: &mut String);
+}
+
+impl Render for Record {
+    fn render(&self, out: &mut String) {
+        Self::render(self, out);
+    }
+}
+
 /// Lines the queue holds before it drops the oldest.
 pub const QUEUE_CAPACITY: usize = 8192;
 
 /// How often the file sink compares its open file with the path.
 const REOPEN_CHECK: Duration = Duration::from_secs(1);
 
-type Queue = VecDeque<Arc<Record>>;
+type Queue<T = Record> = VecDeque<Arc<T>>;
 
 /// One bounded queue of records with its counters. The line writer and the OTLP exporter each
 /// drain a lane of their own, so neither can slow the other.
 #[derive(Debug)]
-pub(super) struct Lane {
-    queue: Mutex<Queue>,
+pub(super) struct Lane<T = Record> {
+    queue: Mutex<Queue<T>>,
     wake: Notify,
     capacity: usize,
     /// Queued records at which the consumer is woken: the line writer takes every record as it
@@ -50,7 +62,7 @@ pub(super) struct Lane {
     dropped: AtomicU64,
 }
 
-impl Lane {
+impl<T> Lane<T> {
     fn new(capacity: usize, wake_at: usize) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::new()),
@@ -62,12 +74,12 @@ impl Lane {
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Queue> {
+    fn lock(&self) -> MutexGuard<'_, Queue<T>> {
         self.queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queues `record`; never waits. A full queue drops its oldest record and counts it.
-    fn push(&self, record: Arc<Record>) {
+    fn push(&self, record: Arc<T>) {
         let (evicted, len) = {
             let mut queue = self.lock();
             let evicted = (queue.len() >= self.capacity)
@@ -85,12 +97,12 @@ impl Lane {
     }
 
     /// Swaps the queued records with `spare`, which must be empty.
-    fn swap(&self, spare: &mut Queue) {
+    fn swap(&self, spare: &mut Queue<T>) {
         std::mem::swap(&mut *self.lock(), spare);
     }
 
     /// Removes up to `max` records, oldest first.
-    pub(super) fn take(&self, max: usize) -> Vec<Arc<Record>> {
+    pub(super) fn take(&self, max: usize) -> Vec<Arc<T>> {
         let mut queue = self.lock();
         let count = max.min(queue.len());
         queue.drain(..count).collect()
@@ -213,10 +225,56 @@ impl AccessLog {
     /// The background service that drains this queue into `sink`; register it with the server.
     #[must_use]
     pub fn service(&self, sink: Box<dyn LineSink>) -> AccessLogService {
-        AccessLogService {
-            log: self.clone(),
-            sink: Mutex::new(Some(sink)),
+        LineService::new(Arc::clone(&self.lines), sink, "access log")
+    }
+}
+
+/// A bounded queue of items for a [`LineService`] to write, with the counters of the access log's
+/// lane: [`Self::record`] never waits, and a full queue drops its oldest item and counts it.
+/// Cheap to clone; every clone is the same queue.
+#[derive(Debug)]
+pub struct LineQueue<T> {
+    lane: Arc<Lane<T>>,
+}
+
+impl<T> Clone for LineQueue<T> {
+    fn clone(&self) -> Self {
+        Self {
+            lane: Arc::clone(&self.lane),
         }
+    }
+}
+
+impl<T> LineQueue<T> {
+    /// A queue of `capacity` items (at least one).
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            lane: Lane::new(capacity, 1),
+        }
+    }
+
+    /// Queues `item`; never waits for the sink.
+    pub fn record(&self, item: Arc<T>) {
+        self.lane.push(item);
+    }
+
+    /// Lines written to the sink so far.
+    #[must_use]
+    pub fn written(&self) -> u64 {
+        self.lane.done.load(Ordering::Relaxed)
+    }
+
+    /// Lines dropped so far: evicted from a full queue, or lost with a failed write.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.lane.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The service that drains this queue into `sink`; `what` names the log in warnings.
+    #[must_use]
+    pub fn service(&self, sink: Box<dyn LineSink>, what: &'static str) -> LineService<T> {
+        LineService::new(Arc::clone(&self.lane), sink, what)
     }
 }
 
@@ -246,6 +304,7 @@ impl LineSink for StdoutSink {
 #[derive(Debug)]
 pub struct FileSink {
     path: PathBuf,
+    mode: u32,
     open: Option<(File, u64)>,
     checked: Instant,
     recheck: Duration,
@@ -258,9 +317,19 @@ impl FileSink {
         Self::rechecking(path, REOPEN_CHECK)
     }
 
+    /// [`Self::new`] creating the file with permission bits `mode`.
+    #[must_use]
+    pub fn with_mode(path: PathBuf, mode: u32) -> Self {
+        Self {
+            mode,
+            ..Self::new(path)
+        }
+    }
+
     fn rechecking(path: PathBuf, recheck: Duration) -> Self {
         Self {
             path,
+            mode: 0o640,
             open: None,
             checked: Instant::now(),
             recheck,
@@ -271,7 +340,7 @@ impl FileSink {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .mode(0o640)
+            .mode(self.mode)
             .open(&self.path)?;
         let inode = file.metadata()?.ino();
         self.open = Some((file, inode));
@@ -298,29 +367,35 @@ impl LineSink for FileSink {
     fn write(&mut self, lines: &[u8]) -> io::Result<()> {
         self.follow_rotation()?;
         let Some((file, _)) = self.open.as_mut() else {
-            return Err(io::Error::other("access log file is not open"));
+            return Err(io::Error::other("log file is not open"));
         };
         file.write_all(lines).inspect_err(|_| self.open = None)
     }
 }
 
-/// Drains an [`AccessLog`] into its sink until shutdown.
-pub struct AccessLogService {
-    log: AccessLog,
+/// Drains a queue into its sink until shutdown.
+pub struct LineService<T = Record> {
+    lane: Arc<Lane<T>>,
     sink: Mutex<Option<Box<dyn LineSink>>>,
+    what: &'static str,
 }
 
-impl std::fmt::Debug for AccessLogService {
+/// The service that drains an [`AccessLog`].
+pub type AccessLogService = LineService<Record>;
+
+impl<T> std::fmt::Debug for LineService<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AccessLogService").finish_non_exhaustive()
+        f.debug_struct("LineService")
+            .field("what", &self.what)
+            .finish_non_exhaustive()
     }
 }
 
 /// Formats `batch` and writes it; returns the sink, the emptied batch and the result.
-fn flush(
+fn flush<T: Render>(
     mut sink: Box<dyn LineSink>,
-    mut batch: Queue,
-) -> (Box<dyn LineSink>, Queue, usize, io::Result<()>) {
+    mut batch: Queue<T>,
+) -> (Box<dyn LineSink>, Queue<T>, usize, io::Result<()>) {
     let lines = batch.len();
     let mut text = String::new();
     for record in &batch {
@@ -331,18 +406,25 @@ fn flush(
     (sink, batch, lines, result)
 }
 
-impl AccessLogService {
+impl<T> LineService<T> {
+    fn new(lane: Arc<Lane<T>>, sink: Box<dyn LineSink>, what: &'static str) -> Self {
+        Self {
+            lane,
+            sink: Mutex::new(Some(sink)),
+            what,
+        }
+    }
+
     fn account(&self, lines: usize, result: &io::Result<()>, failing: &mut bool) {
-        let count = u64::try_from(lines).unwrap_or(u64::MAX);
         match result {
             Ok(()) => {
                 *failing = false;
-                self.log.lines.done.fetch_add(count, Ordering::Relaxed);
+                self.lane.delivered(lines);
             }
             Err(err) => {
-                self.log.lines.dropped.fetch_add(count, Ordering::Relaxed);
+                self.lane.lost(lines);
                 if !std::mem::replace(failing, true) {
-                    tracing::warn!(error = %err, "access log sink failed; its lines are dropped");
+                    tracing::warn!(error = %err, "{} sink failed; its lines are dropped", self.what);
                 }
             }
         }
@@ -350,7 +432,7 @@ impl AccessLogService {
 }
 
 #[async_trait]
-impl BackgroundService for AccessLogService {
+impl<T: Render + Send + Sync + 'static> BackgroundService for LineService<T> {
     async fn start(&self, mut shutdown: ShutdownWatch) {
         let taken = self
             .sink
@@ -359,13 +441,13 @@ impl BackgroundService for AccessLogService {
             .take();
         let Some(mut sink) = taken else { return };
         // `take` swaps: the live queue gets the emptied `spare` back, so it keeps its capacity.
-        let mut spare = Queue::new();
+        let mut spare = Queue::<T>::new();
         let mut failing = false;
         loop {
-            self.log.lines.swap(&mut spare);
+            self.lane.swap(&mut spare);
             if spare.is_empty() {
                 tokio::select! {
-                    () = self.log.lines.woken() => continue,
+                    () = self.lane.woken() => continue,
                     _ = shutdown.changed() => break,
                 }
             }
@@ -379,14 +461,14 @@ impl BackgroundService for AccessLogService {
                         self.account(lines, &result, &mut failing);
                     }
                     Err(err) => {
-                        tracing::error!(error = %err, "access log writer stopped");
+                        tracing::error!(error = %err, "{} writer stopped", self.what);
                         return;
                     }
                 },
                 _ = shutdown.changed() => return,
             }
         }
-        self.log.lines.swap(&mut spare);
+        self.lane.swap(&mut spare);
         if !spare.is_empty() {
             let (_, _, lines, result) = flush(sink, spare);
             self.account(lines, &result, &mut failing);
