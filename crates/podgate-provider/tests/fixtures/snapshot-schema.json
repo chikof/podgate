@@ -70,6 +70,101 @@
       ],
       "type": "object"
     },
+    "Api": {
+      "additionalProperties": false,
+      "description": "One API of an app: a catalog entry with a version and a lifecycle stage. The\ncatalog describes and enforces the lifecycle on the routers it names; which version a request\nreaches stays the routers' decision.",
+      "properties": {
+        "description": {
+          "description": "A description, at most 2048 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The API's id, 1 to 128 bytes of `A-Z a-z 0-9 . _ -`. With `version` it is unique among\nthe tenant's APIs.",
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/Lifecycle",
+          "description": "Where the API is in its life: it decides what the named routers answer."
+        },
+        "openapi": {
+          "description": "The name of an `openapi` middleware of this app that describes the API. The catalog shows\nthe document's title, version and operation count.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "published": {
+          "default": false,
+          "description": "The tenant's consent to list the API on the developer portal. The operator's\ncatalog lists every API either way. Default `false`.",
+          "type": "boolean"
+        },
+        "routers": {
+          "description": "The routers of this app that serve the API: one to 64, and no router is in two APIs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "successor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The API that replaces this one, of the same tenant. Allowed for `deprecated` and\n`retired`. Sent as a `Link` with `rel=\"successor-version\"` when the successor has a router\nwith a path."
+        },
+        "sunset": {
+          "description": "The day the API is expected to stop answering, `YYYY-MM-DD`, UTC. Required for\n`deprecated`, allowed for `retired`, refused for the other stages. Sent as `Sunset`\n(RFC 8594) while the API is `deprecated`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A human title, at most 256 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The version, 1 to 64 bytes of `A-Z a-z 0-9 . _ + -`, such as `v2` or `2026-05-01`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "lifecycle",
+        "routers"
+      ],
+      "type": "object"
+    },
+    "ApiRef": {
+      "additionalProperties": false,
+      "description": "A reference to another API of the same tenant.",
+      "properties": {
+        "id": {
+          "description": "The [`Api::id`].",
+          "type": "string"
+        },
+        "version": {
+          "description": "The [`Api::version`].",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "App": {
       "description": "One app: the unit of tenancy and deployment. It owns its routers, middlewares, services and\ntransports; every name resolves inside the app only.",
       "properties": {
@@ -77,6 +172,13 @@
           "default": false,
           "description": "Serve TLS requests whose `Host` differs from the SNI. Absent: refuse them\nwith `421`.",
           "type": "boolean"
+        },
+        "apis": {
+          "description": "The APIs the app serves, as catalog entries with a version and a lifecycle.\nAbsent: the app declares none, and `GET /v1/catalog` lists nothing for it.",
+          "items": {
+            "$ref": "#/$defs/Api"
+          },
+          "type": "array"
         },
         "canary": {
           "anyOf": [
@@ -533,6 +635,36 @@
         }
       },
       "type": "object"
+    },
+    "Lifecycle": {
+      "description": "Where an [`Api`] is in its life.",
+      "oneOf": [
+        {
+          "const": "draft",
+          "description": "Not released: the named routers answer `404`.",
+          "type": "string"
+        },
+        {
+          "const": "preview",
+          "description": "Released for early use; the routers serve as they are.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
+          "description": "Released; the routers serve as they are.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Still served, with `Deprecation`, `Sunset` and the successor `Link` on its responses.",
+          "type": "string"
+        },
+        {
+          "const": "retired",
+          "description": "Ended: the named routers answer `410`.",
+          "type": "string"
+        }
+      ]
     },
     "Observability": {
       "description": "Snapshot-wide observability settings; a router may override them per router.",
