@@ -239,6 +239,16 @@ spec:
                       enum:
                       - node
                       - cluster
+                    source:
+                      properties:
+                        ip:
+                          properties:
+                            depth:
+                              maximum: 65535
+                              minimum: 1
+                            ipv6_subnet_bits:
+                              maximum: 255
+                              minimum: 0
                   required:
                   - amount
                   - source
@@ -367,6 +377,16 @@ spec:
                       - hour
                       - day
                       - month
+                    source:
+                      properties:
+                        ip:
+                          properties:
+                            depth:
+                              maximum: 65535
+                              minimum: 1
+                            ipv6_subnet_bits:
+                              maximum: 255
+                              minimum: 0
                     store_timeout_ms:
                       maximum: 65535
                       minimum: 0
@@ -399,6 +419,16 @@ spec:
                       enum:
                       - node
                       - cluster
+                    source:
+                      properties:
+                        ip:
+                          properties:
+                            depth:
+                              maximum: 65535
+                              minimum: 1
+                            ipv6_subnet_bits:
+                              maximum: 255
+                              minimum: 0
                     store_timeout_ms:
                       maximum: 65535
                       minimum: 0
@@ -1155,7 +1185,44 @@ spec:
                     description: Share entries between the revisions of the app; default `false`.
                     type: boolean
                   source:
-                    x-kubernetes-preserve-unknown-fields: true
+                    description: A `source` as written in a snapshot.
+                    oneOf:
+                    - required:
+                      - ip
+                    - required:
+                      - header
+                    - required:
+                      - host
+                    - required:
+                      - jwt_claim
+                    properties:
+                      header:
+                        type: string
+                      host:
+                        type: boolean
+                      ip:
+                        description: 'A `source.ip` as written in a snapshot: Traefik''s `ipStrategy`, plus the IPv6 prefix.'
+                        properties:
+                          depth:
+                            maximum: 65535
+                            minimum: 1
+                            nullable: true
+                            type: integer
+                          excluded:
+                            items:
+                              description: An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.
+                              type: string
+                            type: array
+                          ipv6_subnet_bits:
+                            description: Prefix length an IPv6 client is counted by; default [`DEFAULT_IPV6_SUBNET_BITS`].
+                            maximum: 255
+                            minimum: 0
+                            nullable: true
+                            type: integer
+                        type: object
+                      jwt_claim:
+                        type: string
+                    type: object
                   source_range:
                     items:
                       description: An IPv4 or IPv6 address, or a CIDR block such as `10.0.0.0/8`.
