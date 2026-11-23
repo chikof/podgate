@@ -70,11 +70,9 @@ const BODY_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) struct Config {
     /// The guards, one to eight, called in parallel.
     guards: Vec<GuardConfig>,
-    // One bound for every call of a phase, in milliseconds (default 2000, at most 10000). No doc
-    // comment: the CRD merges same-named properties of every kind, and the `plugin` description
-    // of `timeout_ms` must stay (deploy/crd may only gain entries).
+    /// The deadline of one call, 1 to 1000 and at most `REQUEST_TIMEOUT_SECS`; default 50.
     #[serde(default)]
-    timeout_ms: Option<u64>,
+    timeout_ms: Option<u32>,
     /// The most bytes of prompt that are held and judged (default and most 65536); a larger
     /// prompt is refused with `413`.
     #[serde(default)]
@@ -466,7 +464,7 @@ impl Kind for LlmGuard {
                 "`guards` lists one to {MAX_GUARDS} guards"
             )));
         }
-        let timeout_ms = config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let timeout_ms = config.timeout_ms.map_or(DEFAULT_TIMEOUT_MS, u64::from);
         if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
             return Err(invalid(format!("`timeout_ms` is in 1..={MAX_TIMEOUT_MS}")));
         }
