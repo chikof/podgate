@@ -149,6 +149,18 @@ pub enum AppError {
     /// `502`. The answer is never passed on.
     #[error("unreadable response")]
     GuardResponseUnreadable,
+    /// A `content_guard` rule or its classifier matched a `block`: `403`. The body names the
+    /// rule's `category` and never what matched.
+    #[error("blocked by content guard")]
+    ContentBlocked(Box<str>),
+    /// A `content_guard` request body cannot be scanned (not JSON-typed, or encoded, or a tunnel):
+    /// `415`. The request is never passed on.
+    #[error("unsupported media type")]
+    UnsupportedMediaType,
+    /// A `content_guard` response cannot be scanned (not JSON-typed, encoded, a tunnel, or not
+    /// valid JSON): `502`. The response is never passed on.
+    #[error("upstream response cannot be scanned")]
+    UpstreamResponseUnscannable,
     /// A `jwt_auth` stage found no valid token: `401` with a `WWW-Authenticate` challenge. The body
     /// never says which check failed; `reason` is for the access log.
     #[error("unauthorized")]
@@ -301,10 +313,11 @@ impl AppError {
             Self::ExpectationFailed => StatusCode::EXPECTATION_FAILED,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::HeadersTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            Self::UpstreamResponseTooLarge | Self::GuardResponseUnreadable => {
-                StatusCode::BAD_GATEWAY
-            }
-            Self::GuardBlocked { .. } => StatusCode::FORBIDDEN,
+            Self::UpstreamResponseTooLarge
+            | Self::GuardResponseUnreadable
+            | Self::UpstreamResponseUnscannable => StatusCode::BAD_GATEWAY,
+            Self::GuardBlocked { .. } | Self::ContentBlocked(_) => StatusCode::FORBIDDEN,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Fastcgi(failure) => failure.status(),
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -411,6 +424,8 @@ impl AppError {
             Self::GuardUnavailable => "guard_unavailable",
             Self::GuardSaturated => "guard_saturated",
             Self::GuardResponseUnreadable => "guard_unreadable_response",
+            Self::ContentBlocked(_) => "content_blocked",
+            Self::UnsupportedMediaType | Self::UpstreamResponseUnscannable => "content_unscannable",
             Self::AuthOverBudget => "auth_over_budget",
             Self::JwtUnauthorized { reason } | Self::JwtForbidden { reason } => reason,
             Self::JwtUnavailable => "jwks_unavailable",
@@ -444,6 +459,9 @@ impl AppError {
             Self::GuardBlocked {
                 category: Some(category),
             } => json!({ "error": self.to_string(), "category": category }),
+            Self::ContentBlocked(category) => {
+                json!({ "error": self.to_string(), "category": category })
+            }
             _ => json!({ "error": self.to_string() }),
         }
     }

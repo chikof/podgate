@@ -12,6 +12,7 @@ use crate::entry::{self, EntryPoint};
 use crate::fairq::Settings as BackendLimiterSettings;
 use crate::h3;
 use crate::middleware::basic_auth::Htpasswd;
+use crate::middleware::content_guard::Classifiers;
 use crate::middleware::plugin::Plugins;
 use crate::observe::access_log::LogsExporter;
 use crate::observe::metrics::DEFAULT_SERIES_PER_TENANT;
@@ -117,6 +118,7 @@ const _: () =
 /// | `RATE_LIMIT_STORES_FILE` | unset | JSON file with the Redis-compatible stores cluster-scope `rate_limit` middlewares may use, `{"<store>": {"url": "redis[s]://host[:port]", "username": "...", "password_file": "...", "tls_ca_file": "...", "tenants": ["<tenant id>"], "max_connections": 16, "timeout_ms": 20}}`, read once at startup; a bad entry stops startup. Never part of a snapshot, which names a store and only for the tenants its entry lists. `rediss://` needs `tls_ca_file`. Unset: no cluster-scope limit can compile. Reference: `docs/ref/ratelimit-cluster.md`. |
 /// | `PLUGINS_FILE` | unset | JSON file with the out-of-process plugins `plugin` middlewares may use, `{"<plugin>": {"socket": "/run/podgate/plugins/x.sock", "tenants": ["<tenant id>"], "managed": true, "command": "/opt/x", "args": [], "env": {}, "user": "x", "group": "x", "limits": {"memory_max_bytes": 268435456, "pids_max": 64, "cpu_percent": 100}, "max_concurrent": 256}}`, read once at startup; a bad entry stops startup, as does a plugin that does not answer `Describe` within 5 seconds. Never part of a snapshot, which names a plugin and only for the tenants its entry lists. A managed plugin is started and restarted by podgate; an unmanaged one is run by the operator. Unset: no `plugin` middleware can compile. Reference: `docs/ref/mw-plugin.md`. |
 /// | `PLUGINS_CGROUP_ROOT` | unset | A delegated cgroup v2 directory in which podgate creates one cgroup per managed plugin to write its `memory.max`, `pids.max` and `cpu.max` into. Unset: a plugin entry that declares `limits` stops startup. Needs `PLUGINS_FILE`. |
+/// | `CONTENT_CLASSIFIERS_FILE` | unset | JSON file with the external text classifiers `content_guard` middlewares may name, `{"<name>": {"url": "http://10.0.0.9:8080/classify", "timeout_ms": 2000, "tenants": ["<tenant id>"], "max_concurrent": 64}}`, read once at startup; a bad entry stops startup and the reason names the entry and the field. Never part of a snapshot, which names a classifier and only one that lists the app's tenant. A classifier is an HTTP service that speaks the guard wire; no model runs inside podgate; every call is dialled through the upstream address policy. Unset: no `content_guard` can name a classifier. Reference: `docs/ref/mw-content-guard.md`. |
 /// | `STATIC_MAX_CONCURRENT_READS` | available cores times 4, at most 256 | Blocking file-system operations static services run at once, 1..=256; an operation that finds no free slot within a second answers `503` with `retry-after`. |
 /// | `CACHE_TENANT_MAX_PERCENT` | `50` | Most a tenant's response cache may hold, as a percent of its `max_buffer_bytes`, 1..=100; the upper limit for any `cache` middleware's `max_bytes`. |
 /// | `UPSTREAM_POOL_SIZE` | `128` | Idle upstream connections kept for reuse, per worker thread (one thread per core): Pingora keeps one LRU for the whole process, so the pool holds this times the thread count and evicts the least recently used past it. 1..=65536. A transport's `max_idle_per_host` is refused for the same reason. |
@@ -222,6 +224,9 @@ pub struct Config {
     /// The cgroup v2 directory managed plugins' cgroups are created in (`PLUGINS_CGROUP_ROOT`).
     /// Absent: no limits can be set and a plugin that declares any stops startup.
     pub plugins_cgroup_root: Option<PathBuf>,
+    /// File with the classifiers `content_guard` middlewares may name. Absent: none. Read once at
+    /// startup by [`Config::content_classifiers`].
+    pub content_classifiers_file: Option<PathBuf>,
     /// File-system operations static services run at once, across all tenants.
     pub static_max_concurrent_reads: NonZeroUsize,
     /// Percent of a tenant's `max_buffer_bytes` its response cache may hold at most
@@ -273,6 +278,7 @@ impl Default for Config {
             rate_limit_stores_file: None,
             plugins_file: None,
             plugins_cgroup_root: None,
+            content_classifiers_file: None,
             static_max_concurrent_reads: default_static_reads(),
             cache_tenant_max_percent: crate::cache::DEFAULT_TENANT_MAX_PERCENT,
             upstream_pool_size: DEFAULT_UPSTREAM_POOL,
@@ -443,6 +449,23 @@ impl Config {
                     var: "PLUGINS_FILE",
                     reason: format!("{}: {err}", path.display()).into(),
                 }),
+        }
+    }
+
+    /// Loads the content classifiers: the file named by `CONTENT_CLASSIFIERS_FILE`, or none when
+    /// it is unset. Nothing is contacted.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] for `CONTENT_CLASSIFIERS_FILE` when the file cannot be read or an entry is
+    /// invalid (the reason names the entry and the field).
+    pub fn content_classifiers(&self) -> Result<Classifiers, ConfigError> {
+        match &self.content_classifiers_file {
+            None => Ok(Classifiers::default()),
+            Some(path) => Classifiers::load(path).map_err(|err| ConfigError {
+                var: "CONTENT_CLASSIFIERS_FILE",
+                reason: format!("{}: {err}", path.display()).into(),
+            }),
         }
     }
 
@@ -758,6 +781,7 @@ impl Config {
         config.rate_limit_stores_file = non_empty("RATE_LIMIT_STORES_FILE")?.map(PathBuf::from);
         config.plugins_file = non_empty("PLUGINS_FILE")?.map(PathBuf::from);
         config.plugins_cgroup_root = non_empty("PLUGINS_CGROUP_ROOT")?.map(PathBuf::from);
+        config.content_classifiers_file = non_empty("CONTENT_CLASSIFIERS_FILE")?.map(PathBuf::from);
         config.dns = resolve::Settings::from_lookup(&lookup)?;
         if let Some(list) = lookup("CATCH_ALL_TENANTS") {
             config.catch_all_tenants = list
@@ -823,6 +847,10 @@ mod test {
             ("RATE_LIMIT_STORES_FILE", "/etc/podgate/limit-stores.json"),
             ("PLUGINS_FILE", "/etc/podgate/plugins.json"),
             ("PLUGINS_CGROUP_ROOT", "/sys/fs/cgroup/podgate"),
+            (
+                "CONTENT_CLASSIFIERS_FILE",
+                "/etc/podgate/content-classifiers.json",
+            ),
             ("NODE_NAME", "n1"),
             ("ACME_CA_FILE", "/etc/acme-root.pem"),
             ("ACME_DNS_ZONES", "Example.com, sub.example.org."),
@@ -882,6 +910,9 @@ mod test {
                 rate_limit_stores_file: Some(PathBuf::from("/etc/podgate/limit-stores.json")),
                 plugins_file: Some(PathBuf::from("/etc/podgate/plugins.json")),
                 plugins_cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/podgate")),
+                content_classifiers_file: Some(PathBuf::from(
+                    "/etc/podgate/content-classifiers.json"
+                )),
                 node_name: Some("n1".into()),
                 acme_ca_file: Some(PathBuf::from("/etc/acme-root.pem")),
                 acme_dns_zones: vec!["example.com".into(), "sub.example.org".into()],
@@ -955,6 +986,7 @@ mod test {
             ("RATE_LIMIT_STORES_FILE", " "),
             ("PLUGINS_FILE", " "),
             ("PLUGINS_CGROUP_ROOT", " "),
+            ("CONTENT_CLASSIFIERS_FILE", " "),
             ("CACHE_TENANT_MAX_PERCENT", "0"),
             ("CACHE_TENANT_MAX_PERCENT", "101"),
             ("CACHE_TENANT_MAX_PERCENT", "half"),

@@ -282,6 +282,7 @@ pub struct CompileContext {
     rate_limit_stores: crate::ratelimit_store::Stores,
     spiffe: crate::spiffe::Spiffe,
     plugins: crate::middleware::plugin::Plugins,
+    content_classifiers: crate::middleware::content_guard::Classifiers,
 }
 
 impl Default for CompileContext {
@@ -313,6 +314,7 @@ impl CompileContext {
             rate_limit_stores: crate::ratelimit_store::Stores::default(),
             spiffe: crate::spiffe::Spiffe::default(),
             plugins: crate::middleware::plugin::Plugins::default(),
+            content_classifiers: crate::middleware::content_guard::Classifiers::default(),
         }
     }
 
@@ -486,6 +488,23 @@ impl CompileContext {
     #[must_use]
     pub fn plugins(&self) -> &crate::middleware::plugin::Plugins {
         &self.plugins
+    }
+
+    /// The classifiers a `content_guard` middleware may name (`CONTENT_CLASSIFIERS_FILE`). Only
+    /// the operator calls this; a snapshot names a classifier and never an address.
+    #[must_use]
+    pub fn with_content_classifiers(
+        mut self,
+        classifiers: crate::middleware::content_guard::Classifiers,
+    ) -> Self {
+        self.content_classifiers = classifiers;
+        self
+    }
+
+    /// The classifiers the compiler checks `content_guard` middlewares against.
+    #[must_use]
+    pub fn content_classifiers(&self) -> &crate::middleware::content_guard::Classifiers {
+        &self.content_classifiers
     }
 
     /// Resolves servers named by host name from `resolver`'s answers. `run` installs the

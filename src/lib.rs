@@ -136,7 +136,7 @@ pub use wake::{Wake, WakeService};
 /// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
 /// bound, a TLS listener
 /// cannot be configured, the admin socket or the dashboard address cannot be bound, an
-/// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read, `PLUGINS_FILE` is invalid, or a plugin
+/// `OTEL_EXPORTER_OTLP_CERTIFICATE` file cannot be read, `PLUGINS_FILE` or `CONTENT_CLASSIFIERS_FILE` is invalid, or a plugin
 /// cannot be started or does not answer `Describe` within five seconds.
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let upstream_policy = config.upstream_policy()?;
@@ -147,6 +147,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let rate_limit_stores = config.rate_limit_stores()?;
     let spiffe = config.spiffe()?;
     let plugins = config.plugins()?;
+    let content_classifiers = config.content_classifiers()?;
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -159,6 +160,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .with_fastcgi(fastcgi)
             .with_rate_limit_stores(rate_limit_stores.clone())
             .with_plugins(plugins.clone())
+            .with_content_classifiers(content_classifiers)
             .with_resolver(resolver.clone())
             .with_spiffe(spiffe.clone()),
     )

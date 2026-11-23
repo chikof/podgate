@@ -163,6 +163,9 @@ pub struct Ctx {
     /// Whether a stage read the whole request body into the session's replay buffer, so a
     /// retry can send it to another server (`buffering`).
     pub body_held: bool,
+    /// When the recorder and the mirrors copy the request body: after the chain's chunk hooks for
+    /// a request whose body a stage guards (`content_guard`).
+    pub body_copy: middleware::BodyCopy,
     /// What the `retry` middleware keeps: the servers tried and the attempt to start next
     ///.
     pub retry: retry::Progress,
@@ -204,6 +207,18 @@ pub struct Gateway {
 }
 
 impl Gateway {
+    /// Copies a chunk of the request body for the failed-request recorder and the mirrors.
+    fn copy_request_body(&self, chunk: Option<&Bytes>, end_of_stream: bool, ctx: &mut Ctx) {
+        ctx.failures.request_chunk(chunk);
+        mirroring::tee(
+            &self.backends,
+            &self.upstream_policy,
+            chunk,
+            end_of_stream,
+            ctx,
+        );
+    }
+
     /// Creates a gateway that routes with the live table behind `table` and counts requests in
     /// `inflight`. Connecting to, writing to and reading from an upstream each give up after
     /// `upstream_timeout`.
@@ -435,6 +450,7 @@ impl Gateway {
             stores: &self.rate_limit_stores,
             policy: &self.upstream_policy,
             body_held: &mut ctx.body_held,
+            body_copy: &mut ctx.body_copy,
             reason: &mut ctx.access.reason,
             router: router.name(),
             claims: None,
@@ -601,6 +617,7 @@ impl ProxyHttp for Gateway {
             error_page: errors::Attempt::default(),
             mirror: mirroring::State::default(),
             body_held: false,
+            body_copy: middleware::BodyCopy::default(),
             retry: retry::Progress::default(),
             tunnel: extras::State::default(),
             held: hold::Held::default(),
@@ -1292,14 +1309,13 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
-        ctx.failures.request_chunk(body.as_ref());
-        mirroring::tee(
-            &self.backends,
-            &self.upstream_policy,
-            body.as_ref(),
-            end_of_stream,
-            ctx,
-        );
+        // A guarded body (`content_guard`) is copied for the recorder and the mirrors after the
+        // chain has rewritten it, so neither keeps what the guard removed; every other body is
+        // copied as the client sent it.
+        let guarded = ctx.body_copy == middleware::BodyCopy::AfterChain;
+        if !guarded {
+            self.copy_request_body(body.as_ref(), end_of_stream, ctx);
+        }
         if let Some((app, router)) = ctx.matched.and_then(|matched| ctx.table.router(matched)) {
             let read = u64::try_from(session.body_bytes_read()).unwrap_or(u64::MAX);
             let counted =
@@ -1317,6 +1333,9 @@ impl ProxyHttp for Gateway {
             if let Err(err) = chunk {
                 return Err(respond::abort(session, &err).await);
             }
+        }
+        if guarded {
+            self.copy_request_body(body.as_ref(), end_of_stream, ctx);
         }
         Ok(())
     }

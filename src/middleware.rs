@@ -46,6 +46,7 @@ pub mod buffering;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod compress;
+pub mod content_guard;
 pub mod content_type;
 pub mod digest_auth;
 pub mod errors;
@@ -98,6 +99,16 @@ pub struct CompileCx<'a> {
     pub engine: &'a mut engine::Compiler,
 }
 
+/// When the failed-request recorder and the mirrors copy a request body chunk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BodyCopy {
+    /// Before the chain's chunk hooks: the body as the client sent it.
+    #[default]
+    AsSent,
+    /// After them: the body the upstream gets, for a chain that removes content from it.
+    AfterChain,
+}
+
 /// What a request hook sees.
 pub struct RequestCx<'a> {
     /// The downstream session: request head, body and the response writer.
@@ -128,6 +139,10 @@ pub struct RequestCx<'a> {
     /// Set by a hook that read the whole request body into the session's replay buffer
     /// (`buffering`), so a second server can be sent the same body (`retry`).
     pub body_held: &'a mut bool,
+    /// Set to [`BodyCopy::AfterChain`] by a hook that rewrites or judges the request body
+    /// (`content_guard`): the failed-request recorder and the mirrors then copy the body after the
+    /// chain's chunk hooks, so they never keep what the guard removed.
+    pub body_copy: &'a mut BodyCopy,
     /// Where a hook notes why it refuses the request, for the access log's `reason`.
     pub reason: &'a mut Option<&'static str>,
     /// The name of the router that matched, for a hook that tells an extension where it runs.
@@ -1003,6 +1018,8 @@ kinds! {
 
     "llm_guard" => LlmGuard(llm_guard::LlmGuard),
 
+    "content_guard" => ContentGuard(content_guard::ContentGuard),
+
     "ip_allow_list" => IpAllowList(ip_allow_list::IpAllowList),
 
     "rate_limit" => RateLimit(rate_limit::RateLimit),
@@ -1083,6 +1100,8 @@ schemas! {
     "opa" => opa::Config,
 
     "llm_guard" => llm_guard::Config,
+
+    "content_guard" => content_guard::Config,
 
     "ip_allow_list" => ip_allow_list::Config,
 

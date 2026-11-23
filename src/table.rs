@@ -1177,6 +1177,8 @@ pub struct TableHandle {
     opas: Arc<middleware::opa::Registry>,
     // Circuits and permits of `llm_guard` middlewares; touched only by `swap`.
     llm_guards: Arc<middleware::llm_guard::Registry>,
+    // Circuits and permits of `content_guard` classifiers; touched only by `swap`.
+    content_guards: Arc<middleware::content_guard::Registry>,
     // Cached keys and counters of `jwt_auth` middlewares; touched only by `swap`.
     jwt_auths: Arc<middleware::jwt_auth::Registry>,
     // Cached provider documents, keys and counters of `oidc` middlewares; touched only by `swap`.
@@ -1362,6 +1364,7 @@ impl TableHandle {
         self.forward_auths.settle(&mut table.apps);
         self.opas.settle(&mut table.apps);
         self.llm_guards.settle(&mut table.apps);
+        self.content_guards.settle(&mut table.apps);
         self.jwt_auths.settle(&mut table.apps);
         self.oidcs.settle(&mut table.apps);
         self.mcps.settle(&mut table.apps);
