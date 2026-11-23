@@ -628,20 +628,31 @@ impl Upstream {
 }
 
 /// Answers each request on `stream` (keep-alive) until the peer closes. Requests carry no body.
+///
+/// Only bytes not yet scanned are searched for the blank line that ends a head: rescanning the
+/// whole buffer after every read made a 800 KiB head cost seconds in a debug build, which is
+/// longer than the proxy waits for an upstream answer under load.
 async fn serve_connection(mut stream: TcpStream, body: &'static str) {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     let mut seen = Vec::new();
-    let mut chunk = [0_u8; 1024];
+    let mut scanned = 0;
+    let mut chunk = [0_u8; 16 * 1024];
     loop {
-        while let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
-            seen.drain(..end + 4);
+        while let Some(at) = seen[scanned..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            seen.drain(..scanned + at + 4);
+            scanned = 0;
             if stream.write_all(response.as_bytes()).await.is_err() {
                 return;
             }
         }
+        // A blank line may straddle the next read: keep its first three bytes in the window.
+        scanned = seen.len().saturating_sub(3);
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
             Ok(read) => seen.extend_from_slice(&chunk[..read]),
