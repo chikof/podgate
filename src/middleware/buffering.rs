@@ -58,7 +58,7 @@ use podgate_model::Declared;
 pub const MAX_BUFFERED_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// How long a client has to send a request body that is being held.
-const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
+pub(super) const REQUEST_BODY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Granularity of the charge for a response of unknown length: Pingora reads an upstream body in
 /// chunks of at most this size, so the charge stays ahead of the allocation without one guard
@@ -185,7 +185,7 @@ fn len(bytes: &[u8]) -> u64 {
 }
 
 /// The declared body length, `None` for a chunked or unmarked message.
-fn declared_length(headers: &http::HeaderMap) -> Option<u64> {
+pub(super) fn declared_length(headers: &http::HeaderMap) -> Option<u64> {
     let chunked = headers
         .get_all(TRANSFER_ENCODING)
         .iter()
@@ -202,7 +202,7 @@ fn declared_length(headers: &http::HeaderMap) -> Option<u64> {
         .ok()
 }
 
-fn expects_continue(request: &RequestHeader) -> bool {
+pub(super) fn expects_continue(request: &RequestHeader) -> bool {
     request.version == http::Version::HTTP_11
         && request
             .headers
@@ -239,7 +239,10 @@ fn has_body(request: &RequestHeader, status: StatusCode) -> bool {
 }
 
 /// Reads the whole request body, so Pingora's replay buffer holds it.
-async fn read_body(session: &mut Session, max: u64) -> pingora::Result<Result<(), AppError>> {
+pub(super) async fn read_body(
+    session: &mut Session,
+    max: u64,
+) -> pingora::Result<Result<(), AppError>> {
     let mut total = 0_u64;
     while let Some(chunk) = session.read_request_body().await? {
         total = total.saturating_add(len(&chunk));

@@ -59,6 +59,7 @@ pub(crate) mod limits;
 pub mod mcp;
 pub mod oidc;
 pub mod opa;
+pub mod openapi;
 pub mod pass_tls_client_cert;
 mod path_rewrite;
 pub mod plugin;
@@ -913,6 +914,8 @@ kinds! {
     "respond" => Respond(respond::Respond),
 
     "plugin" => Plugin(plugin::Plugin),
+
+    "openapi" => Openapi(openapi::Openapi),
 }
 
 /// Generates [`schemas`] from one list: `"type" => path::Config,` for a built kind, whose
@@ -990,6 +993,8 @@ schemas! {
     "pass_tls_client_cert" => pass_tls_client_cert::Config,
 
     "grpc_web" => grpc_web::Config,
+
+    "openapi" => openapi::Config,
 }
 
 /// A compiled middleware and the name it was declared under.
