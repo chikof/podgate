@@ -1246,6 +1246,25 @@ pub struct Named {
     pub stage: Stage,
 }
 
+/// The logins of the stages before `position` in `chain` (indices into `stages`): the stages
+/// that verify a credential and fill [`RequestCx::claims`], the ones [`Kind::login`] answers
+/// for. This is the one definition of "a stage that fills verified claims", and it is broader
+/// than "a login the portal can pin": [`portal::pin::Login::Unpinnable`] still counts, because
+/// such a stage verifies and fills claims all the same. The developer portal and `tool_access`
+/// both ask it, so they cannot disagree about which stage is a login. Empty means nothing
+/// before `position` verifies an identity.
+pub(crate) fn logins_before<'a>(
+    stages: &'a [Named],
+    chain: &'a [usize],
+    position: usize,
+) -> impl Iterator<Item = portal::pin::Login> + 'a {
+    chain
+        .iter()
+        .take(position)
+        .filter_map(|earlier| stages.get(*earlier))
+        .filter_map(|named| named.stage.login())
+}
+
 /// The per-request state of a running chain: one entry per stage, created when the chain starts.
 #[derive(Debug, Default)]
 pub struct State {

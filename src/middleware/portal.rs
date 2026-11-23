@@ -428,12 +428,7 @@ pub(crate) fn check_chains(
             ) {
                 continue;
             }
-            let logins: Vec<Login> = chain
-                .iter()
-                .take(position)
-                .filter_map(|earlier| stages.get(*earlier))
-                .filter_map(|named| named.stage.login())
-                .collect();
+            let logins: Vec<Login> = super::logins_before(stages, chain, position).collect();
             let at = format!("router {router}");
             if logins.is_empty() {
                 rejected.push(Rejected::new(

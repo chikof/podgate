@@ -1174,10 +1174,11 @@ impl McpGateway {
     }
 }
 
-/// Refuses a router whose chain runs a gateway with `tool_access` and no `jwt_auth` before it:
-/// the claims the rules read are the ones a `jwt_auth` stage verified, so without one every
-/// tool would be denied, or worse, someone would later add a way to fill them. `chains` are the
-/// routers of `app` with their effective chains (indices into `stages`).
+/// Refuses a router whose chain runs a gateway with `tool_access` and no login before it: the
+/// claims the rules read are the ones a stage verified (`jwt_auth` or `oidc`, whatever
+/// [`super::logins_before`] counts), so without one every tool would be denied, or worse,
+/// someone would later add a way to fill them. `chains` are the routers of `app` with their
+/// effective chains (indices into `stages`).
 pub(crate) fn check_identity(
     app: &podgate_model::App,
     stages: &[super::Named],
@@ -1196,23 +1197,15 @@ pub(crate) fn check_identity(
             if !gateway.has_tool_access() {
                 continue;
             }
-            let verified = chain.get(..position).is_some_and(|before| {
-                before.iter().any(|earlier| {
-                    matches!(
-                        stages.get(*earlier),
-                        Some(super::Named {
-                            stage: super::Stage::JwtAuth(_),
-                            ..
-                        })
-                    )
-                })
-            });
+            let verified = super::logins_before(stages, chain, position)
+                .next()
+                .is_some();
             if !verified {
                 rejected.push(Rejected::new(
                     app,
                     format!("router {router}"),
                     invalid(format!(
-                        "middleware {name}: tool_access_requires_identity: `tool_access` reads the claims of a verified token and needs a `jwt_auth` earlier in the chain of router {router}"
+                        "middleware {name}: tool_access_requires_identity: `tool_access` reads the claims of a verified login and needs a `jwt_auth` or an `oidc` earlier in the chain of router {router}"
                     ))
                     .with("reason", "tool_access_requires_identity"),
                 ));
