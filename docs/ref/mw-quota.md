@@ -80,7 +80,7 @@ The tenant names a store and sets `limit`, `period`, `source`, `on_store_error` 
 
 ## Charging by amounts the response tells
 
-The counter behind the middleware (`podgate::ratelimit_store::quota`) has a second call for limits whose cost is known only after the response, such as the AI token limit:
+The counter behind the middleware (`podgate::ratelimit_store::quota`) has a second call for limits whose cost is known only after the response, such as the AI token limit (`ai_token_limit`, `docs/ref/mw-ai-token-limit.md`, which counts the tokens a model reports):
 
 ```rust
 let bound = counter.bind(&store, SourceId::of(material));
