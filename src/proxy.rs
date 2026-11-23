@@ -152,6 +152,10 @@ pub struct Ctx {
     pub access: access_log::Pending,
     /// Counts the request open on its entry point and records it in `logging`, under its
     /// entry point, router and service (see [`crate::observe::metrics`]).
+    ///
+    /// Must stay declared after `chain`: fields drop in order, and the open gauge falls when this
+    /// one drops, so a test that sees it at 0 knows the chain's cache fetch has ended
+    /// (`Podgate::settled` in `tests/common/mod.rs`).
     pub metrics: metrics::InFlight,
     /// The trace context of the request and its sampling verdict.
     pub trace: trace::State,
