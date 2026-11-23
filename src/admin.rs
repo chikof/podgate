@@ -12,6 +12,7 @@ mod events;
 pub(crate) mod explain;
 mod failures;
 mod health;
+mod mcp_audit;
 mod metrics;
 pub(crate) mod overview;
 mod plan;
@@ -50,6 +51,8 @@ use crate::events::EventFeed;
 use crate::failures::Failures;
 use crate::fairq::Backends;
 use crate::inflight::Inflight;
+use crate::mcp_audit::Audit;
+use crate::middleware::forward_auth;
 use crate::observe::access_log::AccessLog;
 use crate::observe::tracing::Tracer;
 use crate::outcomes::Outcomes;
@@ -78,6 +81,8 @@ pub struct AppState {
     overview_slots: Arc<Semaphore>,
     validate_slots: Arc<Semaphore>,
     writer: Writer,
+    mcp_audit: Audit,
+    mcp_client: forward_auth::Client,
 }
 
 impl AppState {
@@ -99,6 +104,8 @@ impl AppState {
             budgets: Budgets::new(),
             backends: Backends::new(),
             failures: Failures::new(),
+            mcp_audit: Audit::new(),
+            mcp_client: forward_auth::Client::new(Duration::from_secs(30)),
             cache: Cache::new(),
             upstream_policy: UpstreamPolicy::builtin(),
             access_log: AccessLog::new(),
@@ -192,6 +199,32 @@ impl AppState {
     #[must_use]
     pub fn failures(&self) -> &Failures {
         &self.failures
+    }
+
+    /// Reads and replays MCP calls from `audit`, the log the gateway shares.
+    #[must_use]
+    pub fn with_mcp_audit(mut self, audit: Audit) -> Self {
+        self.mcp_audit = audit;
+        self
+    }
+
+    /// The MCP audit log `GET /v1/apps/{app}/mcp/audit` serves.
+    #[must_use]
+    pub fn mcp_audit(&self) -> &Audit {
+        &self.mcp_audit
+    }
+
+    /// Dials the servers of an MCP replay, with the process's request timeout as its ceiling.
+    #[must_use]
+    pub fn with_mcp_client(mut self, client: forward_auth::Client) -> Self {
+        self.mcp_client = client;
+        self
+    }
+
+    /// The client an MCP replay dials with.
+    #[must_use]
+    pub fn mcp_client(&self) -> &forward_auth::Client {
+        &self.mcp_client
     }
 
     /// Reports `policy`, the upstream address policy the proxy enforces, on `GET /metrics`.
@@ -311,7 +344,8 @@ async fn not_found() -> AppError {
 /// `POST /v1/snapshot/validate`, `GET /v1/snapshot/version`, `GET /v1/schema`,
 /// `GET /v1/events`, `GET /v1/explain`, `GET /v1/overview`, `GET /v1/catalog`,
 /// `GET /v1/apps/{app}/failures`,
-/// `POST /v1/apps/{app}/failures/{id}/replay`, `POST /v1/cache/purge`;
+/// `POST /v1/apps/{app}/failures/{id}/replay`, `GET /v1/apps/{app}/mcp/audit`,
+/// `POST /v1/apps/{app}/mcp/audit/{id}/replay`, `POST /v1/cache/purge`;
 /// anything else is a JSON 404.
 ///
 /// Middleware, outermost first:
@@ -331,6 +365,7 @@ pub fn router(state: AppState, timeout: Duration) -> Router {
         .merge(events::routes())
         .merge(explain::routes())
         .merge(failures::routes())
+        .merge(mcp_audit::routes())
         .merge(overview::routes())
         .merge(catalog::routes())
         .merge(schema::routes())

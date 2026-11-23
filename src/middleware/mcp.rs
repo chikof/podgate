@@ -53,11 +53,13 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use super::{CompileCx, Flow, Kind, RequestCx, forward_auth, state};
-use crate::budget::Escaped;
+use crate::budget::{Escaped, TenantBudget};
 use crate::compile::{Invalid, Rejected};
 use crate::error::AppError;
+use crate::mcp_audit::{self, ArgumentsState, Audit, Record};
 use crate::service::Transport;
 use crate::service::resolve::Resolver;
+use crate::service::upstream_policy::UpstreamPolicy;
 use crate::table::{CompiledApp, RoutingTable};
 use podgate_model::Declared;
 use rpc::{Answer, Message, Refused};
@@ -105,6 +107,11 @@ pub(super) struct Config {
     /// even as `[]`: a tool is open only when some rule lists it and the caller's claims hold.
     #[serde(default)]
     tool_access: Option<Vec<access::RuleConfig>>,
+    /// Keep the `arguments` of every `tools/call` in the audit log (`docs/ref/mcp-audit.md`), at
+    /// most 16 KiB, with the value under any key that looks secret replaced by `[redacted]`.
+    /// Default `false`: arguments are not recorded.
+    #[serde(default)]
+    record_arguments: bool,
 }
 
 /// One registered server.
@@ -135,6 +142,10 @@ struct Parts {
     fingerprint: u64,
     /// `None`: no per-tool authorization.
     access: Option<access::Access>,
+    /// The name the middleware was declared under: what an audit record finds its gateway by.
+    name: Box<str>,
+    /// Whether the audit log keeps the arguments of a call, secrets redacted.
+    record_arguments: bool,
 }
 
 /// A compiled `mcp_gateway` middleware.
@@ -582,10 +593,14 @@ impl McpGateway {
             },
             handle: &handle,
         };
+        let trail = Trail {
+            audit: cx.audit,
+            router: cx.router,
+        };
         match method {
             "ping" => Reply::new(200, rpc::result(id, &json!({}))),
             "tools/list" => self.tools_list(&call, id, params).await,
-            "tools/call" => self.tools_call(&call, id, params).await,
+            "tools/call" => Box::pin(self.tools_call(&call, &trail, id, params)).await,
             _ => Reply::rpc(200, Some(id), rpc::METHOD_NOT_FOUND, "method not found"),
         }
     }
@@ -790,10 +805,6 @@ impl McpGateway {
     /// Whether a call of `tool` may be sent again by someone other than the caller who made it
     /// (a replay, an audit): with `tool_access`, only when some rule lists it, whatever the
     /// claims it asks for.
-    #[allow(
-        dead_code,
-        reason = "read by the audit of change 0134; covered by a unit test here"
-    )]
     fn replayable(&self, tool: &ToolRef) -> bool {
         self.0
             .access
@@ -889,7 +900,47 @@ impl McpGateway {
         }
     }
 
-    async fn tools_call(&self, call: &Call<'_>, id: &RawValue, params: Option<&RawValue>) -> Reply {
+    /// Answers a `tools/call` and leaves one audit record of it, whatever way it ends.
+    async fn tools_call(
+        &self,
+        call: &Call<'_>,
+        trail: &Trail<'_>,
+        id: &RawValue,
+        params: Option<&RawValue>,
+    ) -> Reply {
+        let started = Instant::now();
+        let mut record = Record::new(
+            call.caller.tenant,
+            call.caller.app,
+            trail.router,
+            &self.0.name,
+            "",
+        );
+        record.request_bytes = params.map_or(0, |params| len(params.get()));
+        if let Some(sub) = call
+            .caller
+            .claims
+            .and_then(|claims| claims.get("sub"))
+            .and_then(Value::as_str)
+        {
+            record.set_sub(sub);
+        }
+        record.set_session(call.caller.session);
+        let reply = self.answer(call, id, params, &mut record).await;
+        record.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        drop(trail.audit.record(record));
+        reply
+    }
+
+    /// The answer to a `tools/call`; `record` is told what happened as it goes. It starts as a
+    /// call with bad params, so a path that leaves early needs to say nothing.
+    async fn answer(
+        &self,
+        call: &Call<'_>,
+        id: &RawValue,
+        params: Option<&RawValue>,
+        record: &mut Record,
+    ) -> Reply {
         let invalid_params = |why: &str| Reply::rpc(200, Some(id), rpc::INVALID_PARAMS, why);
         let Some(mut params) = params.and_then(|params| {
             serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(params.get()).ok()
@@ -902,15 +953,24 @@ impl McpGateway {
         else {
             return invalid_params("params.name must be a string");
         };
+        record.set_name(&name);
+        let arguments = params.get("arguments").map(|raw| &**raw);
+        record.set_arguments(mcp_audit::arguments(arguments, self.0.record_arguments));
         let tool = match self.resolve(call, &name).await {
             Ok(tool) => tool,
-            Err(why) => return Self::refusal(id, &why),
+            Err(why) => {
+                refused(record, &why);
+                return Self::refusal(id, &why);
+            }
         };
-        let arguments = params.get("arguments").map(|raw| &**raw);
+        record.server = Some(tool.server.clone());
+        record.tool = Some(tool.tool.clone());
         if let Err(why) = self.authorize(&call.caller, &tool, arguments) {
+            refused(record, &why);
             return Self::refusal(id, &why);
         }
         let Some((index, spec)) = self.index_of(&tool.server) else {
+            refused(record, &Unresolved::UnknownServer);
             return Self::refusal(id, &Unresolved::UnknownServer);
         };
         let Ok(original) = serde_json::value::to_raw_value(&*tool.tool) else {
@@ -920,10 +980,7 @@ impl McpGateway {
         let Ok(params) = serde_json::to_string(&params) else {
             return invalid_params("params cannot be forwarded");
         };
-        let body = format!(
-            r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{params}}}"#,
-            rpc::UPSTREAM_ID
-        );
+        let body = call_body(&params);
         tracing::debug!(
             tenant = call.caller.tenant,
             app = call.caller.app,
@@ -934,7 +991,9 @@ impl McpGateway {
             "mcp tools/call"
         );
         // Hook point (B): the outcome of the call is known here, before it is written.
-        match self.invoke(call, index, spec, &body).await {
+        let outcome = self.invoke(call, index, spec, &body).await;
+        settle(record, &outcome);
+        match outcome {
             Outcome::Result(raw) => Reply::new(200, rpc::passthrough(id, "result", &raw)),
             Outcome::Error(raw) => Reply::new(200, rpc::passthrough(id, "error", &raw)),
             Outcome::Failed(failure) => {
@@ -1010,6 +1069,8 @@ impl Kind for McpGateway {
             origins: origins.into_boxed_slice(),
             fingerprint: state::fingerprint(declared),
             access,
+            name: declared.name.clone(),
+            record_arguments: config.record_arguments,
         })))
     }
 
@@ -1062,6 +1123,7 @@ impl Kind for McpGateway {
             "servers": servers,
             "allowed_origins": self.0.origins,
             "tool_access": self.0.access.as_ref().map(access::Access::describe),
+            "record_arguments": self.0.record_arguments,
         })
     }
 
@@ -1212,6 +1274,302 @@ pub(crate) fn render(out: &mut String, live: &RoutingTable, per_tenant: usize) {
             "podgate_mcp_denied_total{{tenant=\"{}\",app=\"other\"}} {count}",
             Escaped(tenant)
         );
+    }
+}
+
+/// Where a `tools/call` is audited: the log and the router that carried the request.
+struct Trail<'a> {
+    audit: &'a Audit,
+    router: &'a str,
+}
+
+fn len(text: &str) -> u64 {
+    u64::try_from(text.len()).unwrap_or(u64::MAX)
+}
+
+/// The `tools/call` request a server is sent, with `params` as its params.
+fn call_body(params: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{params}}}"#,
+        rpc::UPSTREAM_ID
+    )
+}
+
+/// Notes in `record` that the name did not lead to a tool the call could be sent to.
+fn refused(record: &mut Record, why: &Unresolved) {
+    match why {
+        Unresolved::UnknownServer | Unresolved::UnknownTool => {
+            record.outcome = mcp_audit::Outcome::RpcError;
+            record.reason = Some("unknown_tool");
+        }
+        Unresolved::Denied => {
+            record.outcome = mcp_audit::Outcome::Denied;
+            record.reason = None;
+        }
+        Unresolved::Unavailable(server, failure) => {
+            record.outcome = mcp_audit::Outcome::UpstreamFailed;
+            record.reason = Some(failure.code());
+            record.server = Some(server.clone());
+        }
+    }
+}
+
+/// Whether a result says `isError: true`. The result is only scanned, never kept.
+fn is_tool_error(raw: &RawValue) -> bool {
+    #[derive(Deserialize)]
+    struct Flag {
+        #[serde(rename = "isError", default)]
+        is_error: bool,
+    }
+    raw.get().contains("isError")
+        && serde_json::from_str::<Flag>(raw.get()).is_ok_and(|flag| flag.is_error)
+}
+
+/// The JSON-RPC `code` of an error a server answered.
+fn error_code(raw: &RawValue) -> Option<i64> {
+    #[derive(Deserialize)]
+    struct Code {
+        code: i64,
+    }
+    serde_json::from_str::<Code>(raw.get())
+        .ok()
+        .map(|code| code.code)
+}
+
+/// Notes in `record` what the server said.
+fn settle(record: &mut Record, outcome: &Outcome) {
+    match outcome {
+        Outcome::Result(raw) => {
+            record.response_bytes = len(raw.get());
+            record.outcome = if is_tool_error(raw) {
+                mcp_audit::Outcome::ToolError
+            } else {
+                mcp_audit::Outcome::Ok
+            };
+            record.reason = None;
+        }
+        Outcome::Error(raw) => {
+            record.response_bytes = len(raw.get());
+            record.outcome = mcp_audit::Outcome::RpcError;
+            record.reason = Some("server");
+            record.rpc_code = error_code(raw);
+        }
+        Outcome::Failed(failure) => {
+            record.outcome = mcp_audit::Outcome::UpstreamFailed;
+            record.reason = Some(failure.code());
+        }
+    }
+}
+
+/// What an operator's replay of a recorded call needs from the admin side.
+pub struct Replay<'a> {
+    /// The app of the live table the record belongs to.
+    pub app: &'a CompiledApp,
+    /// Dials the server.
+    pub client: &'a forward_auth::Client,
+    /// The operator's upstream address policy.
+    pub policy: &'a UpstreamPolicy,
+    /// The tenant's budget; without one nothing is sent.
+    pub budget: Option<&'a Arc<TenantBudget>>,
+    /// Where the replay is audited.
+    pub audit: &'a Audit,
+    /// The call to send again.
+    pub record: &'a Record,
+    /// `force=true`: send a tool its server does not mark `readOnlyHint`.
+    pub force: bool,
+}
+
+/// Why a replay was refused before anything was sent.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReplayError {
+    /// The call never reached a server (denied, or the name did not resolve).
+    NotReplayable,
+    /// The arguments are not kept whole: redacted, not recorded or too large.
+    RedactedArguments(ArgumentsState),
+    /// The app no longer has the `mcp_gateway` the call went through.
+    GatewayGone,
+    /// The server is no longer in the registry.
+    ServerGone,
+    /// The server no longer lists the tool.
+    ToolGone,
+    /// Authorization says nobody may call the tool ([`McpGateway::replayable`]).
+    NotPermitted,
+    /// The tool is not marked `readOnlyHint` and `force` is not set.
+    NeedsForce,
+    /// The tenant has no in-flight slot or budget left.
+    Busy,
+    /// A request head could not be built.
+    Internal,
+}
+
+/// What a replay got from the server.
+#[derive(Debug)]
+pub enum ReplayAnswer {
+    /// The server's `result`, as it came.
+    Result(Box<RawValue>),
+    /// The server's JSON-RPC `error`, as it came.
+    Error(Box<RawValue>),
+    /// The exchange failed with this code ([`Failure::code`]).
+    Failed(&'static str),
+}
+
+/// A replay that was sent and audited.
+#[derive(Debug)]
+pub struct Replayed {
+    /// The `seq` of the record of the replay.
+    pub audit_seq: u64,
+    /// How it ended.
+    pub outcome: mcp_audit::Outcome,
+    /// Why, as in the record.
+    pub reason: Option<&'static str>,
+    /// What the server said.
+    pub answer: ReplayAnswer,
+}
+
+/// Sends the call of `replay.record` again to the server it went to, through the gateway of the
+/// live app that carried it, and audits the new call with `replay_of`. See
+/// `docs/ref/mcp-audit.md`.
+///
+/// # Errors
+///
+/// [`ReplayError`] when the replay is refused before anything is sent.
+pub async fn replay(replay: Replay<'_>) -> Result<Replayed, ReplayError> {
+    let record = replay.record;
+    let (Some(server), Some(tool)) = (record.server.as_deref(), record.tool.as_deref()) else {
+        return Err(ReplayError::NotReplayable);
+    };
+    if record.outcome == mcp_audit::Outcome::Denied {
+        return Err(ReplayError::NotReplayable);
+    }
+    if !matches!(
+        record.arguments_state,
+        ArgumentsState::Absent | ArgumentsState::Kept
+    ) {
+        return Err(ReplayError::RedactedArguments(record.arguments_state));
+    }
+    let gateway = replay
+        .app
+        .stages()
+        .iter()
+        .find_map(|named| match &named.stage {
+            super::Stage::McpGateway(gateway) if *named.name == *record.middleware => Some(gateway),
+            _ => None,
+        })
+        .ok_or(ReplayError::GatewayGone)?;
+    gateway.replay(&replay, server, tool).await
+}
+
+impl McpGateway {
+    /// [`replay`] on the gateway the record went through. The (server, tool) pair is looked up in
+    /// the registry and the server's catalog as they are now, never taken from text.
+    async fn replay(
+        &self,
+        replay: &Replay<'_>,
+        server: &str,
+        tool: &str,
+    ) -> Result<Replayed, ReplayError> {
+        let (index, spec) = self.index_of(server).ok_or(ReplayError::ServerGone)?;
+        let _slot = replay
+            .budget
+            .and_then(TenantBudget::admit)
+            .ok_or(ReplayError::Busy)?;
+        let head = RequestHeader::build("POST", b"/", None).map_err(|_| ReplayError::Internal)?;
+        let handle = Handle {
+            id: "replay".into(),
+            upstreams: Arc::default(),
+        };
+        let tenant = replay.app.tenant();
+        let call = Call {
+            caller: Caller {
+                tenant,
+                app: replay.app.id(),
+                session: "replay",
+                head: &head,
+                claims: None,
+            },
+            env: Env {
+                client: replay.client,
+                policy: replay.policy,
+                resolver: &self.0.resolver,
+                transport: &self.0.transport,
+                tenant,
+                budget: replay.budget,
+                runtime: &self.0.runtime,
+            },
+            handle: &handle,
+        };
+        let mut record = Record::new(
+            tenant,
+            replay.app.id(),
+            "",
+            &replay.record.middleware,
+            &tools::qualify(server, tool),
+        );
+        record.server = Some(spec.name.clone());
+        record.tool = Some(tool.into());
+        record.replay_of = Some(replay.record.seq);
+        record.set_arguments(mcp_audit::Arguments {
+            state: replay.record.arguments_state,
+            value: replay.record.arguments.clone(),
+        });
+        let started = Instant::now();
+        let catalog = match self.catalog(&call, index).await {
+            Ok(catalog) => catalog,
+            Err(failure) => {
+                let outcome = Outcome::Failed(failure);
+                return Ok(self.sent(replay, record, started, outcome));
+            }
+        };
+        let found = catalog
+            .iter()
+            .find(|listed| &*listed.name == tool)
+            .ok_or(ReplayError::ToolGone)?;
+        let tool_ref = ToolRef {
+            server: spec.name.clone(),
+            tool: found.name.clone(),
+        };
+        if !self.replayable(&tool_ref) {
+            return Err(ReplayError::NotPermitted);
+        }
+        let read_only = found
+            .value
+            .pointer("/annotations/readOnlyHint")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if !(replay.force || read_only) {
+            return Err(ReplayError::NeedsForce);
+        }
+        let name = serde_json::to_string(&*found.name).map_err(|_| ReplayError::Internal)?;
+        let params = match &replay.record.arguments {
+            Some(arguments) => format!(r#"{{"name":{name},"arguments":{}}}"#, arguments.get()),
+            None => format!(r#"{{"name":{name}}}"#),
+        };
+        record.request_bytes = len(&params);
+        let outcome = self.invoke(&call, index, spec, &call_body(&params)).await;
+        Ok(self.sent(replay, record, started, outcome))
+    }
+
+    /// Audits a replay that was sent, or that failed trying, and answers it.
+    fn sent(
+        &self,
+        replay: &Replay<'_>,
+        mut record: Record,
+        started: Instant,
+        outcome: Outcome,
+    ) -> Replayed {
+        settle(&mut record, &outcome);
+        record.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let stored = replay.audit.record(record);
+        Replayed {
+            audit_seq: stored.seq,
+            outcome: stored.outcome,
+            reason: stored.reason,
+            answer: match outcome {
+                Outcome::Result(raw) => ReplayAnswer::Result(raw),
+                Outcome::Error(raw) => ReplayAnswer::Error(raw),
+                Outcome::Failed(failure) => ReplayAnswer::Failed(failure.code()),
+            },
+        }
     }
 }
 

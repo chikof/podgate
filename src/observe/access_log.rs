@@ -42,6 +42,7 @@ use crate::sni;
 
 pub use export::{LogService, LogsExporter};
 use format::FIELD_MAX;
+pub(crate) use policy::REDACTED;
 pub use policy::{Action, Field, Format, HeaderAction, Mask, Policy};
 pub use sink::{
     AccessLog, AccessLogService, FileSink, LineQueue, LineService, LineSink, QUEUE_CAPACITY,

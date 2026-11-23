@@ -82,6 +82,7 @@ pub fn render(
     crate::service::extras::render(&mut out);
     out.push_str(&crate::middleware::jwt_auth::render(&live));
     crate::middleware::mcp::render(&mut out, &live, table.metrics().series_per_tenant());
+    crate::mcp_audit::render(&mut out);
     out.push_str(&crate::router::matcher::cel_metrics(&live));
     crate::l4::tcp::render(&mut out);
     out.push_str(&crate::l4::health::render(&live));

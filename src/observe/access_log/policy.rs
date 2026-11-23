@@ -21,7 +21,7 @@ const SENSITIVE: [&str; 4] = [
 ];
 
 /// The text a redacted value is replaced by.
-pub(super) const REDACTED: &str = "[redacted]";
+pub(crate) const REDACTED: &str = "[redacted]";
 
 /// How a line is written.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

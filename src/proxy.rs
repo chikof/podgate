@@ -206,6 +206,7 @@ pub struct Gateway {
     cache: Cache,
     auth_client: middleware::forward_auth::Client,
     mcp_sessions: middleware::mcp::Sessions,
+    mcp_audit: crate::mcp_audit::Audit,
     rate_limit_stores: crate::ratelimit_store::Stores,
     alt_svc: Option<AltSvc>,
 }
@@ -247,6 +248,7 @@ impl Gateway {
             page_fetcher: errors::fetch::Fetcher::default(),
             auth_client: middleware::forward_auth::Client::new(upstream_timeout),
             mcp_sessions: middleware::mcp::Sessions::new(),
+            mcp_audit: crate::mcp_audit::Audit::new(),
             rate_limit_stores: crate::ratelimit_store::Stores::default(),
             entry: Arc::default(),
             tracer: trace::Tracer::default(),
@@ -276,6 +278,13 @@ impl Gateway {
     #[must_use]
     pub fn with_failures(mut self, failures: Failures) -> Self {
         self.failures = failures;
+        self
+    }
+
+    /// Audits every MCP `tools/call` into `audit`, the log the admin API shares.
+    #[must_use]
+    pub fn with_mcp_audit(mut self, audit: crate::mcp_audit::Audit) -> Self {
+        self.mcp_audit = audit;
         self
     }
 
@@ -451,6 +460,7 @@ impl Gateway {
             hashing: &self.basic_auth,
             auth: &self.auth_client,
             sessions: &self.mcp_sessions,
+            audit: &self.mcp_audit,
             stores: &self.rate_limit_stores,
             policy: &self.upstream_policy,
             body_held: &mut ctx.body_held,

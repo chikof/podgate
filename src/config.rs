@@ -95,6 +95,7 @@ const _: () =
 /// | `SPIFFE_ENDPOINT_SOCKET` | unset | The SPIFFE Workload API agent's unix socket (`/run/spire/sockets/agent.sock` or `unix:///...`). Needs `SPIFFE_POLICY_FILE`. Unset: no SPIFFE. |
 /// | `SPIFFE_POLICY_FILE` | unset | JSON file with the SPIFFE policy: per tenant its SVID hint, the server IDs it may talk to, the client trust domains it may verify. Needs `SPIFFE_ENDPOINT_SOCKET`. |
 /// | `ACCESS_LOG_FILE` | unset | File the access log is appended to; unset writes it to stdout. The file is reopened when its inode changes, so renaming it rotates it. Whether anything is logged is the snapshot's `observability.access_log`. |
+/// | `MCP_AUDIT_FILE` | unset | File that receives one JSON line for every MCP `tools/call` through an `mcp_gateway` (`docs/ref/mcp-audit.md`), created with mode `0600`, reopened when its inode changes. Unset: the records stay in the admin API's memory (the last 1000 per app). A path that is a directory or cannot be opened for append stops startup. |
 /// | `METRICS_ADDR` | unset | TCP address of the read-only metrics listener, which serves `GET /metrics` and nothing else. Unset: no listener. |
 /// | `METRICS_SERIES_PER_TENANT` | `500` | Metric series each tenant may own before new ones collapse into `other`, at least 1. |
 /// | `DASHBOARD_ADDR` | unset | TCP address of the read-only dashboard (a web UI over the overview and explain APIs). Unset: no dashboard. A non-loopback address needs `DASHBOARD_AUTH_FILE` or startup stops. Reference: `docs/ref/dashboard.md`. |
@@ -187,6 +188,9 @@ pub struct Config {
     pub spiffe_policy_file: Option<PathBuf>,
     /// File the access log is appended to. Absent: standard output.
     pub access_log_file: Option<PathBuf>,
+    /// File the MCP audit log is appended to, one JSON line per `tools/call`. Absent: the records
+    /// stay in the admin API's memory only. Checked at startup by [`Config::mcp_audit_sink`].
+    pub mcp_audit_file: Option<PathBuf>,
     /// TCP address of the read-only metrics listener (`GET /metrics` and nothing else). Absent:
     /// no listener; the admin socket still serves `GET /metrics`.
     pub metrics_addr: Option<SocketAddr>,
@@ -271,6 +275,7 @@ impl Default for Config {
             spiffe_endpoint_socket: None,
             spiffe_policy_file: None,
             access_log_file: None,
+            mcp_audit_file: None,
             metrics_addr: None,
             metrics_series_per_tenant: DEFAULT_SERIES_PER_TENANT,
             dashboard_addr: None,
@@ -507,6 +512,51 @@ impl Config {
                 reason: format!("{}: {err}", path.display()).into(),
             }),
         }
+    }
+
+    /// The mode of a new `MCP_AUDIT_FILE`: the operator's and nobody else's.
+    const AUDIT_FILE_MODE: u32 = 0o600;
+
+    /// The sink of `MCP_AUDIT_FILE`, or none when it is unset. The file is opened once, here, so
+    /// a path that cannot be written stops startup instead of dropping records later; a FIFO is
+    /// accepted without being opened, since opening one waits for a reader.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] naming `MCP_AUDIT_FILE` when the path is a directory or cannot be opened
+    /// for append (a missing parent directory, no permission).
+    pub fn mcp_audit_sink(
+        &self,
+    ) -> Result<Option<crate::observe::access_log::FileSink>, ConfigError> {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+        let Some(path) = &self.mcp_audit_file else {
+            return Ok(None);
+        };
+        let fail = |reason: String| ConfigError {
+            var: "MCP_AUDIT_FILE",
+            reason: format!("{}: {reason}", path.display()).into(),
+        };
+        let open = || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(Self::AUDIT_FILE_MODE)
+                .open(path)
+                .map(drop)
+                .map_err(|err| fail(err.to_string()))
+        };
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => return Err(fail("is a directory".into())),
+            Ok(meta) if meta.file_type().is_fifo() => {}
+            Ok(_) => open()?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => open()?,
+            Err(err) => return Err(fail(err.to_string())),
+        }
+        Ok(Some(crate::observe::access_log::FileSink::with_mode(
+            path.clone(),
+            Self::AUDIT_FILE_MODE,
+        )))
     }
 
     /// Loads the upstream address policy: the file named by `UPSTREAM_POLICY_FILE`, else the
@@ -778,6 +828,7 @@ impl Config {
             .map(|raw| PathBuf::from(raw.strip_prefix("unix://").unwrap_or(&raw)));
         config.spiffe_policy_file = non_empty("SPIFFE_POLICY_FILE")?.map(PathBuf::from);
         config.access_log_file = non_empty("ACCESS_LOG_FILE")?.map(PathBuf::from);
+        config.mcp_audit_file = non_empty("MCP_AUDIT_FILE")?.map(PathBuf::from);
         if let Some(raw) = non_empty("METRICS_ADDR")? {
             config.metrics_addr = Some(parse_addr("METRICS_ADDR", &raw)?);
         }
@@ -909,6 +960,7 @@ mod test {
             ),
             ("SPIFFE_POLICY_FILE", "/etc/podgate/spiffe-policy.json"),
             ("ACCESS_LOG_FILE", "/var/log/podgate/access.log"),
+            ("MCP_AUDIT_FILE", "/var/log/podgate/mcp-audit.log"),
             ("METRICS_ADDR", "127.0.0.1:9100"),
             ("METRICS_SERIES_PER_TENANT", "50"),
             ("DASHBOARD_ADDR", "127.0.0.1:9200"),
@@ -970,6 +1022,7 @@ mod test {
                 spiffe_endpoint_socket: Some(PathBuf::from("/run/spire/sockets/agent.sock")),
                 spiffe_policy_file: Some(PathBuf::from("/etc/podgate/spiffe-policy.json")),
                 access_log_file: Some(PathBuf::from("/var/log/podgate/access.log")),
+                mcp_audit_file: Some(PathBuf::from("/var/log/podgate/mcp-audit.log")),
                 tls_min_version: TlsVersion::V1_3,
                 otel: ExportConfig::default(),
                 otel_metrics: MetricsExportConfig::default(),
@@ -1049,6 +1102,7 @@ mod test {
             ("SPIFFE_ENDPOINT_SOCKET", " "),
             ("SPIFFE_POLICY_FILE", " "),
             ("ACCESS_LOG_FILE", " "),
+            ("MCP_AUDIT_FILE", " "),
             ("METRICS_ADDR", "nope"),
             ("METRICS_ADDR", " "),
             ("METRICS_SERIES_PER_TENANT", "0"),

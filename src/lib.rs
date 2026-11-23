@@ -69,6 +69,7 @@ pub mod h3;
 pub mod host;
 pub mod inflight;
 pub mod l4;
+pub mod mcp_audit;
 pub mod middleware;
 pub mod observe;
 pub mod outcomes;
@@ -130,7 +131,7 @@ pub use wake::{Wake, WakeService};
 ///
 /// # Errors
 ///
-/// Fails when `UPSTREAM_POLICY_FILE`, `STATIC_ROOTS_FILE`, `FASTCGI_FILE`, `BACKEND_LIMITER_FILE`,
+/// Fails when `UPSTREAM_POLICY_FILE`, `MCP_AUDIT_FILE`, `STATIC_ROOTS_FILE`, `FASTCGI_FILE`, `BACKEND_LIMITER_FILE`,
 /// `RATE_LIMIT_STORES_FILE` or
 /// `DASHBOARD_AUTH_FILE` is invalid, a non-loopback `DASHBOARD_ADDR` has no
 /// `DASHBOARD_AUTH_FILE`, a `udp` entry point sets `proxy_protocol`, a UDP socket cannot be
@@ -148,6 +149,14 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let spiffe = config.spiffe()?;
     let plugins = config.plugins()?;
     let content_classifiers = config.content_classifiers()?;
+    let (mcp_audit, mcp_audit_service) = match config.mcp_audit_sink()? {
+        Some(sink) => {
+            let queue = mcp_audit::Audit::queue();
+            let service = queue.service(Box::new(sink), "mcp audit log");
+            (mcp_audit::Audit::new().with_file(queue), Some(service))
+        }
+        None => (mcp_audit::Audit::new(), None),
+    };
     let dashboard_auth = config.dashboard_auth()?;
     let table = TableHandle::with_context(
         entry::CompileContext::of_entry_points(&config.entry_points)
@@ -208,6 +217,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_cache(cache.clone())
         .with_backends(backends.clone())
         .with_failures(failures.clone())
+        .with_mcp_audit(mcp_audit.clone())
         .with_wake(wake.clone())
         .with_outcomes(outcomes.clone())
         .with_upstream_policy(upstream_policy.clone())
@@ -380,6 +390,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         "access log",
         access_log.service(access_sink),
     ));
+    if let Some(service) = mcp_audit_service {
+        server.add_service(background_service("mcp audit log", service));
+    }
     if let Some(exporter) = observe::tracing::TraceService::new(&tracer, &config.otel)? {
         server.add_service(background_service("trace exporter", exporter));
     }
@@ -414,6 +427,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .with_cache(cache)
         .with_backends(backends)
         .with_failures(failures)
+        .with_mcp_audit(mcp_audit)
+        .with_mcp_client(middleware::forward_auth::Client::new(timeout))
         .with_access_log(access_log)
         .with_tracer(tracer)
         .with_upstream_policy(upstream_policy.clone())

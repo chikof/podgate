@@ -133,6 +133,8 @@ pub struct RequestCx<'a> {
     pub auth: &'a forward_auth::Client,
     /// The sessions of every `mcp_gateway` stage, bounded per tenant.
     pub sessions: &'a mcp::Sessions,
+    /// The audit log of `tools/call` (`mcp_gateway`).
+    pub audit: &'a crate::mcp_audit::Audit,
     /// The shared stores of cluster-scope `rate_limit` middlewares.
     pub stores: &'a crate::ratelimit_store::Stores,
     /// The operator's rule for the addresses the proxy may dial.
