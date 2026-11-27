@@ -94,7 +94,7 @@ tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-
 wat = "1.263.0"
 # libzstd (C) only as the reference decoder in tests: the shipped encoder is ruzstd.
 zstd = { version = "0.14.4", default-features = false }
-jsonschema = { version = "0.61.2", default-features = false }
+jsonschema = { version = "0.63.0", default-features = false }
 rustix = { version = "1.1.6", features = ["process"] }
 # Certificate validity in the SPIFFE tests (rcgen takes `time` types); already in the lock through rcgen.
 time = "0.3.55"
