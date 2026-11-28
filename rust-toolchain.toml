@@ -1,5 +1,5 @@
 # devenv (languages.rust.toolchainFile) and CI (rustup) both read this file.
 [toolchain]
-channel = "1.99.0"
+channel = "1.100.1"
 components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]
 profile = "minimal"

@@ -2,7 +2,7 @@
 # Build:  docker build -t podgate .
 # Run:    docker run --rm -p 8080:8080 -v podgate-admin:/run/podgate podgate
 
-FROM rust:1.99-slim AS build
+FROM rust:1.100-slim AS build
 # Pingora's zlib-ng build needs cmake, make and a C++ compiler (the slim image has none).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake g++ make \
